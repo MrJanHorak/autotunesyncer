@@ -1,35 +1,67 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+// App.js
+import React, { useState } from 'react';
+import axios from 'axios';
+import Dropzone from 'react-dropzone';
+import ReactPlayer from 'react-player';
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [midiFile, setMidiFile] = useState(null);
+  const [videoFiles, setVideoFiles] = useState({});
+  const [videoUrls, setVideoUrls] = useState([]);
+
+  const handleMidiUpload = (acceptedFiles) => {
+    setMidiFile(acceptedFiles[0]);
+  };
+
+  const handleVideoUpload = (instrument, acceptedFiles) => {
+    setVideoFiles({ ...videoFiles, [instrument]: acceptedFiles[0] });
+  };
+
+  const uploadMidi = async () => {
+    const formData = new FormData();
+    formData.append('midi', midiFile);
+    await axios.post('/upload-midi', formData);
+  };
+
+  const uploadVideos = async () => {
+    const formData = new FormData();
+    for (const [instrument, file] of Object.entries(videoFiles)) {
+      formData.append(instrument, file);
+    }
+    const response = await axios.post('/upload-videos', formData);
+    setVideoUrls(response.data.videoUrls);
+  };
 
   return (
-    <>
-      <div>
-        <a href="https://vitejs.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+    <div>
+      <h1>Upload MIDI File</h1>
+      <Dropzone onDrop={handleMidiUpload}>
+        {({ getRootProps, getInputProps }) => (
+          <div {...getRootProps()}>
+            <input {...getInputProps()} />
+            <p>Drag 'n' drop a MIDI file here, or click to select one</p>
+          </div>
+        )}
+      </Dropzone>
+      <button onClick={uploadMidi}>Upload MIDI</button>
+
+      <h1>Upload Video Clips</h1>
+      <Dropzone onDrop={(acceptedFiles) => handleVideoUpload('piano', acceptedFiles)}>
+        {({ getRootProps, getInputProps }) => (
+          <div {...getRootProps()}>
+            <input {...getInputProps()} />
+            <p>Drag 'n' drop a video file for piano here, or click to select one</p>
+          </div>
+        )}
+      </Dropzone>
+      <button onClick={uploadVideos}>Upload Videos</button>
+
+      <h1>Video Playback</h1>
+      {videoUrls.map((url, index) => (
+        <ReactPlayer key={index} url={url} controls />
+      ))}
+    </div>
+  );
 }
 
-export default App
+export default App;
