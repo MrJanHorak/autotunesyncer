@@ -1,5 +1,5 @@
 // App.js
-import React, { useState } from 'react';
+import { useState } from 'react';
 import axios from 'axios';
 import Dropzone from 'react-dropzone';
 import ReactPlayer from 'react-player';
@@ -18,9 +18,10 @@ function App() {
   };
 
   const uploadMidi = async () => {
+    
     const formData = new FormData();
     formData.append('midi', midiFile);
-    await axios.post('/upload-midi', formData);
+    await axios.post('http://localhost:3000/upload-midi', formData);
   };
 
   const uploadVideos = async () => {
@@ -39,18 +40,24 @@ function App() {
         {({ getRootProps, getInputProps }) => (
           <div {...getRootProps()}>
             <input {...getInputProps()} />
-            <p>Drag 'n' drop a MIDI file here, or click to select one</p>
+            <p>
+              Drag &apos;n&apos; drop a MIDI file here, or click to select one
+            </p>
           </div>
         )}
       </Dropzone>
       <button onClick={uploadMidi}>Upload MIDI</button>
 
       <h1>Upload Video Clips</h1>
-      <Dropzone onDrop={(acceptedFiles) => handleVideoUpload('piano', acceptedFiles)}>
+      <Dropzone
+        onDrop={(acceptedFiles) => handleVideoUpload('piano', acceptedFiles)}
+      >
         {({ getRootProps, getInputProps }) => (
           <div {...getRootProps()}>
             <input {...getInputProps()} />
-            <p>Drag 'n' drop a video file for piano here, or click to select one</p>
+            <p>
+              Drag &apos;n&apos; drop a MIDI file here, or click to select one
+            </p>
           </div>
         )}
       </Dropzone>
