@@ -14,6 +14,24 @@ const __dirname = dirname(__filename);
 const app = express();
 const upload = multer({ dest: 'uploads/' });
 
+const extractAudio = (videoPath, outputAudioPath) => {
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoPath)
+      .output(outputAudioPath)
+      .on('end', () => resolve(outputAudioPath))
+      .on('error', (err) => reject(err))
+      .run();
+  });
+};
+
+const tuneToMidi = async (audioPath, midiPath) => {
+  const midiData = midiParser(fs.readFileSync(midiPath));
+  const notes = extractMelodyFromMidi(midiData); // Custom function to get MIDI melody
+
+  await tunePitch.autoTune(audioPath, notes); // Tune audio to MIDI melody
+  return tunedAudioPath;
+};
+
 const drumMap = {
   35: 'Acoustic Bass Drum',
   36: 'Bass Drum 1',
@@ -72,6 +90,8 @@ app.post('/upload-midi', upload.single('midi'), (req, res) => {
   const midiFileString = midiFileBuffer.toString('binary');
   console.log('going to parse midi file');
   const midiData = midiParser(midiFileString);
+  console.log('midi file parsed');
+  // Pretty-print the entire parsed MIDI data
 
   // Extract track names, instruments, and meta events
   const trackInfo = midiData.tracks.map((track, index) => {
@@ -130,13 +150,34 @@ app.post('/upload-midi', upload.single('midi'), (req, res) => {
   });
 });
 
-app.post(
-  '/upload-videos',
-  upload.fields([{ name: 'piano' }, { name: 'drums' }]),
-  (req, res) => {
-    // Your existing code for handling video uploads
+// app.post(
+//   '/upload-videos',
+//   upload.fields([{ name: 'piano' }, { name: 'drums' }]),
+//   (req, res) => {
+//     // Your existing code for handling video uploads
+//   }
+// );
+
+app.post('/api/upload-video', upload.single('video'), async (req, res) => {
+  try {
+    const videoPath = req.file.path;
+    const audioPath = path.join('uploads', 'extracted-audio.wav');
+    const tunedAudioPath = path.join('uploads', 'tuned-audio.wav');
+    const midiPath = path.join('midi-files', 'melody.mid'); // Path to MIDI file
+
+    // Extract audio from video
+    await extractAudio(videoPath, audioPath);
+
+    // Tune the audio to the MIDI file's melody
+    await tuneToMidi(audioPath, midiPath);
+
+    // Send the tuned audio back to the client
+    res.sendFile(tunedAudioPath);
+  } catch (err) {
+    res.status(500).send({ error: 'Failed to process audio.' });
   }
-);
+});
+
 
 app.listen(3000, () => {
   console.log('Server running on port 3000');
