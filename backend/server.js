@@ -159,8 +159,11 @@ app.post('/upload-midi', upload.single('midi'), (req, res) => {
 // );
 
 app.post('/api/upload-video', upload.single('video'), async (req, res) => {
+  console.log('Uploading video:', req.file);
+  
   try {
     const videoPath = req.file.path;
+    console.log('Video uploaded:', videoPath);
     const audioPath = path.join('uploads', 'extracted-audio.wav');
     const tunedAudioPath = path.join('uploads', 'tuned-audio.wav');
     const midiPath = path.join('midi-files', 'melody.mid'); // Path to MIDI file
@@ -173,7 +176,8 @@ app.post('/api/upload-video', upload.single('video'), async (req, res) => {
 
     // Send the tuned audio back to the client
     res.sendFile(tunedAudioPath);
-  } catch (err) {
+  } catch (error) {
+    console.error(error);
     res.status(500).send({ error: 'Failed to process audio.' });
   }
 });
