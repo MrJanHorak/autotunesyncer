@@ -2,12 +2,14 @@ import { useState, useRef } from 'react';
 import axios from 'axios';
 import Dropzone from 'react-dropzone';
 import ReactPlayer from 'react-player';
+import VideoPlayback from './components/videoPlayback'; 
 
 function App() {
   const [midiFile, setMidiFile] = useState(null);
   const [videoFiles, setVideoFiles] = useState({});
   const [videoUrls, setVideoUrls] = useState([]);
   const [videoBlob, setVideoBlob] = useState(null);
+  const [videoUrl, setVideoUrl] = useState(null); // URL for the recorded video
   const [audioUrl, setAudioUrl] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef(null);
@@ -15,13 +17,19 @@ function App() {
   const streamRef = useRef(null);
 
   const handleStartRecording = async () => {
+    // Reset videoUrl to switch back to live feed
+    setVideoUrl(null);
+
     const stream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true,
     });
     streamRef.current = stream;
-    videoRef.current.srcObject = stream;
-    videoRef.current.play();
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play();
+    }
 
     const mediaRecorder = new MediaRecorder(stream);
     mediaRecorderRef.current = mediaRecorder;
@@ -34,7 +42,9 @@ function App() {
     mediaRecorder.onstop = () => {
       const videoBlob = new Blob(chunks, { type: 'video/mp4' });
       setVideoBlob(videoBlob);
-      stream.getTracks().forEach(track => track.stop()); // Stop all tracks
+      const videoUrl = URL.createObjectURL(videoBlob);
+      setVideoUrl(videoUrl); // Set the URL for the recorded video
+      stream.getTracks().forEach((track) => track.stop()); // Stop all tracks
     };
 
     mediaRecorder.start();
@@ -126,10 +136,22 @@ function App() {
       <button onClick={uploadVideos}>Upload Videos</button>
 
       <h1>Webcam Video to MIDI Audio</h1>
-      <video ref={videoRef} style={{ width: '100%' }}></video>
-      <button onClick={handleStartRecording} disabled={isRecording}>Start Recording</button>
-      <button onClick={handleStopRecording} disabled={!isRecording}>Stop Recording</button>
-      <button onClick={handleUpload} disabled={!videoBlob}>Upload Video</button>
+      <div style={{ width: '100%', position: 'relative' }}>
+        {videoUrl ? (
+          <VideoPlayback videoUrl={videoUrl} /> // Use the VideoPlayback component
+        ) : (
+          <video ref={videoRef} style={{ width: '100%' }}></video>
+        )}
+      </div>
+      <button onClick={handleStartRecording} disabled={isRecording}>
+        Start Recording
+      </button>
+      <button onClick={handleStopRecording} disabled={!isRecording}>
+        Stop Recording
+      </button>
+      <button onClick={handleUpload} disabled={!videoBlob}>
+        Upload Video
+      </button>
 
       {audioUrl && (
         <div>

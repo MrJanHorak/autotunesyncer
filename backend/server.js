@@ -1,4 +1,3 @@
-// server.js
 import express from 'express';
 import multer from 'multer';
 import midiParser from 'midi-file-parser';
@@ -12,7 +11,37 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+
+// Define storage for MIDI files
+const midiStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const midiDir = path.join(__dirname, 'uploads/midi');
+    if (!fs.existsSync(midiDir)) {
+      fs.mkdirSync(midiDir, { recursive: true });
+    }
+    cb(null, midiDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  },
+});
+
+// Define storage for video files
+const videoStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const videoDir = path.join(__dirname, 'uploads/videos');
+    if (!fs.existsSync(videoDir)) {
+      fs.mkdirSync(videoDir, { recursive: true });
+    }
+    cb(null, videoDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  },
+});
+
+const midiUpload = multer({ storage: midiStorage });
+const videoUpload = multer({ storage: videoStorage });
 
 const extractAudio = (videoPath, outputAudioPath) => {
   return new Promise((resolve, reject) => {
@@ -82,7 +111,7 @@ const drumMap = {
   81: 'Open Triangle'
 };
 
-app.post('/upload-midi', upload.single('midi'), (req, res) => {
+app.post('/upload-midi', midiUpload.single('midi'), (req, res) => {
   console.log('uploading midi file');
   console.log(req.file);
 
@@ -150,23 +179,15 @@ app.post('/upload-midi', upload.single('midi'), (req, res) => {
   });
 });
 
-// app.post(
-//   '/upload-videos',
-//   upload.fields([{ name: 'piano' }, { name: 'drums' }]),
-//   (req, res) => {
-//     // Your existing code for handling video uploads
-//   }
-// );
-
-app.post('/api/upload-video', upload.single('video'), async (req, res) => {
+app.post('/api/upload-video', videoUpload.single('video'), async (req, res) => {
   console.log('Uploading video:', req.file);
   
   try {
     const videoPath = req.file.path;
     console.log('Video uploaded:', videoPath);
-    const audioPath = path.join('uploads', 'extracted-audio.wav');
-    const tunedAudioPath = path.join('uploads', 'tuned-audio.wav');
-    const midiPath = path.join('midi-files', 'melody.mid'); // Path to MIDI file
+    const audioPath = path.join('uploads/videos', 'extracted-audio.wav');
+    const tunedAudioPath = path.join('uploads/wav', 'tuned-audio.wav');
+    const midiPath = path.join('uploads/midi', 'melody.mid'); // Path to MIDI file
 
     // Extract audio from video
     await extractAudio(videoPath, audioPath);
@@ -181,7 +202,6 @@ app.post('/api/upload-video', upload.single('video'), async (req, res) => {
     res.status(500).send({ error: 'Failed to process audio.' });
   }
 });
-
 
 app.listen(3000, () => {
   console.log('Server running on port 3000');
