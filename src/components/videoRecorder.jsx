@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import VideoPlayback from './VideoPlayback'; 
+import VideoPlayback from './VideoPlayback';
 
 function App() {
   const [videoBlob, setVideoBlob] = useState(null);
@@ -9,6 +9,7 @@ function App() {
   const mediaRecorderRef = useRef(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const originalVolumeRef = useRef(null);
 
   const handleStartRecording = async () => {
     // Reset videoUrl to switch back to live feed
@@ -25,6 +26,10 @@ function App() {
       videoRef.current.play();
     }
 
+    // Mute the audio output
+    originalVolumeRef.current = videoRef.current.volume;
+    videoRef.current.volume = 0;
+
     const mediaRecorder = new MediaRecorder(stream);
     mediaRecorderRef.current = mediaRecorder;
 
@@ -39,6 +44,9 @@ function App() {
       const videoUrl = URL.createObjectURL(videoBlob);
       setVideoUrl(videoUrl); // Set the URL for the recorded video
       stream.getTracks().forEach((track) => track.stop()); // Stop all tracks
+
+      // Restore the original volume
+      videoRef.current.volume = originalVolumeRef.current;
     };
 
     mediaRecorder.start();
@@ -78,7 +86,6 @@ function App() {
 
   return (
     <div>
-
       <h1>Webcam Video to MIDI Audio</h1>
       <div style={{ width: '100%', position: 'relative' }}>
         {videoUrl ? (
@@ -103,7 +110,6 @@ function App() {
           <audio controls src={audioUrl}></audio>
         </div>
       )}
-
     </div>
   );
 }
