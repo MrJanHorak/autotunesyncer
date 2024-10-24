@@ -12,14 +12,24 @@ function App() {
   const [instruments, setInstruments] = useState([]);
   const [recordedVideosCount, setRecordedVideosCount] = useState(0);
   const [audioContextStarted, setAudioContextStarted] = useState(false);
+  const [instrumentTrackMap, setInstrumentTrackMap] = useState({});
 
-  const handleRecordingComplete = (instrument, trackIndex, blob) => {
+  const handleRecordingComplete = (blob, instrument, trackIndex) => {
     console.log('Recording complete:', instrument, trackIndex, blob);
-    setVideoFiles((prev) => ({
-      ...prev,
-      [`${instrument}-${trackIndex}`]: blob,
-    }));
-    setRecordedVideosCount((prevCount) => prevCount + 1);
+    if (!(blob instanceof Blob)) {
+      console.error('Invalid blob:', blob);
+      return;
+    }
+
+    // Duplicate the video blob for each track that uses the same instrument
+    const newVideoFiles = { ...videoFiles };
+    const tracks = instrumentTrackMap[instrument] || [];
+    tracks.forEach((trackIdx) => {
+      newVideoFiles[`${instrument}-${trackIdx}`] = blob;
+    });
+
+    setVideoFiles(newVideoFiles);
+    setRecordedVideosCount((prevCount) => prevCount + tracks.length);
   };
 
   const handleMidiUpload = (acceptedFiles) => {
@@ -32,12 +42,22 @@ function App() {
       try {
         const midi = new Midi(arrayBuffer);
         setParsedMidiData(midi);
-        console.log('Parsed MIDI data:', midi);
         const instrumentSet = extractInstruments(midi);
         const instrumentData = Array.from(instrumentSet).map((item) =>
           JSON.parse(item)
         ); // Convert back to objects
         setInstruments(instrumentData);
+
+        // Create a mapping of instruments to their respective tracks
+        const trackMap = {};
+        midi.tracks.forEach((track, index) => {
+          const instrumentName = track.instrument.name;
+          if (!trackMap[instrumentName]) {
+            trackMap[instrumentName] = [];
+          }
+          trackMap[instrumentName].push(index);
+        });
+        setInstrumentTrackMap(trackMap);
       } catch (error) {
         console.error('Error parsing MIDI file:', error);
       }
@@ -60,8 +80,6 @@ function App() {
 
   const getTrackNotes = (midiData, trackIndex) => {
     const track = midiData.tracks[trackIndex];
-    console.log('Track:', track);
-    console.log('Notes:', track.notes);
     return track.notes.map(note => ({
       time: note.time,
       midi: note.midi,
@@ -79,12 +97,7 @@ function App() {
     const startTime = audioContext.currentTime;
 
     Object.keys(videoFiles).forEach(async (key) => {
-      console.log('Scheduling playback for:', key);
       const [instrument, trackIndex] = key.split('-');
-      console.log('Instrument:', instrument);
-      console.log('Track index:', trackIndex);
-      console.log('Video blob:', videoFiles[trackIndex]);
-      console.log('key:', key);
       const trackNotes = getTrackNotes(midiData, parseInt(trackIndex, 10));
       const videoBlob = videoFiles[key];
 
@@ -93,8 +106,15 @@ function App() {
         return;
       }
 
+      console.log('Video blob:', videoBlob); // Debugging
+
       const videoElement = document.createElement('video');
-      videoElement.src = URL.createObjectURL(videoBlob);
+      try {
+        videoElement.src = URL.createObjectURL(videoBlob);
+      } catch (error) {
+        console.error('Failed to create object URL:', error);
+        return;
+      }
       videoElement.muted = true;
 
       const source = audioContext.createMediaElementSource(videoElement);
@@ -151,7 +171,7 @@ function App() {
               </h3>
               <VideoRecorder
                 onRecordingComplete={(blob) =>
-                  handleRecordingComplete(instrument.name, index, blob)
+                  handleRecordingComplete(blob, instrument.name, index)
                 }
                 style={{ width: '300px', height: '200px' }} // Custom styles to make the recorder smaller
                 instrument={instrument.name}
@@ -161,6 +181,9 @@ function App() {
           ))}
         </div>
       )}
+
+      {console.log('Recorded Videos Count:', recordedVideosCount)}
+      {console.log('Number of Tracks:', parsedMidiData?.tracks.length)}
 
       {recordedVideosCount === parsedMidiData?.tracks.length && (
         <div>

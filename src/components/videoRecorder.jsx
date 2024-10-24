@@ -43,7 +43,7 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) =
         console.log('Generated video URL:', videoURL); // Debugging
         console.log('Blob size:', blob.size); // Debugging
         setRecordedVideoURL(videoURL);
-        onRecordingComplete(instrument, trackIndex, blob);
+        onRecordingComplete(blob, instrument, trackIndex); // Ensure blob is passed correctly
         chunksRef.current = []; // Clear chunks
         setIsRecording(false); // Reset recording state
         stopMediaStream();
