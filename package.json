@@ -13,10 +13,12 @@
     "@tonejs/midi": "^2.0.28",
     "axios": "^1.7.7",
     "midi-parser-js": "^4.0.4",
+    "pitchfinder": "^2.3.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-dropzone": "^14.2.10",
-    "react-player": "^2.16.0"
+    "react-player": "^2.16.0",
+    "tone": "^15.0.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.11.1",

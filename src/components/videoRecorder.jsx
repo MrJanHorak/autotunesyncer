@@ -1,117 +1,113 @@
-import { useState, useRef } from 'react';
-import VideoPlayback from './VideoPlayback';
+import { useRef, useState, useEffect } from 'react';
 
-function App() {
-  const [videoBlob, setVideoBlob] = useState(null);
-  const [videoUrl, setVideoUrl] = useState(null);
-  const [audioUrl, setAudioUrl] = useState(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const mediaRecorderRef = useRef(null);
+const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) => {
   const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const originalVolumeRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]); // Use ref for chunks
+  const [recordedVideoURL, setRecordedVideoURL] = useState(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const handleStartRecording = async () => {
-    // Reset videoUrl to switch back to live feed
-    setVideoUrl(null);
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
-    streamRef.current = stream;
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play();
+  useEffect(() => {
+    if (isRecording) {
+      startRecording();
     }
+  }, [isRecording]);
 
-    // Mute the audio output
-    originalVolumeRef.current = videoRef.current.volume;
-    videoRef.current.volume = 0;
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true; // Mute audio during recording
+        videoRef.current.play();
+      }
 
-    const mediaRecorder = new MediaRecorder(stream);
-    mediaRecorderRef.current = mediaRecorder;
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
 
-    let chunks = [];
-    mediaRecorder.ondataavailable = (e) => {
-      chunks.push(e.data);
-    };
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data); // Use ref to store chunks
+          console.log('Data available:', event.data.size); // Debugging
+        } else {
+          console.log('No data available'); // Debugging
+        }
+      };
 
-    mediaRecorder.onstop = () => {
-      const videoBlob = new Blob(chunks, { type: 'video/mp4' });
-      setVideoBlob(videoBlob);
-      const videoUrl = URL.createObjectURL(videoBlob);
-      setVideoUrl(videoUrl); // Set the URL for the recorded video
-      stream.getTracks().forEach((track) => track.stop()); // Stop all tracks
+      mediaRecorder.onstop = () => {
+        setIsProcessing(true);
+        console.log('Chunks:', chunksRef.current); // Debugging
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' }); // Change MIME type to webm
+        const videoURL = URL.createObjectURL(blob);
+        console.log('Generated video URL:', videoURL); // Debugging
+        console.log('Blob size:', blob.size); // Debugging
+        setRecordedVideoURL(videoURL);
+        onRecordingComplete(instrument, trackIndex, blob);
+        chunksRef.current = []; // Clear chunks
+        setIsRecording(false); // Reset recording state
+        stopMediaStream();
+        setIsProcessing(false);
+      };
 
-      // Restore the original volume
-      videoRef.current.volume = originalVolumeRef.current;
-    };
-
-    mediaRecorder.start();
-    setIsRecording(true);
+      mediaRecorder.start();
+      console.log('MediaRecorder started:', mediaRecorder.state); // Debugging
+    } catch (error) {
+      console.error('Error accessing media devices.', error);
+      setIsRecording(false); // Reset recording state if there's an error
+    }
   };
 
-  const handleStopRecording = () => {
+  const stopRecording = () => {
     if (mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
-      setIsRecording(false);
+      console.log('MediaRecorder stopped:', mediaRecorderRef.current.state); // Debugging
     }
   };
 
-  const handleUpload = async () => {
-    if (!videoBlob) return;
-
-    const formData = new FormData();
-    formData.append('video', new File([videoBlob], 'webcam-video.mp4'));
-
-    try {
-      const response = await fetch('http://localhost:3000/api/upload-video', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.ok) {
-        const audioBlob = await response.blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
-        setAudioUrl(audioUrl);
-      } else {
-        console.error('Failed to process video');
-      }
-    } catch (err) {
-      console.error(err);
+  const stopMediaStream = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
     }
+  };
+
+  const handleReRecord = () => {
+    setRecordedVideoURL(null);
+    setIsRecording(false);
   };
 
   return (
-    <div>
-      <h1>Webcam Video to MIDI Audio</h1>
-      <div style={{ width: '100%', position: 'relative' }}>
-        {videoUrl ? (
-          <VideoPlayback videoUrl={videoUrl} /> // Use the VideoPlayback component
-        ) : (
-          <video ref={videoRef} style={{ width: '100%' }}></video>
-        )}
-      </div>
-      <button onClick={handleStartRecording} disabled={isRecording}>
-        Start Recording
-      </button>
-      <button onClick={handleStopRecording} disabled={!isRecording}>
-        Stop Recording
-      </button>
-      <button onClick={handleUpload} disabled={!videoBlob}>
-        Upload Video
-      </button>
-
-      {audioUrl && (
-        <div>
-          <h2>Processed Audio</h2>
-          <audio controls src={audioUrl}></audio>
+    <div style={{ ...style, position: 'relative' }}>
+      <video ref={videoRef} style={{ width: '100%', height: '100%' }}></video>
+      {isRecording ? (
+        <button onClick={stopRecording} style={{ position: 'absolute', bottom: '10px', left: '10px', zIndex: 10 }}>
+          Stop Recording
+        </button>
+      ) : (
+        <>
+          <button onClick={() => setIsRecording(true)} style={{ position: 'absolute', bottom: '10px', left: '10px', zIndex: 10 }}>
+            Start Recording
+          </button>
+          {recordedVideoURL && (
+            <button onClick={handleReRecord} style={{ position: 'absolute', bottom: '10px', left: '120px', zIndex: 10 }}>
+              Re-record
+            </button>
+          )}
+        </>
+      )}
+      {isProcessing && (
+        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 20 }}>
+          <div className="spinner"></div> {/* Add your spinner or activity indicator here */}
+        </div>
+      )}
+      {!isRecording && recordedVideoURL && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 5 }}>
+          <video src={recordedVideoURL} controls style={{ width: '100%', height: '100%' }}></video>
         </div>
       )}
     </div>
   );
-}
+};
 
-export default App;
+export default VideoRecorder;
