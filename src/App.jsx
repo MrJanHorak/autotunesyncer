@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import Dropzone from 'react-dropzone';
 import VideoRecorder from './components/VideoRecorder';
+import VideoComposer from './components/VideoComposer';  // Updated import
 import { Midi } from '@tonejs/midi';
-import { YIN } from 'pitchfinder';
 import * as Tone from 'tone';
 
 function App() {
@@ -13,6 +13,7 @@ function App() {
   const [recordedVideosCount, setRecordedVideosCount] = useState(0);
   const [audioContextStarted, setAudioContextStarted] = useState(false);
   const [instrumentTrackMap, setInstrumentTrackMap] = useState({});
+  const [isReadyToCompose, setIsReadyToCompose] = useState(false);  // New state
 
   const handleRecordingComplete = (blob, instrument, trackIndex) => {
     console.log('Recording complete:', instrument, trackIndex, blob);
@@ -29,7 +30,14 @@ function App() {
     });
 
     setVideoFiles(newVideoFiles);
-    setRecordedVideosCount((prevCount) => prevCount + tracks.length);
+    setRecordedVideosCount((prevCount) => {
+      const newCount = prevCount + 1;
+      // Check if we've recorded all instruments
+      if (newCount === instruments.length) {
+        setIsReadyToCompose(true);
+      }
+      return newCount;
+    });
   };
 
   const handleMidiUpload = (acceptedFiles) => {
@@ -45,7 +53,7 @@ function App() {
         const instrumentSet = extractInstruments(midi);
         const instrumentData = Array.from(instrumentSet).map((item) =>
           JSON.parse(item)
-        ); // Convert back to objects
+        );
         setInstruments(instrumentData);
 
         // Create a mapping of instruments to their respective tracks
@@ -65,26 +73,54 @@ function App() {
     reader.readAsArrayBuffer(file);
   };
 
-  const extractInstruments = (obj, instruments = new Set()) => {
-    for (const key in obj) {
-      if (obj.hasOwnProperty(key)) {
-        if (key === 'instrument' && obj[key].name) {
-          instruments.add(JSON.stringify(obj[key])); // Convert object to string to ensure uniqueness
-        } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-          extractInstruments(obj[key], instruments);
+  const extractInstruments = (midiData) => {
+    const instruments = new Set();
+    
+    // Return empty set if no MIDI data
+    if (!midiData) return instruments;
+    
+    // If we have tracks, process them directly
+    if (midiData.tracks && Array.isArray(midiData.tracks)) {
+      midiData.tracks.forEach((track, index) => {
+        // Only add instrument if the track has notes and a valid instrument
+        if (track?.notes?.length > 0 && track?.instrument?.name) {
+          const instrumentData = {
+            name: track.instrument.name,
+            family: track.instrument.family,
+            number: track.instrument.number,
+            trackIndex: index
+          };
+          instruments.add(JSON.stringify(instrumentData));
+        }
+      });
+      return instruments;
+    }
+    
+    // Fallback recursive search if tracks aren't at top level
+    const recursiveSearch = (obj) => {
+      if (!obj || typeof obj !== 'object') return;
+      
+      // Check if current object is an instrument with notes
+      if (obj.instrument?.name && obj.notes?.length > 0) {
+        const instrumentData = {
+          name: obj.instrument.name,
+          family: obj.instrument.family,
+          number: obj.instrument.number
+        };
+        instruments.add(JSON.stringify(instrumentData));
+        return;
+      }
+      
+      // Recursively search all object properties
+      for (const key in obj) {
+        if (obj.hasOwnProperty(key) && typeof obj[key] === 'object') {
+          recursiveSearch(obj[key]);
         }
       }
-    }
+    };
+    
+    recursiveSearch(midiData);
     return instruments;
-  };
-
-  const getTrackNotes = (midiData, trackIndex) => {
-    const track = midiData.tracks[trackIndex];
-    return track.notes.map(note => ({
-      time: note.time,
-      midi: note.midi,
-      duration: note.duration,
-    }));
   };
 
   const startAudioContext = async () => {
@@ -92,65 +128,25 @@ function App() {
     setAudioContextStarted(true);
   };
 
-  const schedulePlayback = (midiData, videoFiles) => {
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const startTime = audioContext.currentTime;
-
-    Object.keys(videoFiles).forEach(async (key) => {
-      const [instrument, trackIndex] = key.split('-');
-      const trackNotes = getTrackNotes(midiData, parseInt(trackIndex, 10));
-      const videoBlob = videoFiles[key];
-
-      if (!videoBlob) {
-        console.error(`No video blob found for key: ${key}`);
-        return;
-      }
-
-      console.log('Video blob:', videoBlob); // Debugging
-
-      const videoElement = document.createElement('video');
-      try {
-        videoElement.src = URL.createObjectURL(videoBlob);
-      } catch (error) {
-        console.error('Failed to create object URL:', error);
-        return;
-      }
-      videoElement.muted = true;
-
-      const source = audioContext.createMediaElementSource(videoElement);
-      const gainNode = audioContext.createGain();
-      source.connect(gainNode).connect(audioContext.destination);
-
-      trackNotes.forEach(note => {
-        const noteStartTime = startTime + note.time;
-        const noteEndTime = noteStartTime + note.duration;
-
-        gainNode.gain.setValueAtTime(1, noteStartTime);
-        gainNode.gain.setValueAtTime(0, noteEndTime);
-      });
-
-      videoElement.play();
-    });
-  };
-
   return (
-    <div>
-      <h1>Upload MIDI File</h1>
+    <div className="p-4">
+      <h1 className="text-2xl font-bold mb-4">Upload MIDI File</h1>
       <Dropzone onDrop={handleMidiUpload}>
         {({ getRootProps, getInputProps }) => (
-          <div {...getRootProps()}>
+          <div 
+            {...getRootProps()} 
+            className="border-2 border-dashed border-gray-300 p-4 mb-4 cursor-pointer hover:border-gray-400"
+          >
             <input {...getInputProps()} />
-            <p>
-              Drag &apos;n&apos; drop a MIDI file here, or click to select one
-            </p>
+            <p>Drag &apos;n&apos; drop a MIDI file here, or click to select one</p>
           </div>
         )}
       </Dropzone>
 
       {instruments.length > 0 && (
-        <div>
-          <h2>Instruments</h2>
-          <ul>
+        <div className="mb-6">
+          <h2 className="text-xl font-semibold mb-2">Instruments</h2>
+          <ul className="list-disc pl-5">
             {instruments.map((instrument, index) => (
               <li key={index}>
                 {instrument.family} - {instrument.name} (Number:{' '}
@@ -162,18 +158,18 @@ function App() {
       )}
 
       {instruments.length > 0 && (
-        <div className='recordingHolder'>
-          <h2>Record Videos for Instruments</h2>
+        <div className="recordingHolder space-y-6">
+          <h2 className="text-xl font-semibold">Record Videos for Instruments</h2>
           {instruments.map((instrument, index) => (
-            <div key={index} style={{ marginBottom: '20px' }}>
-              <h3>
+            <div key={index} className="p-4 border rounded">
+              <h3 className="text-lg font-medium mb-2">
                 {instrument.family} - {instrument.name}
               </h3>
               <VideoRecorder
                 onRecordingComplete={(blob) =>
                   handleRecordingComplete(blob, instrument.name, index)
                 }
-                style={{ width: '300px', height: '200px' }} // Custom styles to make the recorder smaller
+                style={{ width: '320px', height: '240px' }}
                 instrument={instrument.name}
                 trackIndex={index}
               />
@@ -182,21 +178,22 @@ function App() {
         </div>
       )}
 
-      {console.log('Recorded Videos Count:', recordedVideosCount)}
-      {console.log('Number of Tracks:', parsedMidiData?.tracks.length)}
-
-      {recordedVideosCount === parsedMidiData?.tracks.length && (
-        <div>
-          <button onClick={() => schedulePlayback(parsedMidiData, videoFiles)}>
-            Play All Videos
-          </button>
+      {isReadyToCompose && parsedMidiData && (
+        <div className="mt-6">
+          <VideoComposer 
+            videoFiles={videoFiles} 
+            midiData={parsedMidiData} 
+          />
         </div>
       )}
 
       {!audioContextStarted && (
-        <div>
-          <button onClick={startAudioContext}>Start Audio Context</button>
-        </div>
+        <button 
+          onClick={startAudioContext}
+          className="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+        >
+          Start Audio Context
+        </button>
       )}
     </div>
   );
