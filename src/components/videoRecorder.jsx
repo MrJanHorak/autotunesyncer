@@ -1,3 +1,4 @@
+/* eslint-disable react/prop-types */
 import { useRef, useState, useEffect } from 'react';
 
 const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) => {

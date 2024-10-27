@@ -1,237 +1,184 @@
-import { useEffect, useRef, useState } from 'react';
-import PropTypes from 'prop-types';
+/* eslint-disable react/prop-types */
+// import { useState } from 'react';
+// import axios from 'axios';
+
+// const VideoComposer = ({ videoFiles, midiData }) => {
+//   const [isProcessing, setIsProcessing] = useState(false);
+//   const [progress, setProgress] = useState(0);
+//   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
+
+//   const startComposition = async () => {
+//     setIsProcessing(true);
+//     setProgress(0);
+
+//     try {
+//       const formData = new FormData();
+//       formData.append('midiData', new Blob([midiData], { type: 'audio/midi' }));
+      
+//       // Append video files
+//       Object.entries(videoFiles).forEach(([instrument, blob]) => {
+//         formData.append(`videos[${instrument}]`, blob);
+//       });
+
+//       const response = await axios.post('http://localhost:3000/api/compose', formData, {
+//         responseType: 'blob',
+//         onUploadProgress: (progressEvent) => {
+//           const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+//           setProgress(percentCompleted);
+//         }
+//       });
+
+//       const url = URL.createObjectURL(response.data);
+//       setComposedVideoUrl(url);
+//     } catch (error) {
+//       console.error('Composition failed:', error);
+//     } finally {
+//       setIsProcessing(false);
+//     }
+//   };
+
+//   return (
+//     <div className="video-composer">
+//       <button
+//         onClick={startComposition}
+//         disabled={isProcessing}
+//         className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+//       >
+//         {isProcessing ? 'Processing...' : 'Start Composition'}
+//       </button>
+
+//       {isProcessing && (
+//         <div className="mt-4">
+//           <div className="w-full h-2 bg-gray-200 rounded">
+//             <div
+//               className="h-full bg-blue-500 rounded"
+//               style={{ width: `${progress}%` }}
+//             />
+//           </div>
+//           <p className="text-sm text-gray-600 mt-1">{progress}% complete</p>
+//         </div>
+//       )}
+
+//       {composedVideoUrl && (
+//         <div className="mt-4">
+//           <video
+//             src={composedVideoUrl}
+//             controls
+//             className="w-full max-w-4xl"
+//           />
+//         </div>
+//       )}
+//     </div>
+//   );
+// };
+
+// export default VideoComposer;
+
+import { useState } from 'react';
+import axios from 'axios';
 
 const VideoComposer = ({ videoFiles, midiData }) => {
-  const canvasRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const [isRendering, setIsRendering] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
-  const mediaRecorderRef = useRef(null);
-  const videoElementsRef = useRef({});
-  const chunksRef = useRef([]);
-  const progressRef = useRef(0);
+  const [error, setError] = useState(null);
 
-  const getTotalDuration = () => {
-    if (!midiData?.tracks) return 0;
-    return midiData.tracks.reduce((maxDuration, track) => {
-      const trackDuration = track.notes.reduce((max, note) => {
-        return Math.max(max, note.time + note.duration);
-      }, 0);
-      return Math.max(maxDuration, trackDuration);
-    }, 0);
-  };
-
-  const setupCanvas = () => {
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const totalVideos = Object.keys(videoFiles).length;
-    
-    const cols = Math.ceil(Math.sqrt(totalVideos));
-    const rows = Math.ceil(totalVideos / cols);
-    
-    canvas.width = cols * 320;
-    canvas.height = rows * 240;
-    
-    return { ctx, cols, rows };
-  };
-
-  const setupAudioProcessing = async () => {
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      await audioContextRef.current.close();
-    }
-    audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-    const audioDestination = audioContextRef.current.createMediaStreamDestination();
-
-    const audioSources = await Promise.all(
-      Object.entries(videoElementsRef.current).map(async ([key, video]) => {
-        const source = audioContextRef.current.createMediaElementSource(video);
-        const gainNode = audioContextRef.current.createGain();
-        gainNode.gain.value = 1.0;
-
-        source.connect(gainNode);
-        gainNode.connect(audioDestination);
-
-        return { key, source, gainNode };
-      })
-    );
-
-    return audioDestination.stream;
-  };
-
-  const startRendering = async () => {
-    setIsRendering(true);
-    progressRef.current = 0;
+  const startComposition = async () => {
+    setIsProcessing(true);
     setProgress(0);
+    setError(null);
 
     try {
-      const { ctx, cols, rows } = setupCanvas();
-      const canvas = canvasRef.current;
-      const totalDuration = getTotalDuration();
-
-      await Promise.all(Object.entries(videoFiles).map(async ([key, blob]) => {
-        const video = document.createElement('video');
-        video.src = URL.createObjectURL(blob);
-        video.muted = true;
-        video.preload = 'auto';
-        video.onloadeddata = () => {
-          videoElementsRef.current[key] = video;
-        };
-      }));
-
-      const audioStream = await setupAudioProcessing();
-
-      const canvasStream = canvas.captureStream(30);
-      const combinedTracks = [
-        ...canvasStream.getVideoTracks(),
-        ...audioStream.getAudioTracks()
-      ];
-
-      const combinedStream = new MediaStream(combinedTracks);
-
-      const mediaRecorder = new MediaRecorder(combinedStream, {
-        mimeType: 'video/webm; codecs=vp8,opus',
-        videoBitsPerSecond: 8000000,
-        audioBitsPerSecond: 128000
+      const formData = new FormData();
+      
+      // Convert MIDI data to proper format
+      // If midiData is already a Uint8Array or ArrayBuffer, use it directly
+      // Otherwise, serialize it properly
+      let midiBlob;
+      if (midiData instanceof Uint8Array || midiData instanceof ArrayBuffer) {
+        midiBlob = new Blob([midiData], { type: 'audio/midi' });
+      } else {
+        // Assuming midiData is an object with MIDI properties
+        const midiString = JSON.stringify(midiData);
+        midiBlob = new Blob([midiString], { type: 'application/json' });
+      }
+      formData.append('midiData', midiBlob);
+      
+      // Append video files
+      Object.entries(videoFiles).forEach(([instrument, blob]) => {
+        // Ensure the blob is actually a Blob or File object
+        if (blob instanceof Blob || blob instanceof File) {
+          formData.append(`videos[${instrument}]`, blob);
+        } else {
+          throw new Error(`Invalid video file format for instrument: ${instrument}`);
+        }
       });
 
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
+      const response = await axios.post('http://localhost:3000/api/compose', formData, {
+        responseType: 'blob',
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setProgress(percentCompleted);
         }
-      };
+      });
 
-      mediaRecorder.onstop = () => {
-        if (chunksRef.current.length > 0) {
-          const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-          const url = URL.createObjectURL(blob);
-          setComposedVideoUrl(url);
-          setIsRendering(false);
-          setProgress(100);
-        } else {
-          console.error('No media data captured');
-        }
+      // Check if the response is an error message
+      const contentType = response.headers['content-type'];
+      if (contentType && contentType.includes('application/json')) {
+        // Parse error message
+        const reader = new FileReader();
+        reader.onload = () => {
+          const errorData = JSON.parse(reader.result);
+          setError(errorData.error || 'Composition failed');
+        };
+        reader.readAsText(response.data);
+        return;
+      }
 
-        if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-          audioContextRef.current.close();
-        }
-      };
-
-      await Promise.all(
-        Object.values(videoElementsRef.current).map(video => video.play())
-      );
-
-      mediaRecorder.start(1000);
-
-      let startTime = performance.now();
-      let lastFrameTime = startTime;
-      const targetFrameTime = 1000 / 30;
-
-      const animate = (timestamp) => {
-        const elapsed = (timestamp - startTime) / 1000;
-
-        if (elapsed > totalDuration) {
-          mediaRecorder.stop();
-          return;
-        }
-
-        if (timestamp - lastFrameTime >= targetFrameTime) {
-          renderFrame(ctx, cols);
-          lastFrameTime = timestamp;
-        }
-
-        if (elapsed / totalDuration * 100 > progressRef.current + 5) {
-          progressRef.current = (elapsed / totalDuration) * 100;
-          setProgress(progressRef.current);
-        }
-
-        requestAnimationFrame(animate);
-      };
-
-      requestAnimationFrame(animate);
-
+      const url = URL.createObjectURL(response.data);
+      setComposedVideoUrl(url);
     } catch (error) {
-      console.error('Error during rendering:', error);
-      setIsRendering(false);
+      console.error('Composition failed:', error);
+      setError(error.message || 'Composition failed');
+    } finally {
+      setIsProcessing(false);
     }
   };
-
-  const renderFrame = (ctx, cols) => {
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-
-    Object.entries(videoElementsRef.current).forEach(([key, video], index) => {
-      const col = index % cols;
-      const row = Math.floor(index / cols);
-      const x = col * 320;
-      const y = row * 240;
-
-      ctx.drawImage(video, x, y, 320, 240);
-
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-      ctx.fillRect(x, y, 320, 30);
-      ctx.fillStyle = 'white';
-      ctx.font = '14px Arial';
-      const [instrument] = key.split('-');
-      ctx.fillText(instrument, x + 10, y + 20);
-    });
-  };
-
-  useEffect(() => {
-    return () => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-      }
-      if (composedVideoUrl) {
-        URL.revokeObjectURL(composedVideoUrl);
-      }
-      Object.values(videoElementsRef.current).forEach(video => {
-        video.pause();
-        video.src = '';
-      });
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close();
-      }
-      chunksRef.current = [];
-    };
-  }, [composedVideoUrl]);
 
   return (
     <div className="video-composer">
-      <div className="controls">
-        {!isRendering && !composedVideoUrl && (
-          <button 
-            onClick={startRendering}
-            disabled={!videoFiles || Object.keys(videoFiles).length === 0}
-            className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-          >
-            Start Composition
-          </button>
-        )}
-        
-        {isRendering && (
-          <div className="rendering-progress space-y-2">
-            <p>Rendering: {Math.round(progress)}%</p>
-            <div className="w-full h-5 bg-gray-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-green-500 transition-all duration-300"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
+      <button
+        onClick={startComposition}
+        disabled={isProcessing}
+        className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+      >
+        {isProcessing ? 'Processing...' : 'Start Composition'}
+      </button>
+
+      {isProcessing && (
+        <div className="mt-4">
+          <div className="w-full h-2 bg-gray-200 rounded">
+            <div
+              className="h-full bg-blue-500 rounded"
+              style={{ width: `${progress}%` }}
+            />
           </div>
-        )}
-      </div>
-      
-      <canvas 
-        ref={canvasRef}
-        style={{ display: 'none' }}
-      />
-      
+          <p className="text-sm text-gray-600 mt-1">{progress}% complete</p>
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-4 p-4 bg-red-100 text-red-700 rounded">
+          {error}
+        </div>
+      )}
+
       {composedVideoUrl && (
-        <div className="final-video mt-4">
-          <video 
+        <div className="mt-4">
+          <video
             src={composedVideoUrl}
             controls
             className="w-full max-w-4xl"
@@ -240,11 +187,6 @@ const VideoComposer = ({ videoFiles, midiData }) => {
       )}
     </div>
   );
-};
-
-VideoComposer.propTypes = {
-  videoFiles: PropTypes.objectOf(PropTypes.instanceOf(Blob)).isRequired,
-  midiData: PropTypes.object.isRequired
 };
 
 export default VideoComposer;
