@@ -9,8 +9,10 @@ import {
   rmSync,
   copyFileSync,
   createWriteStream,
+  renameSync,
 } from 'fs';
 import { PNG } from 'pngjs';
+import { rimraf } from 'rimraf';
 import { Buffer } from 'buffer';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -38,23 +40,36 @@ function addLavfiSupport(command) {
   };
 }
 
-async function createBlackPNG(outputPath, width = 960, height = 720) {
+async function createBlackPNG(outputPath, duration) {
+  console.log('Creating black PNG with duration:', duration);
   return new Promise((resolve, reject) => {
-    const png = new PNG({ width, height });
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = (width * y + x) << 2;
-        png.data[idx] = 0; // R
-        png.data[idx + 1] = 0; // G
-        png.data[idx + 2] = 0; // B
-        png.data[idx + 3] = 255; // A
-      }
-    }
-    png
-      .pack()
-      .pipe(createWriteStream(outputPath))
-      .on('finish', resolve)
-      .on('error', reject);
+    ffmpeg()
+      .input('color=c=black:s=960x720:r=30')
+      .inputOptions(['-f', 'lavfi'])
+      .outputOptions([
+        '-c:v',
+        'libx264',
+        '-t',
+        String(duration || 1), // Ensure duration is passed and used
+        '-pix_fmt',
+        'yuv420p',
+        '-y',
+      ])
+      .on('start', (commandLine) => {
+        console.log('FFmpeg command (black frame):', commandLine);
+      })
+      .save(outputPath)
+      .on('end', () => {
+        console.log(
+          'Black frame created successfully with duration:',
+          duration
+        );
+        resolve();
+      })
+      .on('error', (err) => {
+        console.error('Error creating black frame:', err.message);
+        reject(err);
+      });
   });
 }
 
@@ -77,7 +92,36 @@ function ticksToSeconds(ticks, midi) {
   return (ticks / ppq) * (60 / bpm);
 }
 
-async function processNoteSegment(videoPath, note, outputPath) {
+// Helper function to convert MIDI note number to frequency ratio
+function midiNoteToFrequencyRatio(targetMidiNote, sourceMidiNote = 60) {
+  // Calculate frequency ratio based on semitone difference
+  // Each semitone is a factor of 2^(1/12)
+  const semitoneDifference = targetMidiNote - sourceMidiNote;
+  return Math.pow(2, semitoneDifference / 12);
+}
+
+// Helper function to convert MIDI note number to note name
+function midiNoteToName(midiNote) {
+  const notes = [
+    'C',
+    'C#',
+    'D',
+    'D#',
+    'E',
+    'F',
+    'F#',
+    'G',
+    'G#',
+    'A',
+    'A#',
+    'B',
+  ];
+  const octave = Math.floor(midiNote / 12) - 1;
+  const noteName = notes[midiNote % 12];
+  return `${noteName}${octave}`;
+}
+
+async function processNoteSegment(videoPath, note, outputPath, baseNote = 60) {
   return new Promise((resolve, reject) => {
     if (!existsSync(videoPath)) {
       return reject(new Error(`Input video file not found: ${videoPath}`));
@@ -86,675 +130,548 @@ async function processNoteSegment(videoPath, note, outputPath) {
     const outputDir = dirname(outputPath);
     ensureDirectoryExists(outputDir);
 
+    // Calculate pitch shift ratio based on MIDI note numbers
+    const pitchRatio = midiNoteToFrequencyRatio(note.midi, baseNote);
+
     console.log('Processing note segment with params:', {
       videoPath,
       note,
       outputPath,
+      targetNote: midiNoteToName(note.midi),
+      baseNote: midiNoteToName(baseNote),
+      pitchRatio,
     });
 
-    const command = ffmpeg(videoPath)
-      .setStartTime(0)
-      .duration(note.duration)
-      .outputOptions([
-        '-vf',
-        `scale=320:240,setpts=${1 / note.duration}*PTS`,
-        '-af',
-        `volume=${note.velocity}`,
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-c:a',
-        'aac',
-      ]);
+    // Split the filter complex into separate video and audio chains
+    const command = ffmpeg(videoPath).setStartTime(0).duration(note.duration);
 
-    command.on('start', (commandLine) => {
-      console.log('FFmpeg command:', commandLine);
-    });
+    // Add video filter chain
+    command.videoFilters(['scale=320:240']);
 
-    command.on('stderr', (stderrLine) => {
-      console.log('FFmpeg stderr:', stderrLine);
-    });
+    // Add audio filter chain
+    command.audioFilters([
+      // Convert mono to stereo and set sample rate
+      'aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo',
+      // Apply pitch shift
+      `rubberband=pitch=${pitchRatio}:tempo=1`,
+      // Apply velocity as volume
+      `volume=${note.velocity}`,
+    ]);
 
+    // Set output options
+    command.outputOptions([
+      // Video codec settings
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-pix_fmt',
+      'yuv420p',
+
+      // Audio codec settings
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      '-ar',
+      '44100',
+      '-ac',
+      '2',
+
+      // Force video duration to match note duration
+      '-t',
+      String(note.duration),
+
+      // Overwrite output file if it exists
+      '-y',
+    ]);
+
+    // Add event handlers
     command
-      .save(outputPath)
-      .on('end', () => {
-        if (existsSync(outputPath)) {
-          console.log(`Successfully processed note segment: ${outputPath}`);
-          resolve();
-        } else {
-          reject(new Error(`Failed to create output file: ${outputPath}`));
-        }
+      .on('start', (commandLine) => {
+        console.log('FFmpeg command:', commandLine);
+      })
+      .on('stderr', (stderrLine) => {
+        console.log('FFmpeg stderr:', stderrLine);
       })
       .on('error', (err) => {
         console.error(`Error processing note segment:`, err);
         reject(err);
+      })
+      .on('end', () => {
+        if (existsSync(outputPath)) {
+          console.log(`Successfully processed note segment: ${outputPath}`);
+          console.log(
+            `Note details: ${midiNoteToName(note.midi)}, duration: ${
+              note.duration
+            }s, velocity: ${note.velocity}`
+          );
+          resolve();
+        } else {
+          reject(new Error(`Failed to create output file: ${outputPath}`));
+        }
       });
+
+    // Run the command
+    command.save(outputPath);
   });
 }
 
-// async function composeFinalVideo(tracks, outputPath) {
-//   if (!tracks || tracks.length === 0) {
-//     throw new Error('No tracks provided for final composition');
-//   }
-
-//   console.log('Starting final composition with tracks:', tracks);
-
-//   return new Promise((resolve, reject) => {
-//     const blackFramePath = join(dirname(outputPath), 'black_frame.mp4');
-
-//     // Create a black video first with explicit video stream
-//     return new Promise((resolveBlackFrame, rejectBlackFrame) => {
-//       ffmpeg()
-//         .addInput('nullsrc')
-//         .inputOptions(['-f', 'lavfi', '-t', '1', '-s', '960x720'])
-//         .outputOptions([
-//           '-c:v',
-//           '-tune',
-//           'libx264',
-//           'stillimage',
-//           '-pix_fmt',
-//           'yuv420p',
-//           '-t',
-//           '1',
-//         ])
-//         .save(blackFramePath)
-//         .on('end', () => {
-//           // Now start the main composition
-//           const command = ffmpeg();
-
-//           // Initialize filter complex parts
-//           let filterComplex = '';
-//           let overlayCount = 0;
-//           let hasValidSegments = false;
-
-//           // First pass to count valid segments and inputs
-//           tracks.forEach((track) => {
-//             if (!track.segments || track.segments.length === 0) return;
-//             track.segments.forEach((segment) => {
-//               if (existsSync(segment.path)) {
-//                 hasValidSegments = true;
-//                 overlayCount++;
-//               }
-//             });
-//           });
-
-//           if (!hasValidSegments) {
-//             rmSync(blackFramePath);
-//             return reject(new Error('No valid segments found for composition'));
-//           }
-
-//           // Use the black frame as base and loop it
-//           command.input(blackFramePath).inputOptions(['-stream_loop', '-1']);
-
-//           // Initialize with black background
-//           filterComplex += '[0:v]scale=960:720,setsar=1:1[base];';
-
-//           // Add all segment inputs and create overlay chain
-//           let currentBase = 'base';
-//           let inputIndex = 1; // Start from 1 since we used 0 for black frame
-
-//           tracks.forEach((track, trackIndex) => {
-//             if (!track.segments || track.segments.length === 0) return;
-
-//             track.segments.forEach((segment, segmentIndex) => {
-//               if (!existsSync(segment.path)) {
-//                 console.warn(`Skipping missing segment: ${segment.path}`);
-//                 return;
-//               }
-
-//               // Add input
-//               command.input(segment.path);
-
-//               const x = (trackIndex % 3) * 320;
-//               const y = Math.floor(trackIndex / 3) * 240;
-
-//               // Create video processing chain
-//               filterComplex += `[${inputIndex}:v]setpts=PTS-STARTPTS+${segment.startTime}/TB[v${inputIndex}];`;
-//               filterComplex += `[${currentBase}][v${inputIndex}]overlay=${x}:${y}:enable='between(t,${
-//                 segment.startTime
-//               },${segment.startTime + segment.duration})'[v${inputIndex}_out];`;
-
-//               currentBase = `v${inputIndex}_out`;
-//               inputIndex++;
-//             });
-//           });
-
-//           // Handle audio mixing
-//           let audioInputs = [];
-//           for (let i = 1; i < inputIndex; i++) {
-//             filterComplex += `[${i}:a]asetpts=PTS-STARTPTS+${
-//               tracks[Math.floor((i - 1) / tracks[0].segments.length)].segments[
-//                 (i - 1) % tracks[0].segments.length
-//               ].startTime
-//             }/TB[a${i}];`;
-//             audioInputs.push(`[a${i}]`);
-//           }
-
-//           if (audioInputs.length > 0) {
-//             filterComplex += `${audioInputs.join('')}amix=inputs=${
-//               audioInputs.length
-//             }:normalize=0[aout]`;
-//           }
-
-//           // Final output mapping
-//           const outputs = [currentBase];
-//           if (audioInputs.length > 0) {
-//             outputs.push('aout');
-//           }
-
-//           console.log('Filter complex:', filterComplex);
-
-//           command
-//             .complexFilter(filterComplex, outputs)
-//             .outputOptions([
-//               '-map',
-//               `[${currentBase}]`,
-//               ...(audioInputs.length > 0 ? ['-map', '[aout]'] : []),
-//               '-c:v',
-//               'libx264',
-//               '-preset',
-//               'ultrafast',
-//               '-c:a',
-//               'aac',
-//               '-shortest',
-//             ])
-//             .on('start', (commandLine) => {
-//               console.log('FFmpeg final composition command:', commandLine);
-//             })
-//             .on('progress', (progress) => {
-//               console.log('Processing: ', progress.percent, '% done');
-//             })
-//             .on('stderr', (stderrLine) => {
-//               console.log('FFmpeg stderr:', stderrLine);
-//             })
-//             .save(outputPath)
-//             .on('end', () => {
-//               // Clean up the temporary black frame
-//               try {
-//                 rmSync(blackFramePath);
-//               } catch (err) {
-//                 console.warn('Failed to remove temporary black frame:', err);
-//               }
-
-//               if (existsSync(outputPath)) {
-//                 console.log('Final video created successfully');
-//                 resolve();
-//               } else {
-//                 reject(new Error('Output file was not created'));
-//               }
-//             })
-//             .on('error', (err) => {
-//               console.error('FFmpeg error:', err);
-//               // Clean up on error
-//               try {
-//                 rmSync(blackFramePath);
-//               } catch (cleanupErr) {
-//                 console.warn(
-//                   'Failed to remove temporary black frame:',
-//                   cleanupErr
-//                 );
-//               }
-//               reject(err);
-//             });
-//         })
-//         .on('error', (err) => {
-//           console.error('Error creating black frame:', err);
-//           rejectBlackFrame(err);
-//         });
-//     });
-//   });
-// }
-
-// async function composeFinalVideo(tracks, outputPath) {
-//   if (!tracks || tracks.length === 0) {
-//     throw new Error('No tracks provided for final composition');
-//   }
-
-//   // Ensure output directory exists
-//   const outputDir = dirname(outputPath);
-//   try {
-//     if (!existsSync(outputDir)) {
-//       mkdirSync(outputDir, { recursive: true });
-//     }
-    
-//     // Test write permissions by creating a temp file
-//     const testPath = join(outputDir, 'test.txt');
-//     writeFileSync(testPath, 'test');
-//     rmSync(testPath);
-//   } catch (err) {
-//     throw new Error(`Cannot write to output directory ${outputDir}: ${err.message}`);
-//   }
-
-//   console.log('Starting final composition with tracks:', tracks);
-//   console.log('Output path:', outputPath);
-
-//   return new Promise((resolve, reject) => {
-//     const blackFramePath = join(outputDir, 'black_frame.mp4');
-
-//     // Create a black video first
-//     return new Promise((resolveBlackFrame, rejectBlackFrame) => {
-//       ffmpeg()
-//         .input('color=c=black:s=960x720:r=30')
-//         .inputOptions(['-f', 'lavfi'])
-//         .inputFormat('lavfi')
-//         .outputOptions([
-//           '-c:v', 'libx264',
-//           '-t', '1',
-//           '-pix_fmt', 'yuv420p'
-//         ])
-//         .save(blackFramePath)
-//         .on('end', () => {
-//           // Verify black frame was created
-//           if (!existsSync(blackFramePath)) {
-//             return rejectBlackFrame(new Error('Failed to create black frame video'));
-//           }
-
-//           // Now start the main composition
-//           const command = ffmpeg();
-
-//           // Initialize filter complex parts
-//           let filterComplex = '';
-//           let hasValidSegments = false;
-
-//           // First pass to check segments
-//           tracks.forEach((track) => {
-//             console.log('Segment and Track:', track.segments);
-//             if (!track.segments || track.segments.length === 0) return;
-//             track.segments.forEach((segment) => {
-//               if (existsSync(segment.path)) {
-//                 hasValidSegments = true;
-//               } else {
-//                 console.warn(`Missing segment file: ${segment.path}`);
-//               }
-//             });
-//           });
-
-//           if (!hasValidSegments) {
-//             rmSync(blackFramePath);
-//             return reject(new Error('No valid segments found for composition'));
-//           }
-
-//           // Use the black frame as base and loop it
-//           command.input(blackFramePath).inputOptions(['-stream_loop', '-1']);
-
-//           // Initialize with black background
-//           filterComplex += '[0:v]scale=960:720,setsar=1:1[base];';
-
-//           let currentBase = 'base';
-//           let inputIndex = 1;
-//           const audioInputs = [];
-
-//           // Build filter complex
-//           tracks.forEach((track, trackIndex) => {
-//             if (!track.segments || track.segments.length === 0) return;
-
-//             track.segments.forEach((segment, segmentIndex) => {
-//               if (!existsSync(segment.path)) {
-//                 console.warn(`Skipping missing segment: ${segment.path}`);
-//                 return;
-//               }
-
-//               // Add input
-//               command.input(segment.path);
-
-//               const x = (trackIndex % 3) * 320;
-//               const y = Math.floor(trackIndex / 3) * 240;
-
-//               // Create unique labels
-//               const videoLabel = `v${inputIndex}`;
-//               const overlayLabel = `overlay${inputIndex}`;
-
-//               // Video processing chain
-//               filterComplex += `[${inputIndex}:v]setpts=PTS-STARTPTS+${segment.startTime}/TB[${videoLabel}];`;
-//               filterComplex += `[${currentBase}][${videoLabel}]overlay=${x}:${y}:enable='between(t,${segment.startTime},${segment.startTime + segment.duration})'[${overlayLabel}];`;
-
-//               // Audio processing
-//               filterComplex += `[${inputIndex}:a]asetpts=PTS-STARTPTS+${segment.startTime}/TB[a${inputIndex}];`;
-//               audioInputs.push(`[a${inputIndex}]`);
-
-//               currentBase = overlayLabel;
-//               inputIndex++;
-//             });
-//           });
-
-//           // Remove trailing semicolon
-//           filterComplex = filterComplex.slice(0, -1);
-
-//           // Add audio mixing if needed
-//           if (audioInputs.length > 0) {
-//             filterComplex += `;${audioInputs.join('')}amix=inputs=${audioInputs.length}:normalize=0[aout]`;
-//           }
-
-//           console.log('Filter complex:', filterComplex);
-
-//           // Final command setup
-//           const finalCommand = command
-//             .complexFilter(filterComplex, [currentBase, 'aout'])
-//             .outputOptions([
-//               '-map', `[${currentBase}]`,
-//               '-map', '[aout]',
-//               '-c:v', 'libx264',
-//               '-preset', 'ultrafast',
-//               '-c:a', 'aac',
-//               '-shortest'
-//             ]);
-
-//           // Log the full command for debugging
-//           finalCommand.on('start', (commandLine) => {
-//             console.log('FFmpeg command:', commandLine);
-//           });
-
-//           // Monitor progress
-//           finalCommand.on('progress', (progress) => {
-//             console.log('Processing:', progress.percent, '% done');
-//           });
-
-//           // Detailed error logging
-//           finalCommand.on('stderr', (stderrLine) => {
-//             console.log('FFmpeg stderr:', stderrLine);
-//           });
-
-//           // Save the output
-//           finalCommand
-//             .save(outputPath)
-//             .on('end', () => {
-//               // Verify output was created
-//               if (!existsSync(outputPath)) {
-//                 reject(new Error('Output file was not created'));
-//                 return;
-//               }
-
-//               try {
-//                 rmSync(blackFramePath);
-//               } catch (err) {
-//                 console.warn('Failed to remove temporary black frame:', err);
-//               }
-
-//               console.log('Final video created successfully at:', outputPath);
-//               resolve();
-//             })
-//             .on('error', (err) => {
-//               console.error('FFmpeg error:', err);
-//               try {
-//                 rmSync(blackFramePath);
-//               } catch (cleanupErr) {
-//                 console.warn('Failed to remove temporary black frame:', cleanupErr);
-//               }
-//               reject(err);
-//             });
-//         })
-//         .on('error', (err) => {
-//           console.error('Error creating black frame:', err);
-//           rejectBlackFrame(err);
-//         });
-//     });
-//   });
-// }
-
-// async function composeFinalVideo(tracks, outputPath) {
-//   if (!tracks || tracks.length === 0) {
-//     throw new Error('No tracks provided for final composition');
-//   }
-
-//   const outputDir = dirname(outputPath);
-//   if (!existsSync(outputDir)) {
-//     mkdirSync(outputDir, { recursive: true });
-//   }
-
-//   // Create a black frame as the base video
-//   const blackFramePath = join(outputDir, 'black_frame.mp4');
-//   await new Promise((resolve, reject) => {
-//     ffmpeg()
-//       .input('color=c=black:s=960x720:r=30')
-//       .inputOptions(['-f', 'lavfi'])
-//       .outputOptions([
-//         '-c:v', 'libx264',
-//         '-t', '1',
-//         '-pix_fmt', 'yuv420p'
-//       ])
-//       .save(blackFramePath)
-//       .on('end', resolve)
-//       .on('error', reject);
-//   });
-
-//   const videoOutputPath = join(outputDir, 'video_with_overlays.mp4');
-//   const audioOutputPath = join(outputDir, 'merged_audio.mp3');
-
-//   try {
-//     // Step 1: Create video with overlays
-//     await new Promise((resolve, reject) => {
-//       const command = ffmpeg();
-//       let filterComplex = '[0:v]scale=960:720,setsar=1:1[base];';
-
-//       let inputIndex = 1;
-//       tracks.forEach((track, trackIndex) => {
-//         if (track.segments && track.segments.length > 0) {
-//           track.segments.forEach((segment) => {
-//             if (existsSync(segment.path)) {
-//               const x = (trackIndex % 3) * 320;
-//               const y = Math.floor(trackIndex / 3) * 240;
-
-//               command.input(segment.path);
-//               filterComplex += `[${inputIndex}:v]setpts=PTS-STARTPTS+${segment.startTime}/TB[v${inputIndex}];[base][v${inputIndex}]overlay=${x}:${y}:enable='between(t,${segment.startTime},${segment.startTime + segment.duration})'[base];`;
-//               inputIndex++;
-//             }
-//           });
-//         }
-//       });
-
-//       filterComplex = filterComplex.slice(0, -1); // Remove trailing semicolon
-
-//       command.input(blackFramePath)
-//         .complexFilter(filterComplex, 'base')
-//         .outputOptions([
-//           '-map', '[base]',
-//           '-c:v', 'libx264',
-//           '-preset', 'ultrafast',
-//           '-shortest'
-//         ])
-//         .save(videoOutputPath)
-//         .on('end', resolve)
-//         .on('error', reject);
-//     });
-
-//     // Step 2: Create merged audio track
-//     await new Promise((resolve, reject) => {
-//       const command = ffmpeg();
-//       let audioInputs = [];
-//       let inputIndex = 0;
-
-//       tracks.forEach((track) => {
-//         if (track.segments && track.segments.length > 0) {
-//           track.segments.forEach((segment) => {
-//             if (existsSync(segment.path)) {
-//               command.input(segment.path);
-//               audioInputs.push(`[${inputIndex}:a]`);
-//               inputIndex++;
-//             }
-//           });
-//         }
-//       });
-
-//       const audioFilterComplex = `${audioInputs.join('')}amix=inputs=${audioInputs.length}:normalize=0[aout]`;
-
-//       command.complexFilter(audioFilterComplex, 'aout')
-//         .outputOptions(['-map', '[aout]', '-c:a', 'aac'])
-//         .save(audioOutputPath)
-//         .on('end', resolve)
-//         .on('error', reject);
-//     });
-
-//     // Step 3: Merge video with overlays and audio
-//     return new Promise((resolve, reject) => {
-//       ffmpeg()
-//         .input(videoOutputPath)
-//         .input(audioOutputPath)
-//         .outputOptions(['-c:v', 'copy', '-c:a', 'aac', '-shortest'])
-//         .save(outputPath)
-//         .on('end', () => {
-//           rmSync(blackFramePath);
-//           rmSync(videoOutputPath);
-//           rmSync(audioOutputPath);
-//           console.log('Final video created successfully at:', outputPath);
-//           resolve();
-//         })
-//         .on('error', (err) => {
-//           console.error('Final merge error:', err);
-//           rmSync(blackFramePath);
-//           rmSync(videoOutputPath);
-//           rmSync(audioOutputPath);
-//           reject(err);
-//         });
-//     });
-//   } catch (error) {
-//     console.error('Error during video composition:', error);
-//     throw error;
-//   }
-// }
-
-async function composeFinalVideo(tracks, outputPath) {
+async function composeFinalVideo(tracks, outputPath, midiDuration) {
   if (!tracks || tracks.length === 0) {
     throw new Error('No tracks provided for final composition');
   }
 
   const outputDir = dirname(outputPath);
-  
-  // Ensure output directory exists
-  if (!existsSync(outputDir)) {
-    console.log(`Creating output directory at: ${outputDir}`);
-    mkdirSync(outputDir, { recursive: true });
+  const sanitizedOutputPath = outputPath.replace(/\\/g, '/');
+
+  console.log('Output directory:', outputDir);
+  console.log('Sanitized output path:', sanitizedOutputPath);
+  console.log('MIDI duration:', midiDuration);
+
+  // Temporary file paths
+  const tempFiles = {
+    blackFrame: join(outputDir, 'black_frame.mp4'),
+    videoOverlay: join(outputDir, 'video_with_overlays_temp.mp4'),
+    mergedAudio: join(outputDir, 'merged_audio_temp.mp3'),
+  };
+
+  // Ensure output directory exists and is writable
+  try {
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true });
+    }
+  } catch (error) {
+    throw new Error(`Cannot access output directory: ${error.message}`);
   }
 
-  // Create a black frame as the base video
-  const blackFramePath = join(outputDir, 'black_frame.mp4');
-  await new Promise((resolve, reject) => {
+  // Sanitize all paths
+  Object.keys(tempFiles).forEach((key) => {
+    tempFiles[key] = tempFiles[key].replace(/\\/g, '/');
+    console.log(`${key} path:`, tempFiles[key]);
+  });
+
+  const cleanup = (tempFiles) => {
+    Object.values(tempFiles).forEach((file) => {
+      if (existsSync(file)) {
+        try {
+          rmSync(file, { force: true });
+          console.log(`Cleaned up temp file: ${file}`);
+        } catch (error) {
+          console.warn(`Failed to cleanup temp file ${file}:`, error.message);
+        }
+      }
+    });
+  };
+
+  try {
+    // Create black frame base
+    await createBlackFrame(tempFiles.blackFrame, midiDuration);
+
+    // Validate input tracks and segments
+    const validSegments = tracks.reduce((acc, track, trackIndex) => {
+      const trackSegments =
+        track.segments?.filter((segment) => {
+          const exists = existsSync(segment.path);
+          if (!exists) {
+            console.log(`Skipping non-existent segment: ${segment.path}`);
+          }
+          return exists;
+        }) || [];
+
+      trackSegments.forEach((segment) => {
+        acc.push({
+          ...segment,
+          trackIndex,
+          x: (trackIndex % 3) * 320,
+          y: Math.floor(trackIndex / 3) * 240,
+        });
+      });
+
+      return acc;
+    }, []);
+
+    console.log(`Found ${validSegments.length} valid segments`);
+
+    if (validSegments.length === 0) {
+      throw new Error('No valid video segments found in tracks');
+    }
+
+    // Create video with overlays using sequential processing
+    await createVideoOverlaysSequential(
+      validSegments,
+      tempFiles.blackFrame,
+      tempFiles.videoOverlay
+    );
+
+    // Create merged audio
+    await createMergedAudio(validSegments, tempFiles.mergedAudio);
+
+    // Final merge
+    await mergeFinalVideo(
+      tempFiles.videoOverlay,
+      tempFiles.mergedAudio,
+      sanitizedOutputPath
+    );
+
+    // cleanup(tempFiles);
+    return sanitizedOutputPath;
+  } catch (error) {
+    // cleanup(tempFiles);
+    throw new Error(`Video composition failed: ${error.message}`);
+  }
+}
+
+async function createBlackFrame(outputPath) {
+  console.log('Creating black frame at:', outputPath);
+  return new Promise((resolve, reject) => {
     ffmpeg()
       .input('color=c=black:s=960x720:r=30')
       .inputOptions(['-f', 'lavfi'])
-      .outputOptions(['-c:v', 'libx264', '-t', '1', '-pix_fmt', 'yuv420p'])
-      .save(blackFramePath)
+      .outputOptions([
+        '-c:v',
+        'libx264',
+        '-t',
+        '1',
+        '-pix_fmt',
+        'yuv420p',
+        '-y',
+      ])
+      .on('start', (commandLine) => {
+        console.log('FFmpeg command (black frame):', commandLine);
+      })
+      .save(outputPath)
       .on('end', () => {
-        console.log(`Black frame created at: ${blackFramePath}`);
+        console.log('Black frame created successfully');
         resolve();
       })
       .on('error', (err) => {
-        console.error(`Error creating black frame: ${err.message}`);
+        console.error('Error creating black frame:', err.message);
         reject(err);
       });
   });
+}
 
-  // const videoOutputPath = join(outputDir, 'video_with_overlays_temp.mp4'); // Simplified name for clarity
-  // const audioOutputPath = join(outputDir, 'merged_audio_temp.mp3'); // Simplified name for clarity
-  const videoOutputPath = join(outputDir, 'video_with_overlays_temp.mp4').replace(/\\/g, '/');
-  const audioOutputPath = join(outputDir, 'merged_audio_temp.mp3').replace(/\\/g, '/');
+async function createVideoOverlaysSequential(
+  segments,
+  blackFramePath,
+  outputPath
+) {
+  let currentInput = blackFramePath;
+  console.log('Starting sequential video overlay process');
 
-  
-  try {
-    // Step 1: Create video with overlays
+  // Sort segments by start time to ensure proper overlay order
+  segments.sort((a, b) => a.startTime - b.startTime);
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    const tempOutput = `${outputPath}_temp_${i}.mp4`;
+
+    console.log(`Processing segment ${i + 1}/${segments.length}`);
+    console.log(`Input: ${segment.path}`);
+    console.log(`Position: x=${segment.x}, y=${segment.y}`);
+    console.log(
+      `Timing: start=${segment.startTime}, duration=${segment.duration}`
+    );
+
     await new Promise((resolve, reject) => {
-      const command = ffmpeg();
-      let filterComplex = '[0:v]scale=960:720,setsar=1:1[base];';
-      let inputIndex = 1;
-
-      tracks.forEach((track, trackIndex) => {
-        if (track.segments && track.segments.length > 0) {
-          track.segments.forEach((segment) => {
-            if (existsSync(segment.path)) {
-              const x = (trackIndex % 3) * 320;
-              const y = Math.floor(trackIndex / 3) * 240;
-
-              command.input(segment.path);
-              filterComplex += `[${inputIndex}:v]setpts=PTS-STARTPTS+${segment.startTime}/TB[v${inputIndex}];[base][v${inputIndex}]overlay=${x}:${y}:enable='between(t,${segment.startTime},${segment.startTime + segment.duration})'[base];`;
-              inputIndex++;
+      ffmpeg()
+        .input(currentInput)
+        .input(segment.path)
+        .complexFilter([
+          `[1:v]scale=320:240,setpts=PTS-STARTPTS[v1]`, // Scale and set PTS
+          `[0:v][v1]overlay=${segment.x}:${segment.y}:enable='between(t,${
+            segment.startTime
+          },${segment.startTime + segment.duration})'[out]`,
+        ])
+        .outputOptions([
+          '-map',
+          '[out]',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'ultrafast',
+          '-pix_fmt',
+          'yuv420p',
+          '-y',
+        ])
+        .on('start', (commandLine) => {
+          console.log(`FFmpeg command (overlay ${i + 1}):`, commandLine);
+        })
+        .save(tempOutput)
+        .on('end', () => {
+          console.log(`Overlay ${i + 1} completed`);
+          if (currentInput !== blackFramePath) {
+            try {
+              rmSync(currentInput);
+              console.log(`Removed intermediate file: ${currentInput}`);
+            } catch (err) {
+              console.warn(
+                `Failed to remove intermediate file: ${currentInput}`,
+                err
+              );
             }
-          });
-        }
+          }
+          currentInput = tempOutput;
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error(`Error in overlay ${i + 1}:`, err.message);
+          reject(err);
+        });
+    });
+  }
+
+  // Rename final temp file to target output
+  try {
+    if (existsSync(outputPath)) {
+      rmSync(outputPath);
+    }
+    renameSync(currentInput, outputPath);
+    console.log(`Renamed ${currentInput} to ${outputPath}`);
+  } catch (err) {
+    throw new Error(`Failed to finalize video file: ${err.message}`);
+  }
+}
+
+async function createMergedAudio(segments, outputPath) {
+  console.log('Starting audio merge process');
+
+  // Sort segments by start time
+  segments.sort((a, b) => a.startTime - b.startTime);
+
+  // Find the total duration needed
+  const totalDuration = Math.max(
+    ...segments.map((s) => s.startTime + s.duration)
+  );
+
+  // Create a silent base track first
+  // Use a more Windows-friendly path by avoiding special characters
+
+  let silentPath;
+
+  try {
+    silentPath = join(dirname(outputPath), 'silent_base.mp4');
+    console.log('Silent base path:', silentPath);
+    console.log('Total duration:', totalDuration);
+
+    // Validate totalDuration
+    if (isNaN(totalDuration) || totalDuration <= 0) {
+      throw new Error('Invalid total duration');
+    }
+
+    // Create silent base track
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input('anullsrc')
+        .inputOptions(['-f', 'lavfi'])
+        .audioFilters(['asetpts=PTS-STARTPTS'])
+        .outputOptions([
+          '-t',
+          String(totalDuration),
+          '-ar',
+          '48000',
+          '-ac',
+          '2',
+          '-acodec',
+          'aac',
+          '-f',
+          'mp4',
+          '-y',
+        ])
+        .on('start', (commandLine) => {
+          console.log('FFmpeg command (silent base):', commandLine);
+        })
+        .on('error', (err) => {
+          console.error('Error creating silent base:', err);
+          reject(err);
+        })
+        .save(silentPath)
+        .on('end', resolve);
+    });
+
+    // Now merge all audio segments
+    return new Promise((resolve, reject) => {
+      const command = ffmpeg();
+
+      // Add silent base track as first input
+      command.input(silentPath);
+
+      // Add all segments as inputs and log them
+      segments.forEach((segment, index) => {
+        console.log(`Adding segment ${index}:`, segment.path);
+        command.input(segment.path);
       });
 
-      filterComplex = filterComplex.slice(0, -1); // Remove trailing semicolon
+      // Create complex filter for audio mixing with proper timing
+      let filterComplex = '';
+
+      // Process each segment
+      segments.forEach((segment, i) => {
+        // i+1 because silent track is input 0
+        filterComplex += `[${
+          i + 1
+        }:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,`;
+        filterComplex += `adelay=${Math.round(
+          segment.startTime * 1000
+        )}|${Math.round(segment.startTime * 1000)},`;
+        filterComplex += `avolume=1[a${i}];`;
+      });
+
+      // Add silent base track
+      filterComplex +=
+        '[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[base];';
+
+      // Mix all audio streams including base
+      const mixInputs = ['[base]'];
+      segments.forEach((_, i) => mixInputs.push(`[a${i}]`));
+      filterComplex += `${mixInputs.join('')}amix=inputs=${
+        segments.length + 1
+      }:normalize=0[aout]`;
+
+      console.log('Filter complex:', filterComplex);
 
       command
-        .input(blackFramePath)
-        .complexFilter(filterComplex, 'base')
+        .complexFilter(filterComplex, ['aout'])
         .outputOptions([
-          '-map', '[base]',
-          '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-y', // Overwrite if exists
+          '-map',
+          '[aout]',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '256k',
+          '-f',
+          'mp4',
+          '-shortest',
+          '-t',
+          String(totalDuration),
+          '-y',
         ])
-        .save(videoOutputPath)
-        .on('end', () => {
-          console.log(`Video with overlays saved to: ${videoOutputPath}`);
-          resolve();
+        .on('start', (commandLine) => {
+          console.log('FFmpeg command (audio merge):', commandLine);
+        })
+        .on('stderr', (stderrLine) => {
+          console.log('FFmpeg stderr:', stderrLine);
         })
         .on('error', (err) => {
-          console.error(`Error during video overlay creation: ${err.message}`);
-          reject(err);
-        });
-    });
-
-    // Step 2: Create merged audio track
-    await new Promise((resolve, reject) => {
-      const command = ffmpeg();
-      let audioInputs = [];
-      let inputIndex = 0;
-
-      tracks.forEach((track) => {
-        if (track.segments && track.segments.length > 0) {
-          track.segments.forEach((segment) => {
-            if (existsSync(segment.path)) {
-              command.input(segment.path);
-              audioInputs.push(`[${inputIndex}:a]`);
-              inputIndex++;
+          console.error('Error in audio merge:', err);
+          // Clean up silent track on error
+          try {
+            if (existsSync(silentPath)) {
+              rmSync(silentPath);
             }
-          });
-        }
-      });
-
-      const audioFilterComplex = `${audioInputs.join('')}amix=inputs=${audioInputs.length}:normalize=0[aout]`;
-
-      command.complexFilter(audioFilterComplex, 'aout')
-        .outputOptions(['-map', '[aout]', '-c:a', 'aac'])
-        .save(audioOutputPath)
-        .on('end', () => {
-          console.log(`Merged audio track saved to: ${audioOutputPath}`);
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error(`Error during audio merging: ${err.message}`);
+          } catch (cleanupErr) {
+            console.warn('Failed to clean up silent track:', cleanupErr);
+          }
           reject(err);
-        });
-    });
-
-    // Step 3: Merge video with overlays and audio
-    return new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(videoOutputPath)
-        .input(audioOutputPath)
-        .outputOptions(['-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y'])
+        })
         .save(outputPath)
         .on('end', () => {
-          console.log('Final video created successfully at:', outputPath);
-          // Cleanup temp files
-          rmSync(blackFramePath, { force: true });
-          rmSync(videoOutputPath, { force: true });
-          rmSync(audioOutputPath, { force: true });
+          console.log('Audio merge completed');
+          // Clean up silent track
+          try {
+            if (existsSync(silentPath)) {
+              rmSync(silentPath);
+            }
+          } catch (err) {
+            console.warn('Failed to clean up silent track:', err);
+          }
           resolve();
-        })
-        .on('error', (err) => {
-          console.error('Error in final merge:', err.message);
-          // Cleanup temp files
-          rmSync(blackFramePath, { force: true });
-          rmSync(videoOutputPath, { force: true });
-          rmSync(audioOutputPath, { force: true });
-          reject(err);
         });
     });
-  } catch (error) {
-    console.error('Error during video composition:', error.message);
-    throw error;
+  } catch (err) {
+    // Clean up silent track if it exists
+    try {
+      if (existsSync(silentPath)) {
+        rmSync(silentPath);
+      }
+    } catch (cleanupErr) {
+      console.warn('Failed to clean up silent track:', cleanupErr);
+    }
+    console.error('Error in audio processing:', err);
+    throw err;
   }
+}
+
+async function mergeFinalVideo(videoPath, audioPath, outputPath) {
+  console.log('Starting final merge process');
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(videoPath)
+      .input(audioPath)
+      .outputOptions([
+        '-c:v',
+        'copy',
+        '-c:a',
+        'aac',
+        '-strict',
+        'experimental',
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-shortest',
+        '-y',
+      ])
+      .on('start', (commandLine) => {
+        console.log('FFmpeg command (final merge):', commandLine);
+      })
+      .save(outputPath)
+      .on('end', () => {
+        console.log('Final merge completed');
+        resolve();
+      })
+      .on('error', (err) => {
+        console.error('Error in final merge:', err.message);
+        reject(err);
+      });
+  });
+}
+
+async function createVideoOverlays(tracks, blackFramePath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const command = ffmpeg();
+    let filterComplex = '[0:v]scale=960:720,setsar=1:1[base];';
+    let inputIndex = 1;
+
+    tracks.forEach((track, trackIndex) => {
+      track.segments?.forEach((segment) => {
+        if (existsSync(segment.path)) {
+          const x = (trackIndex % 3) * 320;
+          const y = Math.floor(trackIndex / 3) * 240;
+
+          command.input(segment.path);
+          filterComplex +=
+            `[${inputIndex}:v]setpts=PTS-STARTPTS+${segment.startTime}/TB[v${inputIndex}];` +
+            `[base][v${inputIndex}]overlay=${x}:${y}:enable='between(t,${
+              segment.startTime
+            },${segment.startTime + segment.duration})'[base];`;
+          inputIndex++;
+        }
+      });
+    });
+
+    if (inputIndex === 1) {
+      reject(new Error('No valid video segments found'));
+      return;
+    }
+
+    command
+      .input(blackFramePath)
+      .complexFilter(filterComplex.slice(0, -1), 'base')
+      .outputOptions([
+        '-map',
+        '[base]',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-y',
+      ])
+      .save(outputPath)
+      .on('end', resolve)
+      .on('error', reject);
+  });
 }
 
 export const composeVideo = async (req, res) => {
@@ -852,23 +769,36 @@ export const composeVideo = async (req, res) => {
         throw err;
       }
     }
-
+    // Calculate total MIDI duration
+    const midiDuration = midi.duration;
+    console.log('Total MIDI duration:', midiDuration);
     // Process each track
     const trackPromises = midi.tracks.map(async (track, trackIndex) => {
       console.log(`Processing track ${trackIndex}:`, {
         name: track.name,
         instrument: track.instrument.name,
         noteCount: track.notes.length,
+        duration: track.duration,
       });
 
       if (track.notes.length === 0) return null;
 
       const instrument = track.instrument.name || `track${trackIndex}`;
       const videoPath = videoFiles[instrument];
+
       if (!videoPath) {
         console.log(`No video found for instrument: ${instrument}`);
         return null;
       }
+
+      // Determine base note for the track
+      // You can either:
+      // 1. Use the first note as the base note
+      // 2. Use middle C (60) as default
+      // 3. Allow it to be specified in the upload
+      const baseNote = track.notes[0]?.midi || 60;
+
+      console.log(`Track ${trackIndex} base note: ${midiNoteToName(baseNote)}`);
 
       const segments = [];
       for (const [noteIndex, note] of track.notes.entries()) {
@@ -878,7 +808,9 @@ export const composeVideo = async (req, res) => {
         console.log(`Processing note ${noteIndex}:`, {
           startTime: startTimeSeconds,
           duration: durationSeconds,
-          velocity: note.velocity,
+          velocity: note.velocity / 127,
+          midi: note.midi,
+          noteName: midiNoteToName(note.midi),
         });
 
         const segmentPath = join(
@@ -892,9 +824,11 @@ export const composeVideo = async (req, res) => {
             {
               startTime: startTimeSeconds,
               duration: durationSeconds,
-              velocity: note.velocity,
+              velocity: note.velocity / 127,
+              midi: note.midi,
             },
-            segmentPath
+            segmentPath,
+            baseNote
           );
 
           segments.push({
@@ -923,12 +857,12 @@ export const composeVideo = async (req, res) => {
       throw new Error('No valid tracks to process');
     }
 
-    // Create a black PNG image
-    const blackPngPath = join(sessionDir, 'black.png');
-    await createBlackPNG(blackPngPath);
+    // // Create a black PNG image
+    // const blackPngPath = join(sessionDir, 'black.png');
+    // await createBlackPNG(blackPngPath);
 
     const outputPath = join(sessionDir, 'output.mp4');
-    await composeFinalVideo(tracks, outputPath, blackPngPath);
+    await composeFinalVideo(tracks, outputPath, midiDuration);
 
     if (!existsSync(outputPath)) {
       throw new Error(
@@ -962,3 +896,12 @@ export const composeVideo = async (req, res) => {
     }
   }
 };
+
+async function cleanupTempDirectory(dirPath) {
+  try {
+    // await rimraf(dirPath);
+    console.log(`Temp directory ${dirPath} cleaned up successfully.`);
+  } catch (error) {
+    console.error(`Error cleaning up temp directory ${dirPath}:`, error);
+  }
+}
