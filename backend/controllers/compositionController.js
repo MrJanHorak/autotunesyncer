@@ -184,6 +184,7 @@ async function processNoteSegment(videoPath, note, outputPath, baseNote = 60) {
 
       // Overwrite output file if it exists
       '-y',
+      '-filter:a:1', 'volume=2.0' // Increase audio volume
     ]);
 
     // Add event handlers
@@ -233,7 +234,7 @@ async function composeFinalVideo(tracks, outputPath, midiDuration) {
   const tempFiles = {
     blackFrame: join(outputDir, 'black_frame.mp4'),
     videoOverlay: join(outputDir, 'video_with_overlays_temp.mp4'),
-    mergedAudio: join(outputDir, 'merged_audio_temp.mp3'),
+    mergedAudio: join(outputDir, 'merged_audio_temp.mp4'),
   };
 
   // Ensure output directory exists and is writable
@@ -311,7 +312,8 @@ async function composeFinalVideo(tracks, outputPath, midiDuration) {
     await mergeFinalVideo(
       tempFiles.videoOverlay,
       tempFiles.mergedAudio,
-      sanitizedOutputPath
+      sanitizedOutputPath,
+      midiDuration
     );
 
     // cleanup(tempFiles);
@@ -336,6 +338,7 @@ async function createBlackFrame(outputPath) {
         '-pix_fmt',
         'yuv420p',
         '-y',
+        '-filter:a:1', 'volume=2.0' // Increase audio volume
       ])
       .on('start', (commandLine) => {
         console.log('FFmpeg command (black frame):', commandLine);
@@ -394,6 +397,7 @@ async function createVideoOverlaysSequential(
           '-pix_fmt',
           'yuv420p',
           '-y',
+          '-filter:a:1', 'volume=2.0' // Increase audio volume
         ])
         .on('start', (commandLine) => {
           console.log(`FFmpeg command (overlay ${i + 1}):`, commandLine);
@@ -436,183 +440,157 @@ async function createVideoOverlaysSequential(
 
 async function createMergedAudio(segments, outputPath) {
   console.log('Starting audio merge process');
+  console.log('Number of segments:', segments.length);
 
   // Sort segments by start time
   segments.sort((a, b) => a.startTime - b.startTime);
 
   // Find the total duration needed
-  const totalDuration = Math.max(
-    ...segments.map((s) => s.startTime + s.duration)
-  );
-
-  // Create a silent base track first
-  // Use a more Windows-friendly path by avoiding special characters
-
-  let silentPath;
+  const totalDuration = Math.max(...segments.map(s => s.startTime + s.duration));
+  const BATCH_SIZE = 5; // Process 5 segments at a time
 
   try {
-    silentPath = join(dirname(outputPath), 'silent_base.mp4');
-    console.log('Silent base path:', silentPath);
     console.log('Total duration:', totalDuration);
 
-    // Validate totalDuration
     if (isNaN(totalDuration) || totalDuration <= 0) {
       throw new Error('Invalid total duration');
     }
 
-    // Create silent base track
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input('anullsrc')
-        .inputOptions(['-f', 'lavfi'])
-        .audioFilters(['asetpts=PTS-STARTPTS'])
-        .outputOptions([
-          '-t',
-          String(totalDuration),
-          '-ar',
-          '48000',
-          '-ac',
-          '2',
-          '-acodec',
-          'aac',
-          '-f',
-          'mp4',
-          '-y',
-        ])
-        .on('start', (commandLine) => {
-          console.log('FFmpeg command (silent base):', commandLine);
-        })
-        .on('error', (err) => {
-          console.error('Error creating silent base:', err);
-          reject(err);
-        })
-        .save(silentPath)
-        .on('end', resolve);
-    });
+    // Normalize output path
+    const normalizedOutputPath = outputPath.replace(/\\/g, '/');
+    let currentOutputPath = normalizedOutputPath;
 
-    // Now merge all audio segments
-    return new Promise((resolve, reject) => {
-      const command = ffmpeg();
-
-      // Add silent base track as first input
-      command.input(silentPath);
-
-      // Add all segments as inputs and log them
-      segments.forEach((segment, index) => {
-        console.log(`Adding segment ${index}:`, segment.path);
-        command.input(segment.path);
-      });
-
-      // Create complex filter for audio mixing with proper timing
-      let filterComplex = '';
-
-      // Process each segment
-      segments.forEach((segment, i) => {
-        // i+1 because silent track is input 0
-        filterComplex += `[${
-          i + 1
-        }:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,`;
-        filterComplex += `adelay=${Math.round(
-          segment.startTime * 1000
-        )}|${Math.round(segment.startTime * 1000)},`;
-        filterComplex += `avolume=1[a${i}];`;
-      });
-
-      // Add silent base track
-      filterComplex +=
-        '[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[base];';
-
-      // Mix all audio streams including base
-      const mixInputs = ['[base]'];
-      segments.forEach((_, i) => mixInputs.push(`[a${i}]`));
-      filterComplex += `${mixInputs.join('')}amix=inputs=${
-        segments.length + 1
-      }:normalize=0[aout]`;
-
-      console.log('Filter complex:', filterComplex);
-
-      command
-        .complexFilter(filterComplex, ['aout'])
-        .outputOptions([
-          '-map',
-          '[aout]',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '256k',
-          '-f',
-          'mp4',
-          '-shortest',
-          '-t',
-          String(totalDuration),
-          '-y',
-        ])
-        .on('start', (commandLine) => {
-          console.log('FFmpeg command (audio merge):', commandLine);
-        })
-        .on('stderr', (stderrLine) => {
-          console.log('FFmpeg stderr:', stderrLine);
-        })
-        .on('error', (err) => {
-          console.error('Error in audio merge:', err);
-          // Clean up silent track on error
-          try {
-            if (existsSync(silentPath)) {
-              rmSync(silentPath);
-            }
-          } catch (cleanupErr) {
-            console.warn('Failed to clean up silent track:', cleanupErr);
-          }
-          reject(err);
-        })
-        .save(outputPath)
-        .on('end', () => {
-          console.log('Audio merge completed');
-          // Clean up silent track
-          try {
-            if (existsSync(silentPath)) {
-              rmSync(silentPath);
-            }
-          } catch (err) {
-            console.warn('Failed to clean up silent track:', err);
-          }
-          resolve();
-        });
-    });
-  } catch (err) {
-    // Clean up silent track if it exists
-    try {
-      if (existsSync(silentPath)) {
-        rmSync(silentPath);
+    // Process segments in batches
+    for (let i = 0; i < segments.length; i += BATCH_SIZE) {
+      const batchSegments = segments.slice(i, i + BATCH_SIZE);
+      
+      if (batchSegments.length === 0) {
+        console.log(`Skipping empty batch ${i}`);
+        continue;
       }
-    } catch (cleanupErr) {
-      console.warn('Failed to clean up silent track:', cleanupErr);
+
+      console.log(`Processing batch ${i} with ${batchSegments.length} segments`);
+      
+      const isFirstBatch = i === 0;
+      const batchOutputPath = isFirstBatch 
+        ? normalizedOutputPath 
+        : join(dirname(normalizedOutputPath), `batch_${i}.mp4`).replace(/\\/g, '/');
+
+      await new Promise((resolve, reject) => {
+        const command = ffmpeg();
+
+        // For first batch, create silent base. For subsequent batches, use previous output
+        if (isFirstBatch) {
+          command
+            .input('anullsrc')
+            .inputOptions(['-f', 'lavfi', '-t', String(totalDuration)]);
+        } else {
+          command.input(currentOutputPath);
+        }
+
+        // Add batch segments with normalized paths
+        batchSegments.forEach(segment => {
+          const normalizedPath = segment.path.replace(/\\/g, '/');
+          console.log(`Adding input file: ${normalizedPath}`);
+          command.input(normalizedPath);
+        });
+
+        // Create filter complex
+        const filterComplex = [];
+        
+        // Format base audio
+        filterComplex.push('[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[base]');
+
+        // Process each segment
+        batchSegments.forEach((segment, index) => {
+          const inputIndex = index + 1;
+          const delay = Math.max(1, Math.round(segment.startTime * 1000));
+          
+          // Add error checking for audio stream
+          filterComplex.push(
+            `[${inputIndex}:a]asetpts=PTS-STARTPTS,` +
+            `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+            `adelay=${delay}|${delay}[delayed${index}]`
+          );
+        });
+
+        // Create mix command with a final output label
+        const mixInputs = ['[base]'];
+        batchSegments.forEach((_, index) => {
+          mixInputs.push(`[delayed${index}]`);
+        });
+        
+        const filterString = `${mixInputs.join('')}amix=inputs=${mixInputs.length}:normalize=0[audio_out]`;
+        filterComplex.push(filterString);
+        
+        console.log('Filter complex:', filterComplex.join(';'));
+
+        // Ensure output path has correct extension
+        const outputPathWithExt = batchOutputPath.toLowerCase().endsWith('.mp4') 
+          ? batchOutputPath 
+          : batchOutputPath.replace(/\.[^/.]+$/, '') + '.mp4';
+
+        // Apply filter complex and output options
+        command
+          .complexFilter(filterComplex.join(';'))
+          .outputOptions([
+            '-map', '[audio_out]',
+            '-c:a', 'aac',
+            '-b:a', '256k',
+            '-f', 'mp4',
+            '-movflags', '+faststart',
+            '-t', String(totalDuration),
+            '-filter:a:1', 'volume=2.0' // Increase audio volume
+          ])
+          .on('start', commandLine => {
+            console.log(`FFmpeg command (batch ${i}):`, commandLine);
+          })
+          .on('error', err => {
+            console.error(`Error in batch ${i}:`, err);
+            reject(err);
+          })
+          .on('stderr', stderrLine => {
+            console.log(`FFmpeg stderr: ${stderrLine}`);
+          })
+          .save(outputPathWithExt)
+          .on('end', () => {
+            // Clean up previous intermediate file if it exists
+            if (!isFirstBatch && currentOutputPath !== normalizedOutputPath) {
+              try {
+                rmSync(currentOutputPath);
+              } catch (err) {
+                console.warn(`Failed to clean up intermediate file: ${currentOutputPath}`, err);
+              }
+            }
+            currentOutputPath = outputPathWithExt;
+            console.log(`Successfully processed batch ${i}`);
+            resolve();
+          });
+      });
     }
+
+  } catch (err) {
     console.error('Error in audio processing:', err);
     throw err;
   }
 }
 
-async function mergeFinalVideo(videoPath, audioPath, outputPath) {
+async function mergeFinalVideo(videoPath, audioPath, outputPath, totalDuration) {
   console.log('Starting final merge process');
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
       .input(audioPath)
       .outputOptions([
-        '-c:v',
-        'copy',
-        '-c:a',
-        'aac',
-        '-strict',
-        'experimental',
-        '-map',
-        '0:v:0',
-        '-map',
-        '1:a:0',
-        '-shortest',
-        '-y',
-      ])
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-strict', 'experimental',
+        '-map', '0:v:0',
+        '-map', '1:a:0',
+        '-t', String(totalDuration), // Set the total duration here
+        '-y', 
+        '-filter:a:1', 'volume=2.0' // Increase audio volume
+    ])
       .on('start', (commandLine) => {
         console.log('FFmpeg command (final merge):', commandLine);
       })
