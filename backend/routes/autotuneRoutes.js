@@ -4,18 +4,15 @@ import { autotuneVideo } from '../controllers/autotuneController.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
-
 // Define storage for video files
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     const videoDir = path.resolve(__dirname, '../uploads/videos');
-    if (!fs.existsSync(videoDir)) {
-      fs.mkdirSync(videoDir, { recursive: true });
-    }
     cb(null, videoDir);
   },
   filename: (req, file, cb) => {
@@ -25,6 +22,20 @@ const videoStorage = multer.diskStorage({
 
 const videoUpload = multer({ storage: videoStorage });
 
-router.post('/autotune-video', videoUpload.single('video'), autotuneVideo);
+// Ensure the video directory exists at server startup
+const videoDir = path.resolve(__dirname, '../uploads/videos');
+if (!fs.existsSync(videoDir)) {
+  fs.mkdirSync(videoDir, { recursive: true });
+}
+
+// Route for autotuning video
+router.post('/', videoUpload.single('video'), (req, res, next) => {
+  videoUpload.single('video')(req, res, (err) => {
+    if (err) {
+      return res.status(400).send({ error: 'Failed to upload video' });
+    }
+    next();
+  });
+}, autotuneVideo);
 
 export default router;

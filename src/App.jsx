@@ -2,7 +2,7 @@
 /* eslint-disable no-unused-vars */
 import { useState } from 'react';
 import Dropzone from 'react-dropzone';
-import VideoRecorder from './components/VideoRecorder';
+import VideoRecorder from './components/videoRecorder';  // Updated import
 import VideoComposer from './components/VideoComposer';  // Updated import
 import { Midi } from '@tonejs/midi';
 import * as Tone from 'tone';

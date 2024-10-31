@@ -184,7 +184,8 @@ async function processNoteSegment(videoPath, note, outputPath, baseNote = 60) {
 
       // Overwrite output file if it exists
       '-y',
-      '-filter:a:1', 'volume=2.0' // Increase audio volume
+      '-filter:a:1',
+      'volume=2.0', // Increase audio volume
     ]);
 
     // Add event handlers
@@ -299,10 +300,12 @@ async function composeFinalVideo(tracks, outputPath, midiDuration) {
     }
 
     // Create video with overlays using sequential processing
+    // const totalTracks = midi.tracks.length;
     await createVideoOverlaysSequential(
       validSegments,
       tempFiles.blackFrame,
-      tempFiles.videoOverlay
+      tempFiles.videoOverlay,
+      tracks.length
     );
 
     // Create merged audio
@@ -338,7 +341,8 @@ async function createBlackFrame(outputPath) {
         '-pix_fmt',
         'yuv420p',
         '-y',
-        '-filter:a:1', 'volume=2.0' // Increase audio volume
+        '-filter:a:1',
+        'volume=2.0', // Increase audio volume
       ])
       .on('start', (commandLine) => {
         console.log('FFmpeg command (black frame):', commandLine);
@@ -355,10 +359,94 @@ async function createBlackFrame(outputPath) {
   });
 }
 
+// async function createVideoOverlaysSequential(
+//   segments,
+//   blackFramePath,
+//   outputPath
+// ) {
+//   let currentInput = blackFramePath;
+//   console.log('Starting sequential video overlay process');
+
+//   // Sort segments by start time to ensure proper overlay order
+//   segments.sort((a, b) => a.startTime - b.startTime);
+
+//   for (let i = 0; i < segments.length; i++) {
+//     const segment = segments[i];
+//     const tempOutput = `${outputPath}_temp_${i}.mp4`;
+
+//     console.log(`Processing segment ${i + 1}/${segments.length}`);
+//     console.log(`Input: ${segment.path}`);
+//     console.log(`Position: x=${segment.x}, y=${segment.y}`);
+//     console.log(
+//       `Timing: start=${segment.startTime}, duration=${segment.duration}`
+//     );
+
+//     await new Promise((resolve, reject) => {
+//       ffmpeg()
+//         .input(currentInput)
+//         .input(segment.path)
+//         .complexFilter([
+//           `[1:v]scale=320:240,setpts=PTS-STARTPTS[v1]`, // Scale and set PTS
+//           `[0:v][v1]overlay=${segment.x}:${segment.y}:enable='between(t,${
+//             segment.startTime
+//           },${segment.startTime + segment.duration})'[out]`,
+//         ])
+//         .outputOptions([
+//           '-map',
+//           '[out]',
+//           '-c:v',
+//           'libx264',
+//           '-preset',
+//           'ultrafast',
+//           '-pix_fmt',
+//           'yuv420p',
+//           '-y',
+//           '-filter:a:1', 'volume=2.0' // Increase audio volume
+//         ])
+//         .on('start', (commandLine) => {
+//           console.log(`FFmpeg command (overlay ${i + 1}):`, commandLine);
+//         })
+//         .save(tempOutput)
+//         .on('end', () => {
+//           console.log(`Overlay ${i + 1} completed`);
+//           if (currentInput !== blackFramePath) {
+//             try {
+//               rmSync(currentInput);
+//               console.log(`Removed intermediate file: ${currentInput}`);
+//             } catch (err) {
+//               console.warn(
+//                 `Failed to remove intermediate file: ${currentInput}`,
+//                 err
+//               );
+//             }
+//           }
+//           currentInput = tempOutput;
+//           resolve();
+//         })
+//         .on('error', (err) => {
+//           console.error(`Error in overlay ${i + 1}:`, err.message);
+//           reject(err);
+//         });
+//     });
+//   }
+
+//   // Rename final temp file to target output
+//   try {
+//     if (existsSync(outputPath)) {
+//       rmSync(outputPath);
+//     }
+//     renameSync(currentInput, outputPath);
+//     console.log(`Renamed ${currentInput} to ${outputPath}`);
+//   } catch (err) {
+//     throw new Error(`Failed to finalize video file: ${err.message}`);
+//   }
+// }
+
 async function createVideoOverlaysSequential(
   segments,
   blackFramePath,
-  outputPath
+  outputPath,
+  totalTracks
 ) {
   let currentInput = blackFramePath;
   console.log('Starting sequential video overlay process');
@@ -366,13 +454,22 @@ async function createVideoOverlaysSequential(
   // Sort segments by start time to ensure proper overlay order
   segments.sort((a, b) => a.startTime - b.startTime);
 
+  // Calculate the layout based on the number of tracks
+  const cols = Math.ceil(Math.sqrt(totalTracks));
+  const rows = Math.ceil(totalTracks / cols);
+  const segmentWidth = 960 / cols;
+  const segmentHeight = 720 / rows;
+
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
     const tempOutput = `${outputPath}_temp_${i}.mp4`;
+    const trackIndex = segment.trackIndex;
+    const x = (trackIndex % cols) * segmentWidth;
+    const y = Math.floor(trackIndex / cols) * segmentHeight;
 
     console.log(`Processing segment ${i + 1}/${segments.length}`);
     console.log(`Input: ${segment.path}`);
-    console.log(`Position: x=${segment.x}, y=${segment.y}`);
+    console.log(`Position: x=${x}, y=${y}`);
     console.log(
       `Timing: start=${segment.startTime}, duration=${segment.duration}`
     );
@@ -382,10 +479,10 @@ async function createVideoOverlaysSequential(
         .input(currentInput)
         .input(segment.path)
         .complexFilter([
-          `[1:v]scale=320:240,setpts=PTS-STARTPTS[v1]`, // Scale and set PTS
-          `[0:v][v1]overlay=${segment.x}:${segment.y}:enable='between(t,${
-            segment.startTime
-          },${segment.startTime + segment.duration})'[out]`,
+          `[1:v]scale=${segmentWidth}:${segmentHeight},setpts=PTS-STARTPTS[v1]`,
+          `[0:v][v1]overlay=${x}:${y}:enable='between(t,${segment.startTime},${
+            segment.startTime + segment.duration
+          })'[out]`,
         ])
         .outputOptions([
           '-map',
@@ -397,7 +494,8 @@ async function createVideoOverlaysSequential(
           '-pix_fmt',
           'yuv420p',
           '-y',
-          '-filter:a:1', 'volume=2.0' // Increase audio volume
+          '-filter:a:1',
+          'volume=2.0',
         ])
         .on('start', (commandLine) => {
           console.log(`FFmpeg command (overlay ${i + 1}):`, commandLine);
@@ -411,7 +509,7 @@ async function createVideoOverlaysSequential(
               console.log(`Removed intermediate file: ${currentInput}`);
             } catch (err) {
               console.warn(
-                `Failed to remove intermediate file: ${currentInput}`,
+                `Failed to clean up intermediate file: ${currentInput}`,
                 err
               );
             }
@@ -446,7 +544,9 @@ async function createMergedAudio(segments, outputPath) {
   segments.sort((a, b) => a.startTime - b.startTime);
 
   // Find the total duration needed
-  const totalDuration = Math.max(...segments.map(s => s.startTime + s.duration));
+  const totalDuration = Math.max(
+    ...segments.map((s) => s.startTime + s.duration)
+  );
   const BATCH_SIZE = 5; // Process 5 segments at a time
 
   try {
@@ -463,18 +563,23 @@ async function createMergedAudio(segments, outputPath) {
     // Process segments in batches
     for (let i = 0; i < segments.length; i += BATCH_SIZE) {
       const batchSegments = segments.slice(i, i + BATCH_SIZE);
-      
+
       if (batchSegments.length === 0) {
         console.log(`Skipping empty batch ${i}`);
         continue;
       }
 
-      console.log(`Processing batch ${i} with ${batchSegments.length} segments`);
-      
+      console.log(
+        `Processing batch ${i} with ${batchSegments.length} segments`
+      );
+
       const isFirstBatch = i === 0;
-      const batchOutputPath = isFirstBatch 
-        ? normalizedOutputPath 
-        : join(dirname(normalizedOutputPath), `batch_${i}.mp4`).replace(/\\/g, '/');
+      const batchOutputPath = isFirstBatch
+        ? normalizedOutputPath
+        : join(dirname(normalizedOutputPath), `batch_${i}.mp4`).replace(
+            /\\/g,
+            '/'
+          );
 
       await new Promise((resolve, reject) => {
         const command = ffmpeg();
@@ -489,7 +594,7 @@ async function createMergedAudio(segments, outputPath) {
         }
 
         // Add batch segments with normalized paths
-        batchSegments.forEach(segment => {
+        batchSegments.forEach((segment) => {
           const normalizedPath = segment.path.replace(/\\/g, '/');
           console.log(`Adding input file: ${normalizedPath}`);
           command.input(normalizedPath);
@@ -497,20 +602,22 @@ async function createMergedAudio(segments, outputPath) {
 
         // Create filter complex
         const filterComplex = [];
-        
+
         // Format base audio
-        filterComplex.push('[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[base]');
+        filterComplex.push(
+          '[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[base]'
+        );
 
         // Process each segment
         batchSegments.forEach((segment, index) => {
           const inputIndex = index + 1;
           const delay = Math.max(1, Math.round(segment.startTime * 1000));
-          
+
           // Add error checking for audio stream
           filterComplex.push(
             `[${inputIndex}:a]asetpts=PTS-STARTPTS,` +
-            `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
-            `adelay=${delay}|${delay}[delayed${index}]`
+              `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+              `adelay=${delay}|${delay}[delayed${index}]`
           );
         });
 
@@ -519,37 +626,46 @@ async function createMergedAudio(segments, outputPath) {
         batchSegments.forEach((_, index) => {
           mixInputs.push(`[delayed${index}]`);
         });
-        
-        const filterString = `${mixInputs.join('')}amix=inputs=${mixInputs.length}:normalize=0[audio_out]`;
+
+        const filterString = `${mixInputs.join('')}amix=inputs=${
+          mixInputs.length
+        }:normalize=0[audio_out]`;
         filterComplex.push(filterString);
-        
+
         console.log('Filter complex:', filterComplex.join(';'));
 
         // Ensure output path has correct extension
-        const outputPathWithExt = batchOutputPath.toLowerCase().endsWith('.mp4') 
-          ? batchOutputPath 
+        const outputPathWithExt = batchOutputPath.toLowerCase().endsWith('.mp4')
+          ? batchOutputPath
           : batchOutputPath.replace(/\.[^/.]+$/, '') + '.mp4';
 
         // Apply filter complex and output options
         command
           .complexFilter(filterComplex.join(';'))
           .outputOptions([
-            '-map', '[audio_out]',
-            '-c:a', 'aac',
-            '-b:a', '256k',
-            '-f', 'mp4',
-            '-movflags', '+faststart',
-            '-t', String(totalDuration),
-            '-filter:a:1', 'volume=2.0' // Increase audio volume
+            '-map',
+            '[audio_out]',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '256k',
+            '-f',
+            'mp4',
+            '-movflags',
+            '+faststart',
+            '-t',
+            String(totalDuration),
+            '-filter:a:1',
+            'volume=2.0', // Increase audio volume
           ])
-          .on('start', commandLine => {
+          .on('start', (commandLine) => {
             console.log(`FFmpeg command (batch ${i}):`, commandLine);
           })
-          .on('error', err => {
+          .on('error', (err) => {
             console.error(`Error in batch ${i}:`, err);
             reject(err);
           })
-          .on('stderr', stderrLine => {
+          .on('stderr', (stderrLine) => {
             console.log(`FFmpeg stderr: ${stderrLine}`);
           })
           .save(outputPathWithExt)
@@ -559,7 +675,10 @@ async function createMergedAudio(segments, outputPath) {
               try {
                 rmSync(currentOutputPath);
               } catch (err) {
-                console.warn(`Failed to clean up intermediate file: ${currentOutputPath}`, err);
+                console.warn(
+                  `Failed to clean up intermediate file: ${currentOutputPath}`,
+                  err
+                );
               }
             }
             currentOutputPath = outputPathWithExt;
@@ -568,29 +687,40 @@ async function createMergedAudio(segments, outputPath) {
           });
       });
     }
-
   } catch (err) {
     console.error('Error in audio processing:', err);
     throw err;
   }
 }
 
-async function mergeFinalVideo(videoPath, audioPath, outputPath, totalDuration) {
+async function mergeFinalVideo(
+  videoPath,
+  audioPath,
+  outputPath,
+  totalDuration
+) {
   console.log('Starting final merge process');
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
       .input(audioPath)
       .outputOptions([
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-strict', 'experimental',
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        '-t', String(totalDuration), // Set the total duration here
-        '-y', 
-        '-filter:a:1', 'volume=2.0' // Increase audio volume
-    ])
+        '-c:v',
+        'copy',
+        '-c:a',
+        'aac',
+        '-strict',
+        'experimental',
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-t',
+        String(totalDuration), // Set the total duration here
+        '-y',
+        '-filter:a:1',
+        'volume=2.0', // Increase audio volume
+      ])
       .on('start', (commandLine) => {
         console.log('FFmpeg command (final merge):', commandLine);
       })
