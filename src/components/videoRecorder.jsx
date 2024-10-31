@@ -1,11 +1,12 @@
 /* eslint-disable react/prop-types */
 import { useRef, useState, useEffect } from 'react';
+import { handleRecord, uploadVideo } from '../js/handleRecordVideo';
+import * as Tone from 'tone';
 
-const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) => {
+const VideoRecorder = ({ style, instrument }) => {
   const videoRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]); // Use ref for chunks
   const [recordedVideoURL, setRecordedVideoURL] = useState(null);
+  const [autotunedVideoURL, setAutotunedVideoURL] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -16,66 +17,38 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) =
   }, [isRecording]);
 
   const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.muted = true; // Mute audio during recording
-        videoRef.current.play();
-      }
-
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data); // Use ref to store chunks
-          console.log('Data available:', event.data.size); // Debugging
-        } else {
-          console.log('No data available'); // Debugging
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        setIsProcessing(true);
-        console.log('Chunks:', chunksRef.current); // Debugging
-        const blob = new Blob(chunksRef.current, { type: 'video/webm' }); // Change MIME type to webm
-        const videoURL = URL.createObjectURL(blob);
-        console.log('Generated video URL:', videoURL); // Debugging
-        console.log('Blob size:', blob.size); // Debugging
-        setRecordedVideoURL(videoURL);
-        onRecordingComplete(blob, instrument, trackIndex); // Ensure blob is passed correctly
-        chunksRef.current = []; // Clear chunks
-        setIsRecording(false); // Reset recording state
-        stopMediaStream();
-        setIsProcessing(false);
-      };
-
-      mediaRecorder.start();
-      console.log('MediaRecorder started:', mediaRecorder.state); // Debugging
-    } catch (error) {
-      console.error('Error accessing media devices.', error);
-      setIsRecording(false); // Reset recording state if there's an error
-    }
+    setIsProcessing(true);
+    await handleRecord(setRecordedVideoURL, setAutotunedVideoURL);
+    setIsProcessing(false);
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
-      console.log('MediaRecorder stopped:', mediaRecorderRef.current.state); // Debugging
-    }
-  };
-
-  const stopMediaStream = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-    }
+    setIsRecording(false);
   };
 
   const handleReRecord = () => {
     setRecordedVideoURL(null);
+    setAutotunedVideoURL(null);
     setIsRecording(false);
+  };
+
+  const uploadAutotunedVideo = async () => {
+    if (!autotunedVideoURL) return;
+
+    const response = await fetch(autotunedVideoURL);
+    const autotunedVideoBlob = await response.blob();
+    const autotunedVideoFile = new File([autotunedVideoBlob], 'autotuned-video.mp4');
+
+    await uploadVideo(autotunedVideoFile);
+    alert('Autotuned video uploaded successfully!');
+  };
+
+  const playSampleSound = async () => {
+    if (instrument.toLowerCase().includes('drum')) return;
+
+    const synth = new Tone.Synth().toDestination();
+    await Tone.start();
+    synth.triggerAttackRelease('C4', '1.5s');
   };
 
   return (
@@ -95,6 +68,9 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) =
               Re-record
             </button>
           )}
+          <button onClick={playSampleSound} style={{ position: 'absolute', bottom: '10px', left: '230px', zIndex: 10 }}>
+            Play Sample Sound
+          </button>
         </>
       )}
       {isProcessing && (
@@ -105,6 +81,14 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, trackIndex }) =
       {!isRecording && recordedVideoURL && (
         <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 5 }}>
           <video src={recordedVideoURL} controls style={{ width: '100%', height: '100%' }}></video>
+        </div>
+      )}
+      {!isRecording && autotunedVideoURL && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 5 }}>
+          <video src={autotunedVideoURL} controls style={{ width: '100%', height: '100%' }}></video>
+          <button onClick={uploadAutotunedVideo} style={{ position: 'absolute', bottom: '10px', left: '10px', zIndex: 10 }}>
+            Upload Autotuned Video
+          </button>
         </div>
       )}
     </div>
