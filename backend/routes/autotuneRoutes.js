@@ -9,10 +9,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+
 // Define storage for video files
 const videoStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     const videoDir = path.resolve(__dirname, '../uploads/videos');
+    if (!fs.existsSync(videoDir)) {
+      fs.mkdirSync(videoDir, { recursive: true });
+    }
     cb(null, videoDir);
   },
   filename: (req, file, cb) => {
@@ -30,12 +34,12 @@ if (!fs.existsSync(videoDir)) {
 
 // Route for autotuning video
 router.post('/', videoUpload.single('video'), (req, res, next) => {
-  videoUpload.single('video')(req, res, (err) => {
-    if (err) {
-      return res.status(400).send({ error: 'Failed to upload video' });
-    }
-    next();
-  });
+  console.log('Uploading video...');
+  if (!req.file) {
+    return res.status(400).send({ error: 'No video file uploaded' });
+  }
+  console.log('Video uploaded:', req.file);
+  next();
 }, autotuneVideo);
 
 export default router;

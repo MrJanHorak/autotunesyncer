@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 /* eslint-disable react/prop-types */
 // import { useState } from 'react';
 // import axios from 'axios';
@@ -75,7 +76,7 @@
 // export default VideoComposer;
 
 import { useState } from 'react';
-import axios from 'axios';
+import { videoService } from '../../services/videoServices';
 
 const VideoComposer = ({ videoFiles, midiData }) => {
   const [isProcessing, setIsProcessing] = useState(false);
@@ -83,71 +84,87 @@ const VideoComposer = ({ videoFiles, midiData }) => {
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
   const [error, setError] = useState(null);
 
+  // const startComposition = async () => {
+  //   setIsProcessing(true);
+  //   setProgress(0);
+  //   setError(null);
+
+  //   try {
+  //     const formData = new FormData();
+      
+  //     // Convert MIDI data to proper format
+  //     // If midiData is already a Uint8Array or ArrayBuffer, use it directly
+  //     // Otherwise, serialize it properly
+  //     let midiBlob;
+  //     if (midiData instanceof Uint8Array || midiData instanceof ArrayBuffer) {
+  //       midiBlob = new Blob([midiData], { type: 'audio/midi' });
+  //     } else {
+  //       // Assuming midiData is an object with MIDI properties
+  //       const midiString = JSON.stringify(midiData);
+  //       midiBlob = new Blob([midiString], { type: 'application/json' });
+  //     }
+  //     formData.append('midiData', midiBlob);
+      
+  //     // Append video files
+  //     Object.entries(videoFiles).forEach(([instrument, blob]) => {
+  //       // Ensure the blob is actually a Blob or File object
+  //       if (blob instanceof Blob || blob instanceof File) {
+  //         formData.append(`videos[${instrument}]`, blob);
+  //       } else {
+  //         throw new Error(`Invalid video file format for instrument: ${instrument}`);
+  //       }
+  //     });
+
+  //     const response = await axios.post('http://localhost:3000/api/compose', formData, {
+  //       responseType: 'blob',
+  //       headers: {
+  //         'Content-Type': 'multipart/form-data',
+  //       },
+  //       onUploadProgress: (progressEvent) => {
+  //         const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+  //         setProgress(percentCompleted);
+  //       }
+  //     });
+
+  //     // Check if the response is an error message
+  //     const contentType = response.headers['content-type'];
+  //     if (contentType && contentType.includes('application/json')) {
+  //       // Parse error message
+  //       const reader = new FileReader();
+  //       reader.onload = () => {
+  //         const errorData = JSON.parse(reader.result);
+  //         setError(errorData.error || 'Composition failed');
+  //       };
+  //       reader.readAsText(response.data);
+  //       return;
+  //     }
+
+  //     const url = URL.createObjectURL(response.data);
+  //     setComposedVideoUrl(url);
+  //   } catch (error) {
+  //     console.error('Composition failed:', error);
+  //     setError(error.message || 'Composition failed');
+  //   } finally {
+  //     setIsProcessing(false);
+  //   }
+  // };
+
   const startComposition = async () => {
-    setIsProcessing(true);
-    setProgress(0);
-    setError(null);
-
     try {
-      const formData = new FormData();
-      
-      // Convert MIDI data to proper format
-      // If midiData is already a Uint8Array or ArrayBuffer, use it directly
-      // Otherwise, serialize it properly
-      let midiBlob;
-      if (midiData instanceof Uint8Array || midiData instanceof ArrayBuffer) {
-        midiBlob = new Blob([midiData], { type: 'audio/midi' });
-      } else {
-        // Assuming midiData is an object with MIDI properties
-        const midiString = JSON.stringify(midiData);
-        midiBlob = new Blob([midiString], { type: 'application/json' });
-      }
-      formData.append('midiData', midiBlob);
-      
-      // Append video files
-      Object.entries(videoFiles).forEach(([instrument, blob]) => {
-        // Ensure the blob is actually a Blob or File object
-        if (blob instanceof Blob || blob instanceof File) {
-          formData.append(`videos[${instrument}]`, blob);
-        } else {
-          throw new Error(`Invalid video file format for instrument: ${instrument}`);
-        }
-      });
-
-      const response = await axios.post('http://localhost:3000/api/compose', formData, {
-        responseType: 'blob',
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        onUploadProgress: (progressEvent) => {
-          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-          setProgress(percentCompleted);
-        }
-      });
-
-      // Check if the response is an error message
-      const contentType = response.headers['content-type'];
-      if (contentType && contentType.includes('application/json')) {
-        // Parse error message
-        const reader = new FileReader();
-        reader.onload = () => {
-          const errorData = JSON.parse(reader.result);
-          setError(errorData.error || 'Composition failed');
-        };
-        reader.readAsText(response.data);
-        return;
-      }
-
-      const url = URL.createObjectURL(response.data);
+      setIsProcessing(true);
+      const composedVideoBlob = await videoService.composeVideos(
+        videoFiles,
+        midiData
+      );
+      const url = URL.createObjectURL(composedVideoBlob);
       setComposedVideoUrl(url);
     } catch (error) {
-      console.error('Composition failed:', error);
-      setError(error.message || 'Composition failed');
+      setError(error.message);
     } finally {
       setIsProcessing(false);
     }
   };
-
+  
   return (
     <div className="video-composer">
       <button
