@@ -4,7 +4,7 @@ import { useRef, useState, useEffect } from 'react';
 import PropTypes from 'prop-types';
 import { Camera, RefreshCw, Upload, Music, X } from 'lucide-react';
 import * as Tone from 'tone';
-import { useVideoRecorder, videoService } from '../../services/videoServices';
+import { videoService } from '../../services/videoServices';
 
 const ErrorAlert = ({ message, onClose }) => (
   <div className='absolute top-4 left-4 right-4 z-50 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded flex justify-between items-center'>
@@ -22,6 +22,7 @@ ErrorAlert.propTypes = {
 
 const VideoRecorder = ({ instrument, onVideoReady }) => {
   const videoRef = useRef(null);
+  const streamRef = useRef(null); 
   const [recordedVideoURL, setRecordedVideoURL] = useState(null);
   const [autotunedVideoURL, setAutotunedVideoURL] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -30,87 +31,144 @@ const VideoRecorder = ({ instrument, onVideoReady }) => {
   const [isAutotuning, setIsAutotuning] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [recordingInterval, setRecordingIntervalId] = useState(null);
-
-
-  const { recordVideo } = useVideoRecorder({
-    onRecordingStart: () => {
-      setIsRecording(true);
-      const intervalId = setInterval(() => {
-        setRecordingDuration((prev) => prev + 1);
-      }, 1000);
-      setRecordingIntervalId(intervalId);
-    },
-    onRecordingStop: () => {
-      setIsRecording(false);
-      if (recordingInterval) {
-        clearInterval(recordingInterval);
-      }
-      try {
-        // Add any code that might throw an error here
-      } finally {
-        setIsProcessing(false);
-        setIsAutotuning(false);
-      }
-    },
-    onProcessingStart: () => setIsProcessing(true),
-    onProcessingComplete: () => setIsProcessing(false),
-    onError: (error) => setError(error.message),
-  });
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const chunksRef = useRef([]);
 
   useEffect(() => {
     const currentVideoRef = videoRef.current;
+
     return () => {
       // Cleanup function
-      if (currentVideoRef?.srcObject) {
-        currentVideoRef.srcObject.getTracks().forEach((track) => track.stop());
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      if (currentVideoRef) {
+        const srcObject = currentVideoRef.srcObject;
+        if (srcObject) {
+          srcObject.getTracks().forEach(track => track.stop());
+          currentVideoRef.srcObject = null;
+        }
       }
       if (recordedVideoURL) URL.revokeObjectURL(recordedVideoURL);
       if (autotunedVideoURL) URL.revokeObjectURL(autotunedVideoURL);
-    };
-  }, [recordedVideoURL, autotunedVideoURL]);
-
-  useEffect(() => {
-    const currentVideoRef = videoRef.current;
-    return () => {
-      if (currentVideoRef?.srcObject) {
-        currentVideoRef.srcObject.getTracks().forEach((track) => track.stop());
+      if (recordingInterval) {
+        clearInterval(recordingInterval);
       }
     };
-  }, [recordedVideoURL, autotunedVideoURL]);
+  }, [recordedVideoURL, autotunedVideoURL, recordingInterval]);
 
-  const stopRecording = () => {
+  const stopRecording = async () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
+
+    // Stop all tracks in the stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+
+    // Stop video element's stream
     if (videoRef.current?.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach((track) => track.stop());
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
     }
+
     setIsRecording(false);
     setRecordingDuration(0);
+    if (recordingInterval) {
+      clearInterval(recordingInterval);
+    }
   };
 
   const startRecording = async () => {
     try {
       setIsProcessing(true);
+      setError(null);
+      chunksRef.current = [];
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
+      
+      console.log('Obtained media stream:', stream);
+      
+      streamRef.current = stream;
       videoRef.current.srcObject = stream;
-      videoRef.current.muted = true;
+      videoRef.current.muted = true; // Mute to prevent feedback
       await videoRef.current.play();
 
-      const result = await recordVideo();
-      setIsAutotuning(true);
-      const autotunedResult = await videoService.autotuneVideo(result);
-      setAutotunedVideoURL(URL.createObjectURL(autotunedResult));
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setIsProcessing(false);
-      setIsAutotuning(false);
-    }
+      const mimeType = 'video/webm;codecs=vp8,opus';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        throw new Error(`MIME type ${mimeType} is not supported`);
+      }
 
-  } // Closing brace for startRecording function
+      const recorder = new MediaRecorder(stream, { mimeType });
+      setMediaRecorder(recorder);
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          chunksRef.current.push(e.data);
+          console.log('Received data chunk:', e.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        console.log('MediaRecorder stopped');
+        try {
+          const blob = new Blob(chunksRef.current, { type: mimeType });
+          console.log('Created blob:', blob);
+          
+          if (blob.size === 0) {
+            throw new Error('Recorded video is empty');
+          }
+
+          const videoURL = URL.createObjectURL(blob);
+          setRecordedVideoURL(videoURL);
+
+          setIsAutotuning(true);
+
+          const formData = new FormData();
+          formData.append('video', blob, 'recording.webm');
+          console.log('Sending formData to autotune:', formData);
+
+          const autotunedResult = await videoService.autotuneVideo(formData);
+          console.log('Received autotuned video:', autotunedResult);
+
+          setAutotunedVideoURL(URL.createObjectURL(autotunedResult));
+        } catch (err) {
+          console.error('Recording error:', err);
+          setError(err.message);
+        } finally {
+          setIsAutotuning(false);
+          setIsProcessing(false);
+        }
+      };
+
+      // Add an error handler for MediaRecorder
+      recorder.onerror = (event) => {
+        console.error('MediaRecorder error:', event.error);
+        setError(`Recording error: ${event.error.name}`);
+        setIsProcessing(false);
+      };
+
+      recorder.start(1000); // Start recording with a timeslice of 1 second
+      console.log('MediaRecorder started with timeslice');
+
+      setIsRecording(true);
+      
+      const intervalId = setInterval(() => {
+        setRecordingDuration((prev) => prev + 1);
+      }, 1000);
+      setRecordingIntervalId(intervalId);
+    } catch (err) {
+      console.error('Start recording error:', err);
+      setError(err.message);
+      setIsProcessing(false);
+    }
+  };
 
   const handleReRecord = () => {
     if (videoRef.current?.srcObject) {
@@ -159,7 +217,12 @@ const VideoRecorder = ({ instrument, onVideoReady }) => {
 
   return (
     <div className='relative w-full h-full min-h-[480px] bg-gray-900 rounded-lg overflow-hidden'>
-      <video ref={videoRef} className='w-full h-full object-cover' />
+      <video 
+        ref={videoRef} 
+        className='w-full h-full object-cover'
+        autoPlay 
+        playsInline
+      />
 
       {error && <ErrorAlert message={error} onClose={() => setError(null)} />}
 
@@ -227,15 +290,27 @@ const VideoRecorder = ({ instrument, onVideoReady }) => {
         </div>
       )}
 
-      {!isRecording && recordedVideoURL && (
+      {!isRecording && recordedVideoURL && !autotunedVideoURL && (
         <div className='absolute inset-0 bg-gray-900'>
-          <video src={recordedVideoURL} controls className='w-full h-full' />
+          <video 
+            src={recordedVideoURL} 
+            controls 
+            className='w-full h-full'
+            autoPlay 
+            playsInline
+          />
         </div>
       )}
 
       {!isRecording && autotunedVideoURL && (
         <div className='absolute inset-0 bg-gray-900'>
-          <video src={autotunedVideoURL} controls className='w-full h-full' />
+          <video 
+            src={autotunedVideoURL} 
+            controls 
+            className='w-full h-full'
+            autoPlay 
+            playsInline
+          />
         </div>
       )}
     </div>
