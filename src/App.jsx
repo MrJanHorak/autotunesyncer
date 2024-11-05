@@ -106,12 +106,24 @@ function App() {
 
   const handleVideoReady = useCallback((url, instrument) => {
     const normalizedName = normalizeInstrumentName(instrument.name);
-    setVideoFiles(prev => ({
-      ...prev,
-      [normalizedName]: url
-    }));
-    setRecordedVideosCount(prev => prev + 1);
-  }, []);
+    setVideoFiles(prev => {
+      // Only update if the URL is different
+      if (prev[normalizedName] !== url) {
+        return {
+          ...prev,
+          [normalizedName]: url
+        };
+      }
+      return prev;
+    });
+    // Only increment count if we haven't recorded this instrument before
+    setRecordedVideosCount(prev => {
+      if (!videoFiles[normalizedName]) {
+        return prev + 1;
+      }
+      return prev;
+    });
+  }, [videoFiles]);
 
   return (
     <div>
