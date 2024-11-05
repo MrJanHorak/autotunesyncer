@@ -1,9 +1,9 @@
 /* eslint-disable no-prototype-builtins */
 /* eslint-disable no-unused-vars */
-import { useState } from 'react';
+import { useState, useEffect } from 'react'; // Add useEffect import
 import Dropzone from 'react-dropzone';
-import VideoRecorder from './components/videoRecorder';  // Updated import
-import VideoComposer from './components/VideoComposer';  // Updated import
+import VideoRecorder from './components/videoRecorder'; // Updated import
+import VideoComposer from './components/VideoComposer'; // Updated import
 import { Midi } from '@tonejs/midi';
 import * as Tone from 'tone';
 
@@ -15,27 +15,30 @@ function App() {
   const [recordedVideosCount, setRecordedVideosCount] = useState(0);
   const [audioContextStarted, setAudioContextStarted] = useState(false);
   const [instrumentTrackMap, setInstrumentTrackMap] = useState({});
-  const [isReadyToCompose, setIsReadyToCompose] = useState(false);  // New state
+  const [isReadyToCompose, setIsReadyToCompose] = useState(false); // New state
+  const [error, setError] = useState(null); // Add error state
 
-  const handleRecordingComplete = (blob, instrument) => {
+  const handleRecordingComplete = (blob, instrument, trackIndex) => {
     console.log('Recording complete:', instrument, blob);
     if (!(blob instanceof Blob)) {
       console.error('Invalid blob:', blob);
       return;
     }
 
-    // Save the video blob for the instrument
+    // Save the video blob with instrument and track index
     setVideoFiles((prev) => ({
       ...prev,
-      [instrument]: blob,
+      [`${instrument}-${trackIndex}`]: blob,
     }));
     setRecordedVideosCount((prevCount) => prevCount + 1);
+  };
 
-    // Check if all videos are recorded
+  // Add useEffect to handle the state update
+  useEffect(() => {
     if (recordedVideosCount + 1 === instruments.length) {
       setIsReadyToCompose(true);
     }
-  };
+  }, [recordedVideosCount, instruments.length]);
 
   const handleMidiUpload = (acceptedFiles) => {
     const file = acceptedFiles[0];
@@ -84,8 +87,13 @@ function App() {
   };
 
   const startAudioContext = async () => {
-    await Tone.start();
-    setAudioContextStarted(true);
+    try {
+      await Tone.start();
+      setAudioContextStarted(true);
+    } catch (err) {
+      console.error('Failed to start audio context:', err);
+      setError('Failed to initialize audio. Please try again.');
+    }
   };
 
   return (
@@ -115,7 +123,7 @@ function App() {
           </ul>
         </div>
       )}
-
+{/* 
       {instruments.length > 0 && (
         <div className='recordingHolder'>
           <h2>Record Videos for Instruments</h2>
@@ -134,7 +142,29 @@ function App() {
             </div>
           ))}
         </div>
-      )}
+      )} */}
+
+{instruments.map((instrument, index) => (
+  <div key={index} style={{ marginBottom: '20px' }}>
+    <h3>
+      {instrument.family} - {instrument.name}
+    </h3>
+    <VideoRecorder
+      onRecordingComplete={(blob) =>
+        handleRecordingComplete(blob, instrument.name, index)
+      }
+      style={{ width: '300px', height: '200px' }}
+      instrument={instrument}
+      onVideoReady={(url) => {
+        // Handle the autotuned video URL here
+        setVideoFiles((prev) => ({
+          ...prev,
+          [`${instrument.name}-${index}`]: url
+        }));
+      }}
+    />
+  </div>
+))}
 
       {console.log('Recorded Videos Count:', recordedVideosCount)}
       {console.log('Number of Tracks:', parsedMidiData?.tracks.length)}

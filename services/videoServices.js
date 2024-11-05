@@ -42,16 +42,28 @@ async function handleApiResponse(response) {
 export const videoService = {
   autotuneVideo: async (formData) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/autotune`, { // Ensure full URL
+      console.log('Sending video data to server, size:', formData.get('video').size);
+      
+      const response = await fetch(`${API_BASE_URL}/autotune`, {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: {
+          // Remove Content-Type header to let browser set it with boundary
+        },
       });
       
       if (!response.ok) {
-        throw new Error('Failed to autotune video');
+        const error = await response.text();
+        console.error('Server response:', error);
+        throw new Error(`Failed to autotune video: ${response.statusText}`);
       }
       
-      return await response.blob();
+      const blob = await response.blob();
+      if (blob.size === 0) {
+        throw new Error('Received empty response from server');
+      }
+      
+      return blob;
     } catch (error) {
       console.error('Autotune error:', error);
       throw error;
