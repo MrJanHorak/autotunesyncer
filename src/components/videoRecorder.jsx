@@ -5,9 +5,10 @@ import ControlButtons from './ControlButtons';
 import LoadingSpinner from './LoadingSpinner';
 import './styles.css';
 
-const VideoRecorder = ({ style, instrument, onVideoReady }) => {
+const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const recordingTimer = useRef(null);
 
   const [videoState, setVideoState] = useState({
     recordedURL: null,
@@ -15,12 +16,17 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
   });
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(true); // Add state for autotune
+  const [recordingDuration, setRecordingDuration] = useState(0);
 
   useEffect(() => {
     // Cleanup function for media streams and audio
     return () => {
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
       }
       // Cleanup object URLs
       if (videoState.recordedURL) URL.revokeObjectURL(videoState.recordedURL);
@@ -46,6 +52,13 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
   const startRecording = async () => {
     try {
       setIsProcessing(true);
+      setRecordingDuration(0);
+      
+      // Start timer to track recording duration
+      recordingTimer.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
@@ -78,7 +91,8 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
             }
             return prev;
           });
-        }
+        },
+        isAutotuneEnabled // Pass the autotune flag
       );
     } catch (error) {
       console.error('Recording failed:', error);
@@ -89,6 +103,16 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
   };
 
   const stopRecording = useCallback(() => {
+    if (recordingTimer.current) {
+      clearInterval(recordingTimer.current);
+    }
+
+    if (recordingDuration < minDuration) {
+      alert(`Recording must be at least ${minDuration} seconds long. Please try again.`);
+      handleReRecord();
+      return;
+    }
+
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
@@ -97,7 +121,7 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
       videoRef.current.srcObject = null;
     }
     setIsRecording(false);
-  }, []);
+  }, [recordingDuration, minDuration]);
 
   const handleReRecord = useCallback(() => {
     if (mediaStreamRef.current) {
@@ -174,6 +198,11 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
 
           {isProcessing && <LoadingSpinner />}
         </div>
+        {isRecording && (
+          <div className="recording-duration">
+            Recording: {recordingDuration}s / {minDuration}s minimum
+          </div>
+        )}
       </div>
       <div className='controls-section'>
         <ControlButtons
@@ -184,14 +213,14 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
           onReRecord={handleReRecord}
           instrument={instrument}
         />
-
-        {/* {!isRecording && videoState.autotunedURL && (
-          <div className="controls-container">
-            <button className="control-button" onClick={uploadAutotunedVideo}>
-              Upload Autotuned Video
-            </button>
-          </div>
-        )} */}
+        <label>
+          <input
+            type="checkbox"
+            checked={isAutotuneEnabled}
+            onChange={(e) => setIsAutotuneEnabled(e.target.checked)}
+          />
+          Enable Autotune
+        </label>
       </div>
     </>
   );

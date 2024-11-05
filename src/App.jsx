@@ -12,6 +12,34 @@ const normalizeInstrumentName = (name) => {
   return name.toLowerCase().replace(/\s+/g, '_');
 };
 
+// Add this helper function
+const calculateLongestNotes = (midiData) => {
+  const instrumentDurations = {};
+  
+  midiData.tracks.forEach(track => {
+    const instrumentName = track.instrument.name;
+    let longestDuration = 0;
+    
+    track.notes.forEach(note => {
+      // duration is in seconds
+      const noteDuration = note.duration;
+      longestDuration = Math.max(longestDuration, noteDuration);
+    });
+    
+    // If we already have a duration for this instrument, take the longest
+    if (instrumentName in instrumentDurations) {
+      instrumentDurations[instrumentName] = Math.max(
+        instrumentDurations[instrumentName],
+        longestDuration
+      );
+    } else {
+      instrumentDurations[instrumentName] = longestDuration;
+    }
+  });
+  
+  return instrumentDurations;
+};
+
 function App() {
   const [midiFile, setMidiFile] = useState(null);
   const [videoFiles, setVideoFiles] = useState({});
@@ -22,6 +50,7 @@ function App() {
   const [instrumentTrackMap, setInstrumentTrackMap] = useState({});
   const [isReadyToCompose, setIsReadyToCompose] = useState(false); // New state
   const [error, setError] = useState(null); // Add error state
+  const [longestNotes, setLongestNotes] = useState({});
 
   const handleRecordingComplete = (blob, instrument, trackIndex) => {
     console.log('Recording complete:', instrument, blob);
@@ -63,6 +92,10 @@ function App() {
           JSON.parse(item)
         ); // Convert back to objects
         setInstruments(instrumentData);
+
+        // Calculate longest notes
+        const durations = calculateLongestNotes(midi);
+        setLongestNotes(durations);
 
         // Create a mapping of instruments to their respective tracks
         const trackMap = {};
@@ -153,21 +186,30 @@ function App() {
         </div>
       )}
 
-      {instruments.map((instrument, index) => (
-        <div key={index} style={{ marginBottom: '20px' }}>
-          <h3>
-            {instrument.family} - {instrument.name}
-          </h3>
-          <VideoRecorder
-            onRecordingComplete={(blob) =>
-              handleRecordingComplete(blob, instrument, index)
-            }
-            style={{ width: '300px', height: '200px' }}
-            instrument={instrument}
-            onVideoReady={(url) => handleVideoReady(url, instrument)}
-          />
-        </div>
-      ))}
+      {instruments.map((instrument, index) => {
+        const minDuration = longestNotes[instrument.name] || 0;
+        const recommendedDuration = Math.ceil(minDuration + 1); // Add 1 second buffer
+        
+        return (
+          <div key={index} style={{ marginBottom: '20px' }}>
+            <h3>
+              {instrument.family} - {instrument.name}
+            </h3>
+            <p>
+              Minimum recording duration: {recommendedDuration} seconds
+            </p>
+            <VideoRecorder
+              onRecordingComplete={(blob) =>
+                handleRecordingComplete(blob, instrument, index)
+              }
+              style={{ width: '300px', height: '200px' }}
+              instrument={instrument}
+              onVideoReady={(url) => handleVideoReady(url, instrument)}
+              minDuration={recommendedDuration}
+            />
+          </div>
+        );
+      })}
 
       {console.log('Recorded Videos Count:', recordedVideosCount)}
       {console.log('Number of Tracks:', parsedMidiData?.tracks.length)}

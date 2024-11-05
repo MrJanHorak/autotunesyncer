@@ -12,6 +12,29 @@ export const uploadVideo = async (videoFile) => {
   return audioFile;
 };
 
+const uploadDirectVideo = async (videoFile) => {
+  try {
+    console.log('Uploading video directly...', videoFile.size);
+    const formData = new FormData();
+    formData.append('video', videoFile);
+
+    const response = await fetch('http://localhost:3000/api/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+    }
+
+    return videoFile;
+  } catch (error) {
+    console.error('Error in direct upload:', error);
+    throw error;
+  }
+};
+
 const autotuneToMiddleC = async (videoFile) => {
   const formData = new FormData();
   formData.append('video', videoFile);
@@ -52,12 +75,16 @@ const autotuneToMiddleC = async (videoFile) => {
   }
 };
 
-export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL) => {
+export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL, isAutotuneEnabled = true) => {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: true,
     audio: true,
   });
-  const mediaRecorder = new MediaRecorder(stream);
+
+  // Set proper MIME type and codec for MP4
+  const mediaRecorder = new MediaRecorder(stream, {
+    mimeType: 'video/webm;codecs=h264,opus'
+  });
 
   mediaRecorder.start();
   let chunks = [];
@@ -73,11 +100,15 @@ export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL) =>
 
       const videoFile = new File([videoBlob], 'webcam-video.mp4', { type: 'video/mp4' });
 
-      console.log('Processing video for autotuning...');
-      const autotunedVideoFile = await autotuneToMiddleC(videoFile);
-      console.log('Autotuned video received, creating URL...');
-      const autotunedVideoURL = URL.createObjectURL(autotunedVideoFile);
-      setAutotunedVideoURL(autotunedVideoURL);
+      if (isAutotuneEnabled) {
+        console.log('Processing video for autotuning...');
+        const autotunedVideoFile = await autotuneToMiddleC(videoFile);
+        const autotunedVideoURL = URL.createObjectURL(autotunedVideoFile);
+        setAutotunedVideoURL(autotunedVideoURL);
+      } else {
+        console.log('Recording completed without autotuning.');
+        setAutotunedVideoURL(videoURL); // Set the same URL for consistency
+      }
     } catch (error) {
       console.error('Error in recording stop handler:', error);
     }

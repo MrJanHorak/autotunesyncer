@@ -1,10 +1,8 @@
 /* eslint-disable no-unused-vars */
 /* eslint-disable react/prop-types */
 
-
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { videoService } from '../../services/videoServices';
 
 const VideoComposer = ({ videoFiles, midiData }) => {
   const [isProcessing, setIsProcessing] = useState(false);
