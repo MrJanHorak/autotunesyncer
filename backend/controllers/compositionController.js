@@ -18,6 +18,7 @@ import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { spawn } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -359,89 +360,6 @@ async function createBlackFrame(outputPath) {
   });
 }
 
-// async function createVideoOverlaysSequential(
-//   segments,
-//   blackFramePath,
-//   outputPath
-// ) {
-//   let currentInput = blackFramePath;
-//   console.log('Starting sequential video overlay process');
-
-//   // Sort segments by start time to ensure proper overlay order
-//   segments.sort((a, b) => a.startTime - b.startTime);
-
-//   for (let i = 0; i < segments.length; i++) {
-//     const segment = segments[i];
-//     const tempOutput = `${outputPath}_temp_${i}.mp4`;
-
-//     console.log(`Processing segment ${i + 1}/${segments.length}`);
-//     console.log(`Input: ${segment.path}`);
-//     console.log(`Position: x=${segment.x}, y=${segment.y}`);
-//     console.log(
-//       `Timing: start=${segment.startTime}, duration=${segment.duration}`
-//     );
-
-//     await new Promise((resolve, reject) => {
-//       ffmpeg()
-//         .input(currentInput)
-//         .input(segment.path)
-//         .complexFilter([
-//           `[1:v]scale=320:240,setpts=PTS-STARTPTS[v1]`, // Scale and set PTS
-//           `[0:v][v1]overlay=${segment.x}:${segment.y}:enable='between(t,${
-//             segment.startTime
-//           },${segment.startTime + segment.duration})'[out]`,
-//         ])
-//         .outputOptions([
-//           '-map',
-//           '[out]',
-//           '-c:v',
-//           'libx264',
-//           '-preset',
-//           'ultrafast',
-//           '-pix_fmt',
-//           'yuv420p',
-//           '-y',
-//           '-filter:a:1', 'volume=2.0' // Increase audio volume
-//         ])
-//         .on('start', (commandLine) => {
-//           console.log(`FFmpeg command (overlay ${i + 1}):`, commandLine);
-//         })
-//         .save(tempOutput)
-//         .on('end', () => {
-//           console.log(`Overlay ${i + 1} completed`);
-//           if (currentInput !== blackFramePath) {
-//             try {
-//               rmSync(currentInput);
-//               console.log(`Removed intermediate file: ${currentInput}`);
-//             } catch (err) {
-//               console.warn(
-//                 `Failed to remove intermediate file: ${currentInput}`,
-//                 err
-//               );
-//             }
-//           }
-//           currentInput = tempOutput;
-//           resolve();
-//         })
-//         .on('error', (err) => {
-//           console.error(`Error in overlay ${i + 1}:`, err.message);
-//           reject(err);
-//         });
-//     });
-//   }
-
-//   // Rename final temp file to target output
-//   try {
-//     if (existsSync(outputPath)) {
-//       rmSync(outputPath);
-//     }
-//     renameSync(currentInput, outputPath);
-//     console.log(`Renamed ${currentInput} to ${outputPath}`);
-//   } catch (err) {
-//     throw new Error(`Failed to finalize video file: ${err.message}`);
-//   }
-// }
-
 async function createVideoOverlaysSequential(
   segments,
   blackFramePath,
@@ -736,55 +654,55 @@ async function mergeFinalVideo(
   });
 }
 
-async function createVideoOverlays(tracks, blackFramePath, outputPath) {
+// Add this helper function at the top
+const normalizeInstrumentName = (name) => {
+  return name.toLowerCase().replace(/\s+/g, '_');
+};
+
+// Add this new function
+async function processVideoWithPython(midiData, videoFiles, outputPath) {
   return new Promise((resolve, reject) => {
-    const command = ffmpeg();
-    let filterComplex = '[0:v]scale=960:720,setsar=1:1[base];';
-    let inputIndex = 1;
-
-    tracks.forEach((track, trackIndex) => {
-      track.segments?.forEach((segment) => {
-        if (existsSync(segment.path)) {
-          const x = (trackIndex % 3) * 320;
-          const y = Math.floor(trackIndex / 3) * 240;
-
-          command.input(segment.path);
-          filterComplex +=
-            `[${inputIndex}:v]setpts=PTS-STARTPTS+${segment.startTime}/TB[v${inputIndex}];` +
-            `[base][v${inputIndex}]overlay=${x}:${y}:enable='between(t,${
-              segment.startTime
-            },${segment.startTime + segment.duration})'[base];`;
-          inputIndex++;
-        }
-      });
+    // Create temporary JSON files for the data
+    const midiJsonPath = join(TEMP_DIR, 'midi_data.json');
+    const videoFilesJsonPath = join(TEMP_DIR, 'video_files.json');
+    
+    // Write the data to temporary files
+    writeFileSync(midiJsonPath, JSON.stringify(midiData));
+    writeFileSync(videoFilesJsonPath, JSON.stringify(videoFiles));
+    
+    // Spawn Python process
+    const pythonProcess = spawn('python', [
+      join(__dirname, '../utils/video_processor.py'),
+      midiJsonPath,
+      videoFilesJsonPath,
+      outputPath
+    ]);
+    
+    // Handle process events
+    pythonProcess.stdout.on('data', (data) => {
+      console.log(`Python stdout: ${data}`);
     });
-
-    if (inputIndex === 1) {
-      reject(new Error('No valid video segments found'));
-      return;
-    }
-
-    command
-      .input(blackFramePath)
-      .complexFilter(filterComplex.slice(0, -1), 'base')
-      .outputOptions([
-        '-map',
-        '[base]',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-y',
-      ])
-      .save(outputPath)
-      .on('end', resolve)
-      .on('error', reject);
+    
+    pythonProcess.stderr.on('data', (data) => {
+      console.error(`Python stderr: ${data}`);
+    });
+    
+    pythonProcess.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Python process exited with code ${code}`));
+      }
+    });
   });
 }
 
+// Modify the composeVideo function to use the Python processor
 export const composeVideo = async (req, res) => {
   const sessionId = uuidv4();
   const sessionDir = join(TEMP_DIR, sessionId);
+  
+  // ... existing directory setup code ...
 
   if (
     !ensureDirectoryExists(TEMP_DIR) ||
@@ -856,137 +774,66 @@ export const composeVideo = async (req, res) => {
     const videoFiles = {};
     const videos = files.filter((file) => file.fieldname.startsWith('videos'));
 
-    for (const video of videos) {
-      try {
-        const instrument = video.fieldname.match(/\[(.*?)\]/)?.[1];
-        if (!instrument) continue;
-
-        const videoPath = join(sessionDir, `${instrument}.webm`);
-        writeFileSync(videoPath, video.buffer);
-
-        if (existsSync(videoPath)) {
-          videoFiles[instrument] = videoPath;
-          console.log(
-            `Successfully saved video for instrument ${instrument} at ${videoPath}`
-          );
-        } else {
-          throw new Error(`Failed to save video file for ${instrument}`);
-        }
-      } catch (err) {
-        console.error(`Error saving video file:`, err);
-        throw err;
+    // Create a map of normalized instrument names to their videos
+    videos.forEach((video) => {
+      const instrumentMatch = video.fieldname.match(/\[(.*?)\]/);
+      if (instrumentMatch) {
+        const normalizedName = normalizeInstrumentName(instrumentMatch[1]);
+        videoFiles[normalizedName] = video;
       }
-    }
-    // Calculate total MIDI duration
-    const midiDuration = midi.duration;
-    console.log('Total MIDI duration:', midiDuration);
+    });
+
+    console.log('Available video files for instruments:', Object.keys(videoFiles));
+    console.log('MIDI tracks:', midi.tracks.map(track => track.instrument.name));
+
     // Process each track
     const trackPromises = midi.tracks.map(async (track, trackIndex) => {
-      console.log(`Processing track ${trackIndex}:`, {
-        name: track.name,
-        instrument: track.instrument.name,
-        noteCount: track.notes.length,
-        duration: track.duration,
-      });
-
       if (track.notes.length === 0) return null;
 
-      const instrument = track.instrument.name || `track${trackIndex}`;
-      const videoPath = videoFiles[instrument];
+      const normalizedInstrumentName = normalizeInstrumentName(track.instrument.name);
+      const videoFile = videoFiles[normalizedInstrumentName];
 
-      if (!videoPath) {
-        console.log(`No video found for instrument: ${instrument}`);
+      if (!videoFile) {
+        console.log(`No video found for instrument: ${track.instrument.name} (normalized: ${normalizedInstrumentName})`);
         return null;
       }
 
-      // Determine base note for the track
-      // You can either:
-      // 1. Use the first note as the base note
-      // 2. Use middle C (60) as default
-      // 3. Allow it to be specified in the upload
+      const videoPath = join(sessionDir, `${normalizedInstrumentName}.webm`);
+      writeFileSync(videoPath, videoFile.buffer);
+
+      // Rest of the processing code...
       const baseNote = track.notes[0]?.midi || 60;
-
-      console.log(`Track ${trackIndex} base note: ${midiNoteToName(baseNote)}`);
-
-      const segments = [];
-      for (const [noteIndex, note] of track.notes.entries()) {
-        const startTimeSeconds = ticksToSeconds(note.ticks, midi);
-        const durationSeconds = ticksToSeconds(note.durationTicks, midi);
-
-        console.log(`Processing note ${noteIndex}:`, {
-          startTime: startTimeSeconds,
-          duration: durationSeconds,
-          velocity: note.velocity / 127,
-          midi: note.midi,
-          noteName: midiNoteToName(note.midi),
-        });
-
-        const segmentPath = join(
-          sessionDir,
-          `track${trackIndex}_note${noteIndex}.mp4`
-        );
-
-        try {
-          await processNoteSegment(
-            videoPath,
-            {
-              startTime: startTimeSeconds,
-              duration: durationSeconds,
-              velocity: note.velocity / 127,
-              midi: note.midi,
-            },
-            segmentPath,
-            baseNote
-          );
-
-          segments.push({
-            path: segmentPath,
-            startTime: startTimeSeconds,
-            duration: durationSeconds,
-          });
-        } catch (error) {
-          console.error(`Error processing note segment ${noteIndex}:`, error);
-          // Continue with other notes even if one fails
-        }
-      }
-
-      return segments.length > 0
-        ? {
-            trackIndex,
-            instrument,
-            segments,
-          }
-        : null;
+      // ... rest of your existing track processing code ...
     });
 
-    const tracks = (await Promise.all(trackPromises)).filter(Boolean);
+    // ... rest of your existing code ...
 
-    if (tracks.length === 0) {
-      throw new Error('No valid tracks to process');
-    }
-
-    // // Create a black PNG image
-    // const blackPngPath = join(sessionDir, 'black.png');
-    // await createBlackPNG(blackPngPath);
+    // Update video files mapping with paths
+    videos.forEach(video => {
+      const instrumentMatch = video.fieldname.match(/\[(.*?)\]/);
+      if (instrumentMatch) {
+        const normalizedName = normalizeInstrumentName(instrumentMatch[1]);
+        const videoPath = join(sessionDir, `${normalizedName}.webm`);
+        writeFileSync(videoPath, video.buffer);
+        videoFiles[normalizedName] = videoPath;
+      }
+    });
 
     const outputPath = join(sessionDir, 'output.mp4');
-    await composeFinalVideo(tracks, outputPath, midiDuration);
+    
+    // Use Python processor instead of ffmpeg
+    await processVideoWithPython(
+      midi.toJSON(),
+      videoFiles,
+      outputPath
+    );
 
-    if (!existsSync(outputPath)) {
-      throw new Error(
-        'Final video composition failed - output file not created'
-      );
-    }
-
-    const localCopyPath = join(UPLOADS_DIR, `output-${sessionId}.mp4`);
-    copyFileSync(outputPath, localCopyPath);
-    console.log('Local copy saved to:', localCopyPath);
-
+    // Send the result
     res.sendFile(outputPath, (err) => {
       if (err) {
         console.error('Error sending file:', err);
       }
-      // Cleanup after successful send
+      // Cleanup
       try {
         rmSync(sessionDir, { recursive: true, force: true });
       } catch (cleanupErr) {

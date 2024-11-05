@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 temp
 /temp
+venv
+/venv
+venv/
