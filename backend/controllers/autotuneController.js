@@ -37,30 +37,62 @@ const runFFmpeg = async (input, output, options = {}) => {
 const runPythonScript = async (scriptPath, ...args) => {
   return new Promise((resolve, reject) => {
     const pythonProcess = spawn('python', [scriptPath, ...args]);
+    let stdoutData = '';
+    let stderrData = '';
 
     pythonProcess.stdout.on('data', (data) => {
+      stdoutData += data.toString();
       console.log('Python output:', data.toString());
     });
 
     pythonProcess.stderr.on('data', (data) => {
+      stderrData += data.toString();
       console.error('Python error:', data.toString());
     });
 
     pythonProcess.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Python process exited with code ${code}`));
+      if (code === 0) {
+        resolve(stdoutData);
+      } else {
+        reject(new Error(`Python process failed (code ${code}): ${stderrData}`));
+      }
+    });
+  });
+};
+
+// Add debug logging helper
+const logVideoInfo = async (filePath, label) => {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        console.error(`Error probing ${label}:`, err);
+        reject(err);
+        return;
+      }
+      console.log(`\n${label} metadata:`, {
+        format: metadata.format.format_name,
+        duration: metadata.format.duration,
+        size: metadata.format.size,
+        streams: metadata.streams.map(s => ({
+          codec_type: s.codec_type,
+          codec_name: s.codec_name
+        }))
+      });
+      resolve(metadata);
     });
   });
 };
 
 export const autotuneVideo = async (req, res) => {
+  let tempDir = null;
+  
   try {
     if (!req.file) {
       throw new Error('No video file provided');
     }
 
     // Create temporary directory with unique ID
-    const tempDir = path.join(__dirname, '../temp', uuidv4());
+    tempDir = path.join(__dirname, '../temp', uuidv4());
     await fs.mkdir(tempDir, { recursive: true });
 
     const paths = {
@@ -71,47 +103,70 @@ export const autotuneVideo = async (req, res) => {
       output: path.join(tempDir, 'autotuned-video.mp4')
     };
 
+    // Log input video info
+    await logVideoInfo(paths.input, 'Input video');
+
     // Convert input video to MP4 with H.264 codec
     await runFFmpeg(paths.input, paths.convertedInput, {
       outputOptions: [
         '-c:v', 'libx264',
         '-preset', 'fast',
         '-crf', '22',
-        '-c:a', 'aac'
+        '-c:a', 'aac',
+        '-strict', 'experimental'
       ]
     });
 
-    // Extract audio
+    await logVideoInfo(paths.convertedInput, 'Converted input');
+
+    // Extract audio with specific format
     console.log('Extracting audio...');
     await runFFmpeg(paths.convertedInput, paths.inputAudio, {
-      format: 'wav'
+      format: 'wav',
+      outputOptions: [
+        '-ac', '2',  // force stereo
+        '-ar', '44100',  // 44.1kHz sample rate
+        '-acodec', 'pcm_s16le'  // ensure 16-bit PCM
+      ]
     });
 
-    // Run Python autotune script
-    console.log('Autotuning audio...');
-    await runPythonScript(
+    // Run Python autotune script with better error handling
+    console.log('Autotuning audio to middle C...');
+    const pythonOutput = await runPythonScript(
       path.join(__dirname, '../python/autotune.py'),
       paths.inputAudio,
       paths.autotunedAudio
     );
+    console.log('Python processing completed:', pythonOutput);
 
-    // Combine video and autotuned audio
+    // Verify autotuned audio
+    await logVideoInfo(paths.autotunedAudio, 'Autotuned audio');
+
+    // Combine video and autotuned audio with specific options
     console.log('Combining audio and video...');
     await runFFmpeg(paths.convertedInput, paths.output, {
       input: paths.autotunedAudio,
       outputOptions: [
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-ac', '2',  // ensure stereo output
+        '-strict', 'experimental',
         '-map', '0:v:0',
-        '-map', '1:a:0'
+        '-map', '1:a:0',
+        '-shortest',
+        '-async', '1'
       ]
     });
+
+    // Verify final output
+    await logVideoInfo(paths.output, 'Final output');
 
     // Read and send the processed video
     const processedVideo = await fs.readFile(paths.output);
     res.writeHead(200, {
       'Content-Type': 'video/mp4',
-      'Content-Length': processedVideo.length
+      'Content-Length': processedVideo.length,
+      'Content-Disposition': 'inline'
     });
     res.end(processedVideo);
 
@@ -125,7 +180,12 @@ export const autotuneVideo = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error in autotuneVideo controller:', error);
+    console.error('Detailed error in autotuneVideo:', error);
+    
+    // Clean up temp directory if it was created
+    if (tempDir) {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(console.error);
+    }
     
     // Clean up any uploaded file if it exists
     if (req.file && req.file.path) {
@@ -135,7 +195,8 @@ export const autotuneVideo = async (req, res) => {
     }
 
     res.status(500).json({ 
-      error: error.message || 'An error occurred while processing the video' 
+      error: error.message || 'An error occurred while processing the video',
+      details: error.stack
     });
   }
 };

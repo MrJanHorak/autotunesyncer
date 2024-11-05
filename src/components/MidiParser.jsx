@@ -1,3 +1,4 @@
+/* eslint-disable react/prop-types */
 import {useEffect } from 'react';
 
 const MidiParser = ({ file, onParsed }) => {
@@ -14,6 +15,7 @@ const MidiParser = ({ file, onParsed }) => {
       let time = 0;
       
       // Parse MIDI header
+      // eslint-disable-next-line no-unused-vars
       const format = (midiData[8] << 8) + midiData[9];
       const trackCount = (midiData[10] << 8) + midiData[11];
       const timeDivision = (midiData[12] << 8) + midiData[13];
