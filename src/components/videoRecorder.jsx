@@ -37,10 +37,11 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
   useEffect(() => {
     if (videoState.autotunedURL) {
       console.log('Autotuned video URL updated:', videoState.autotunedURL);
-      // Notify parent component about the new autotuned video
-      onVideoReady?.(videoState.autotunedURL);
+      // Only call onVideoReady once per autotuned URL
+      const currentURL = videoState.autotunedURL;
+      onVideoReady?.(currentURL, instrument);
     }
-  }, [videoState.autotunedURL, onVideoReady]);
+  }, [videoState.autotunedURL, onVideoReady, instrument]);
 
   const startRecording = async () => {
     try {
@@ -70,7 +71,13 @@ const VideoRecorder = ({ style, instrument, onVideoReady }) => {
         },
         (autotunedURL) => {
           console.log('Autotuned video URL set');
-          setVideoState((prev) => ({ ...prev, autotunedURL }));
+          // Only update if the URL is different
+          setVideoState((prev) => {
+            if (prev.autotunedURL !== autotunedURL) {
+              return { ...prev, autotunedURL };
+            }
+            return prev;
+          });
         }
       );
     } catch (error) {
