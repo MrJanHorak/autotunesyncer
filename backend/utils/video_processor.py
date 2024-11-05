@@ -1,9 +1,30 @@
 from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip
+from PIL import Image
 import numpy as np
 import sys
 import json
 import os
 from pathlib import Path
+
+# Version-compatible resampling
+try:
+    # For Pillow version >= 9.0.0
+    from PIL.Image import Resampling
+    RESIZE_FILTER = Resampling.LANCZOS
+except ImportError:
+    # For Pillow version < 9.0.0
+    RESIZE_FILTER = Image.ANTIALIAS
+
+# Monkey patch moviepy's resize to use the correct filter
+from moviepy.video.fx.resize import resize
+def new_resizer(pic, newsize):
+    pilim = Image.fromarray(pic)
+    resized_pil = pilim.resize(newsize[::-1], RESIZE_FILTER)
+    return np.array(resized_pil)
+
+# Replace moviepy's resizer function
+import moviepy.video.fx.resize
+moviepy.video.fx.resize.resizer = new_resizer
 
 def process_video_segments(midi_data, video_files, output_path):
     try:
@@ -19,115 +40,53 @@ def process_video_segments(midi_data, video_files, output_path):
         print(f"Processing {total_tracks} tracks in {grid_size}x{grid_size} grid")
         
         # Create background with explicit RGB color
-        background = ColorClip(size=(960, 720), color=(0,0,0), duration=float(midi_data['duration']))
+        background_color = (0, 0, 0)  # Black background
+        background = ColorClip(size=(960, 720), color=background_color, duration=midi_data['duration'])
         
-        clips = [background]
-        base_clips = {}  # Cache for base clips to avoid reloading
+        # Load video clips and resize them
+        video_clips = []
+        for track in midi_tracks:
+            instrument_name = track['instrument']['name'].replace(' ', '_').lower()
+            if instrument_name in video_files:
+                video_path = video_files[instrument_name]
+                print(f"Loaded video for {instrument_name}")
+                video_clip = VideoFileClip(video_path).resize((clip_width, clip_height))
+                video_clips.append(video_clip)
+            else:
+                print(f"No video file for {instrument_name}")
         
-        # Process each track
-        for track_idx, track in enumerate(midi_tracks):
-            if not track.get('notes'):
-                print(f"Skipping track {track_idx} - no notes")
-                continue
-                
-            instrument_name = track['instrument']['name'].lower().replace(' ', '_')
-            if instrument_name not in video_files:
-                print(f"No video found for instrument: {instrument_name}")
-                continue
-                
-            video_path = video_files[instrument_name]
-            if not os.path.exists(video_path):
-                print(f"Video file not found: {video_path}")
-                continue
-            
-            # Load base clip if not already loaded
-            if video_path not in base_clips:
-                try:
-                    base_clips[video_path] = VideoFileClip(video_path)
-                    print(f"Loaded video for {instrument_name}")
-                except Exception as e:
-                    print(f"Error loading video {video_path}: {str(e)}")
-                    continue
-            
-            base_clip = base_clips[video_path]
-            
-            # Calculate position in grid
-            x = (track_idx % grid_size) * clip_width
-            y = (track_idx // grid_size) * clip_height
-            
-            # Process notes
-            for note_idx, note in enumerate(track['notes']):
-                try:
-                    start_time = float(note['time'])
-                    duration = float(note['duration'])
-                    
-                    # Create segment with explicit duration
-                    segment = (base_clip
-                             .subclip(0, min(duration, base_clip.duration))
-                             .resize(width=clip_width, height=clip_height)
-                             .set_start(start_time)
-                             .set_position((x, y)))
-                    
-                    print(f"Added note segment {note_idx} for track {track_idx}")
-                    clips.append(segment)
-                except Exception as e:
-                    print(f"Error processing note in track {track_idx}: {str(e)}")
-                    continue
-        
-        if len(clips) <= 1:
+        if not video_clips:
             raise ValueError("No valid clips to compose")
         
-        # Create output directory if it doesn't exist
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        # Create composite video
+        composite_clips = []
+        for i, clip in enumerate(video_clips):
+            x = (i % grid_size) * clip_width
+            y = (i // grid_size) * clip_height
+            composite_clips.append(clip.set_position((x, y)))
         
-        # Compose final video with explicit duration
-        print("Compositing final video...")
-        final_clip = CompositeVideoClip(clips, size=(960, 720))
-        final_duration = float(midi_data['duration'])
-        final_clip = final_clip.set_duration(final_duration)
+        final_clip = CompositeVideoClip([background] + composite_clips)
+        final_clip.write_videofile(output_path, codec='libx264', fps=24)
         
-        # Write output with progress reporting
-        print(f"Writing output to {output_path}")
-        final_clip.write_videofile(
-            output_path,
-            codec='libx264',
-            audio_codec='aac',
-            temp_audiofile='temp-audio.m4a',
-            remove_temp=True,
-            fps=30,
-            verbose=False,
-            logger=None
-        )
-        
-        print("Video processing completed successfully")
+        print(f"Video saved to {output_path}")
         
     except Exception as e:
-        print(f"Error in video processing: {str(e)}")
+        print(f"Error in video processing: {e}")
         raise
-        
-    finally:
-        # Cleanup
-        try:
-            for clip in clips:
-                clip.close()
-            for clip in base_clips.values():
-                clip.close()
-        except Exception as e:
-            print(f"Error during cleanup: {str(e)}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage: python video_processor.py <midi_json> <video_files_json> <output_path>")
+    if len(sys.argv) != 4:
+        print("Usage: python video_processor.py <midi_data.json> <video_files.json> <output_path>")
         sys.exit(1)
-        
-    try:
-        with open(sys.argv[1], 'r') as f:
-            midi_data = json.load(f)
-        
-        with open(sys.argv[2], 'r') as f:
-            video_files = json.load(f)
-            
-        process_video_segments(midi_data, video_files, sys.argv[3])
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        sys.exit(1)
+    
+    midi_data_path = sys.argv[1]
+    video_files_path = sys.argv[2]
+    output_path = sys.argv[3]
+    
+    with open(midi_data_path, 'r') as f:
+        midi_data = json.load(f)
+    
+    with open(video_files_path, 'r') as f:
+        video_files = json.load(f)
+    
+    process_video_segments(midi_data, video_files, output_path)
