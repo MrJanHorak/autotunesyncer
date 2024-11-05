@@ -1,4 +1,4 @@
-from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip
+from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip, concatenate_videoclips, AudioFileClip
 from PIL import Image
 import numpy as np
 import sys
@@ -6,73 +6,98 @@ import json
 import os
 from pathlib import Path
 
-# Version-compatible resampling
-try:
-    # For Pillow version >= 9.0.0
-    from PIL.Image import Resampling
-    RESIZE_FILTER = Resampling.LANCZOS
-except ImportError:
-    # For Pillow version < 9.0.0
-    RESIZE_FILTER = Image.ANTIALIAS
-
-# Monkey patch moviepy's resize to use the correct filter
-from moviepy.video.fx.resize import resize
-def new_resizer(pic, newsize):
-    pilim = Image.fromarray(pic)
-    resized_pil = pilim.resize(newsize[::-1], RESIZE_FILTER)
-    return np.array(resized_pil)
-
-# Replace moviepy's resizer function
-import moviepy.video.fx.resize
-moviepy.video.fx.resize.resizer = new_resizer
+# Add PIL compatibility layer
+if not hasattr(Image, 'ANTIALIAS'):
+    # For newer versions of Pillow
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
 
 def process_video_segments(midi_data, video_files, output_path):
+    clips_to_close = []  # Track clips for proper cleanup
     try:
-        # Parse MIDI data
-        midi_tracks = midi_data['tracks']
+        # Parse MIDI tracks and notes
+        tracks = midi_data['tracks']
+        duration = midi_data['duration']
         
-        # Calculate grid layout
-        total_tracks = len(midi_tracks)
-        grid_size = int(np.ceil(np.sqrt(total_tracks)))
+        # Initialize empty canvas
+        background = ColorClip(size=(960, 720), color=(0, 0, 0), duration=duration)
+        clips_to_close.append(background)
+        
+        # Process each track's notes
+        all_clips = []
+        grid_size = int(np.ceil(np.sqrt(len(tracks))))
         clip_width = 960 // grid_size
         clip_height = 720 // grid_size
         
-        print(f"Processing {total_tracks} tracks in {grid_size}x{grid_size} grid")
-        
-        # Create background with explicit RGB color
-        background_color = (0, 0, 0)  # Black background
-        background = ColorClip(size=(960, 720), color=background_color, duration=midi_data['duration'])
-        
-        # Load video clips and resize them
-        video_clips = []
-        for track in midi_tracks:
+        for track_idx, track in enumerate(tracks):
             instrument_name = track['instrument']['name'].replace(' ', '_').lower()
-            if instrument_name in video_files:
-                video_path = video_files[instrument_name]
-                print(f"Loaded video for {instrument_name}")
-                video_clip = VideoFileClip(video_path).resize((clip_width, clip_height))
-                video_clips.append(video_clip)
-            else:
+            if instrument_name not in video_files:
                 print(f"No video file for {instrument_name}")
+                continue
+                
+            video_path = video_files[instrument_name]
+            source_clip = VideoFileClip(video_path)
+            clips_to_close.append(source_clip)
+            
+            # Calculate position in grid
+            x_pos = (track_idx % grid_size) * clip_width
+            y_pos = (track_idx // grid_size) * clip_height
+            
+            # Process each note in the track
+            for note in track['notes']:
+                start_time = note.get('time', 0)
+                duration = note.get('duration', 0)
+                pitch = note.get('midi', 60)  # MIDI note number
+                velocity = note.get('velocity', 1.0)
+                
+                # Create snippet for this note
+                try:
+                    # Extract snippet from source video
+                    snippet = source_clip.subclip(0, duration)
+                    
+                    # Resize and position snippet
+                    snippet = snippet.resize((clip_width, clip_height))
+                    snippet = snippet.set_position((x_pos, y_pos))
+                    snippet = snippet.set_start(start_time)
+                    
+                    # Apply pitch adjustment
+                    if hasattr(snippet, 'audio') and snippet.audio is not None:
+                        # Convert MIDI note to frequency ratio
+                        base_note = 60  # Middle C
+                        semitone_ratio = 2 ** (1/12)
+                        pitch_ratio = semitone_ratio ** (pitch - base_note)
+                        
+                        # Apply pitch shift by adjusting speed
+                        # This affects both video and audio, but it's the simplest way to pitch-shift
+                        snippet = snippet.speedx(pitch_ratio)
+                        
+                        # Adjust volume
+                        snippet = snippet.volumex(velocity)
+                    
+                    all_clips.append(snippet)
+                    clips_to_close.append(snippet)
+                except Exception as e:
+                    print(f"Error processing note in {instrument_name}: {e}")
+                    continue
         
-        if not video_clips:
+        # Combine all clips
+        if all_clips:
+            final_clip = CompositeVideoClip([background] + all_clips)
+            clips_to_close.append(final_clip)
+            final_clip.write_videofile(output_path, codec='libx264', fps=24)
+            print(f"Video saved to {output_path}")
+        else:
             raise ValueError("No valid clips to compose")
-        
-        # Create composite video
-        composite_clips = []
-        for i, clip in enumerate(video_clips):
-            x = (i % grid_size) * clip_width
-            y = (i // grid_size) * clip_height
-            composite_clips.append(clip.set_position((x, y)))
-        
-        final_clip = CompositeVideoClip([background] + composite_clips)
-        final_clip.write_videofile(output_path, codec='libx264', fps=24)
-        
-        print(f"Video saved to {output_path}")
-        
+            
     except Exception as e:
         print(f"Error in video processing: {e}")
         raise
+    finally:
+        # Clean up all clips
+        for clip in clips_to_close:
+            try:
+                clip.close()
+            except:
+                pass
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
