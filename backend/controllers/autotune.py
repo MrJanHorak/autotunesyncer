@@ -1,30 +1,33 @@
 import sys
-from pydub import AudioSegment
-from pydub.effects import speedup
-
-def shift_pitch(audio_segment, semitones):
-    return audio_segment._spawn(audio_segment.raw_data, overrides={
-        "frame_rate": int(audio_segment.frame_rate * (2.0 ** (semitones / 12.0)))
-    }).set_frame_rate(audio_segment.frame_rate)
+import librosa
+import numpy as np
+import soundfile as sf
 
 def autotune_to_middle_c(input_audio_path, output_audio_path):
-    print('in the autotuning python function')
-    # Load the audio file
-    audio = AudioSegment.from_file(input_audio_path)
+    # Load the audio file with original sampling rate
+    y, sr = librosa.load(input_audio_path, sr=None)
 
-    # Calculate the pitch shift to middle C (261.63 Hz)
-    original_pitch = 440.0  # Assuming the original pitch is A4 (440 Hz)
-    middle_c = 261.63
-    semitones = 12 * (middle_c / original_pitch)
+    # Estimate the pitch (fundamental frequency)
+    pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
+    pitch_values = pitches[np.nonzero(pitches)]
+    if len(pitch_values) == 0:
+        print("Could not detect pitch.")
+        sys.exit(1)
+    original_pitch = np.median(pitch_values)
 
-    # Shift the pitch
-    autotuned_audio = shift_pitch(audio, semitones)
+    # Calculate the number of semitones to shift to reach Middle C (261.63 Hz)
+    target_pitch = 261.63  # Middle C
+    semitones = 12 * np.log2(target_pitch / original_pitch)
+    print(f"Original pitch: {original_pitch:.2f} Hz")
+    print(f"Semitones to shift: {semitones:.2f}")
 
-    # Export the autotuned audio
-    autotuned_audio.export(output_audio_path, format="wav")
+    # Shift the pitch using librosa
+    autotuned_audio = librosa.effects.pitch_shift(y, sr, n_steps=semitones)
+
+    # Save the autotuned audio
+    sf.write(output_audio_path, autotuned_audio, sr)
 
 if __name__ == "__main__":
-    print("tuning in python")
     if len(sys.argv) != 3:
         print("Usage: python autotune.py <input_audio_path> <output_audio_path>")
         sys.exit(1)

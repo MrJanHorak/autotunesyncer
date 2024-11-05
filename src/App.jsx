@@ -7,6 +7,11 @@ import VideoComposer from './components/VideoComposer'; // Updated import
 import { Midi } from '@tonejs/midi';
 import * as Tone from 'tone';
 
+// Add this helper function at the top
+const normalizeInstrumentName = (name) => {
+  return name.toLowerCase().replace(/\s+/g, '_');
+};
+
 function App() {
   const [midiFile, setMidiFile] = useState(null);
   const [videoFiles, setVideoFiles] = useState({});
@@ -25,10 +30,13 @@ function App() {
       return;
     }
 
-    // Save the video blob with instrument and track index
+    // Normalize the instrument name and create a key
+    const normalizedName = normalizeInstrumentName(instrument.name);
+    const key = `videos[${normalizedName}]`;
+
     setVideoFiles((prev) => ({
       ...prev,
-      [`${instrument}-${trackIndex}`]: blob,
+      [key]: blob,
     }));
     setRecordedVideosCount((prevCount) => prevCount + 1);
   };
@@ -151,15 +159,16 @@ function App() {
     </h3>
     <VideoRecorder
       onRecordingComplete={(blob) =>
-        handleRecordingComplete(blob, instrument.name, index)
+        handleRecordingComplete(blob, instrument, index)
       }
       style={{ width: '300px', height: '200px' }}
       instrument={instrument}
       onVideoReady={(url) => {
-        // Handle the autotuned video URL here
+        const normalizedName = normalizeInstrumentName(instrument.name);
+        const key = `videos[${normalizedName}]`;
         setVideoFiles((prev) => ({
           ...prev,
-          [`${instrument.name}-${index}`]: url
+          [key]: url
         }));
       }}
     />

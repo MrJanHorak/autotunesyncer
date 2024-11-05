@@ -83,6 +83,20 @@ const logVideoInfo = async (filePath, label) => {
   });
 };
 
+// Helper function to check if a Python module is installed
+const checkPythonModule = async (moduleName) => {
+  return new Promise((resolve, reject) => {
+    const pythonProcess = spawn('python', ['-c', `import ${moduleName}`]);
+    pythonProcess.on('close', (code) => {
+      if (code === 0) {
+        resolve(true);
+      } else {
+        reject(new Error(`Python module '${moduleName}' is not installed`));
+      }
+    });
+  });
+};
+
 export const autotuneVideo = async (req, res) => {
   let tempDir = null;
   
@@ -90,6 +104,21 @@ export const autotuneVideo = async (req, res) => {
     if (!req.file) {
       throw new Error('No video file provided');
     }
+
+    // Check if numpy is installed
+    await checkPythonModule('numpy');
+
+    // Check if tensorflow is installed
+    await checkPythonModule('tensorflow');
+
+    // Check if librosa is installed
+    await checkPythonModule('librosa');
+
+    // Add check for 'crepe' module
+    await checkPythonModule('crepe');
+
+    // Check if pytsmod is installed
+    await checkPythonModule('pytsmod');
 
     // Create temporary directory with unique ID
     tempDir = path.join(__dirname, '../temp', uuidv4());
