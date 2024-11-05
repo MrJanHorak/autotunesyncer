@@ -1,6 +1,6 @@
 /* eslint-disable no-prototype-builtins */
 /* eslint-disable no-unused-vars */
-import { useState, useEffect } from 'react'; // Add useEffect import
+import { useState, useEffect, useCallback } from 'react'; // Add useCallback import
 import Dropzone from 'react-dropzone';
 import VideoRecorder from './components/videoRecorder'; // Updated import
 import VideoComposer from './components/VideoComposer'; // Updated import
@@ -104,6 +104,15 @@ function App() {
     }
   };
 
+  const handleVideoReady = useCallback((url, instrument) => {
+    const normalizedName = normalizeInstrumentName(instrument.name);
+    setVideoFiles(prev => ({
+      ...prev,
+      [normalizedName]: url
+    }));
+    setRecordedVideosCount(prev => prev + 1);
+  }, []);
+
   return (
     <div>
       <h1>Upload MIDI File</h1>
@@ -131,49 +140,22 @@ function App() {
           </ul>
         </div>
       )}
-{/* 
-      {instruments.length > 0 && (
-        <div className='recordingHolder'>
-          <h2>Record Videos for Instruments</h2>
-          {instruments.map((instrument, index) => (
-            <div key={index} style={{ marginBottom: '20px' }}>
-              <h3>
-                {instrument.family} - {instrument.name}
-              </h3>
-              <VideoRecorder
-                onRecordingComplete={(blob) =>
-                  handleRecordingComplete(blob, instrument.name)
-                }
-                style={{ width: '300px', height: '200px' }} // Custom styles to make the recorder smaller
-                instrument={instrument.name}
-              />
-            </div>
-          ))}
-        </div>
-      )} */}
 
-{instruments.map((instrument, index) => (
-  <div key={index} style={{ marginBottom: '20px' }}>
-    <h3>
-      {instrument.family} - {instrument.name}
-    </h3>
-    <VideoRecorder
-      onRecordingComplete={(blob) =>
-        handleRecordingComplete(blob, instrument, index)
-      }
-      style={{ width: '300px', height: '200px' }}
-      instrument={instrument}
-      onVideoReady={(url) => {
-        const normalizedName = normalizeInstrumentName(instrument.name);
-        const key = `videos[${normalizedName}]`;
-        setVideoFiles((prev) => ({
-          ...prev,
-          [key]: url
-        }));
-      }}
-    />
-  </div>
-))}
+      {instruments.map((instrument, index) => (
+        <div key={index} style={{ marginBottom: '20px' }}>
+          <h3>
+            {instrument.family} - {instrument.name}
+          </h3>
+          <VideoRecorder
+            onRecordingComplete={(blob) =>
+              handleRecordingComplete(blob, instrument, index)
+            }
+            style={{ width: '300px', height: '200px' }}
+            instrument={instrument}
+            onVideoReady={(url) => handleVideoReady(url, instrument)}
+          />
+        </div>
+      ))}
 
       {console.log('Recorded Videos Count:', recordedVideosCount)}
       {console.log('Number of Tracks:', parsedMidiData?.tracks.length)}

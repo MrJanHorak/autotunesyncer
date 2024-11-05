@@ -19,6 +19,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { spawn } from 'child_process';
+import { rm } from 'fs/promises';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -774,6 +775,10 @@ export const composeVideo = async (req, res) => {
     const videoFiles = {};
     const videos = files.filter((file) => file.fieldname.startsWith('videos'));
 
+    if (videos.length === 0) {
+      throw new Error('No video files were uploaded');
+    }
+
     // Create a map of normalized instrument names to their videos
     videos.forEach((video) => {
       const instrumentMatch = video.fieldname.match(/\[(.*?)\]/);
@@ -822,39 +827,34 @@ export const composeVideo = async (req, res) => {
     const outputPath = join(sessionDir, 'output.mp4');
     
     // Use Python processor instead of ffmpeg
+    const midiData = midi.toJSON();
+    midiData.duration = midi.duration;
+
     await processVideoWithPython(
-      midi.toJSON(),
+      midiData,
       videoFiles,
       outputPath
     );
 
     // Send the result
-    res.sendFile(outputPath, (err) => {
+    res.sendFile(outputPath, async (err) => {
       if (err) {
         console.error('Error sending file:', err);
       }
       // Cleanup
-      try {
-        rmSync(sessionDir, { recursive: true, force: true });
-      } catch (cleanupErr) {
-        console.error('Error cleaning up temp files:', cleanupErr);
-      }
+      await cleanupTempDirectory(sessionDir);
     });
   } catch (error) {
     console.error('Composition error:', error);
     res.status(500).json({ error: error.message });
     // Cleanup on error
-    try {
-      rmSync(sessionDir, { recursive: true, force: true });
-    } catch (cleanupErr) {
-      console.error('Error cleaning up temp files after error:', cleanupErr);
-    }
+    await cleanupTempDirectory(sessionDir);
   }
 };
 
 async function cleanupTempDirectory(dirPath) {
   try {
-    // await rimraf(dirPath);
+    await rm(dirPath, { recursive: true, force: true });
     console.log(`Temp directory ${dirPath} cleaned up successfully.`);
   } catch (error) {
     console.error(`Error cleaning up temp directory ${dirPath}:`, error);

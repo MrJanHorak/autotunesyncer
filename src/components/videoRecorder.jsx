@@ -5,7 +5,7 @@ import ControlButtons from './ControlButtons';
 import LoadingSpinner from './LoadingSpinner';
 import './styles.css';
 
-const VideoRecorder = ({ style, instrument }) => {
+const VideoRecorder = ({ style, instrument, onVideoReady }) => {
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
 
@@ -37,8 +37,10 @@ const VideoRecorder = ({ style, instrument }) => {
   useEffect(() => {
     if (videoState.autotunedURL) {
       console.log('Autotuned video URL updated:', videoState.autotunedURL);
+      // Notify parent component about the new autotuned video
+      onVideoReady?.(videoState.autotunedURL);
     }
-  }, [videoState.autotunedURL]);
+  }, [videoState.autotunedURL, onVideoReady]);
 
   const startRecording = async () => {
     try {
