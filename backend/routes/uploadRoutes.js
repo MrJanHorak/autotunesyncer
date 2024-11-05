@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { composeVideo } from '../controllers/compositionController.js';
+import { handleUpload } from '../controllers/uploadController.js';
 
 const router = express.Router();
 
@@ -9,9 +9,8 @@ const upload = multer({
   storage: storage,
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB limit
-    files: 10 // Maximum 10 files
   }
-}).any();
+}).single('video');
 
 router.post('/', (req, res, next) => {
   upload(req, res, (err) => {
@@ -22,6 +21,6 @@ router.post('/', (req, res, next) => {
     }
     next();
   });
-}, composeVideo);
+}, handleUpload);
 
 export default router;
