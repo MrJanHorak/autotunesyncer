@@ -34,6 +34,12 @@ const VideoRecorder = ({ style, instrument }) => {
     }
   }, [isRecording]);
 
+  useEffect(() => {
+    if (videoState.autotunedURL) {
+      console.log('Autotuned video URL updated:', videoState.autotunedURL);
+    }
+  }, [videoState.autotunedURL]);
+
   const startRecording = async () => {
     try {
       setIsProcessing(true);
@@ -56,8 +62,14 @@ const VideoRecorder = ({ style, instrument }) => {
       }
 
       await handleRecord(
-        (recordedURL) => setVideoState((prev) => ({ ...prev, recordedURL })),
-        (autotunedURL) => setVideoState((prev) => ({ ...prev, autotunedURL }))
+        (recordedURL) => {
+          console.log('Recorded video URL set');
+          setVideoState((prev) => ({ ...prev, recordedURL }));
+        },
+        (autotunedURL) => {
+          console.log('Autotuned video URL set');
+          setVideoState((prev) => ({ ...prev, autotunedURL }));
+        }
       );
     } catch (error) {
       console.error('Recording failed:', error);
@@ -127,11 +139,13 @@ const VideoRecorder = ({ style, instrument }) => {
             <>
               {videoState.autotunedURL ? (
                 <video
+                  key={videoState.autotunedURL} // Add key to force reload
                   src={videoState.autotunedURL}
                   className='video-element'
                   controls
                   autoPlay
                   playsInline
+                  onError={(e) => console.error('Video error:', e)}
                 ></video>
               ) : videoState.recordedURL ? (
                 <video
