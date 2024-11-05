@@ -7,13 +7,8 @@ import {
   mkdirSync,
   writeFileSync,
   rmSync,
-  copyFileSync,
-  createWriteStream,
   renameSync,
 } from 'fs';
-import { PNG } from 'pngjs';
-import { rimraf } from 'rimraf';
-import { Buffer } from 'buffer';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
@@ -792,6 +787,7 @@ export const composeVideo = async (req, res) => {
     console.log('MIDI tracks:', midi.tracks.map(track => track.instrument.name));
 
     // Process each track
+    const processedFiles = new Map();
     const trackPromises = midi.tracks.map(async (track, trackIndex) => {
       if (track.notes.length === 0) return null;
 
@@ -799,56 +795,57 @@ export const composeVideo = async (req, res) => {
       const videoFile = videoFiles[normalizedInstrumentName];
 
       if (!videoFile) {
-        console.log(`No video found for instrument: ${track.instrument.name} (normalized: ${normalizedInstrumentName})`);
+        console.log(`No video found for instrument: ${track.instrument.name}`);
         return null;
       }
 
-      const videoPath = join(sessionDir, `${normalizedInstrumentName}.webm`);
-      writeFileSync(videoPath, videoFile.buffer);
+      // Only process each unique instrument once
+      if (!processedFiles.has(normalizedInstrumentName)) {
+        const videoPath = join(sessionDir, `${normalizedInstrumentName}.mp4`);
+        const webmPath = join(sessionDir, `${normalizedInstrumentName}.webm`);
+        
+        writeFileSync(videoPath, videoFile.buffer);
+        await convertToWebM(videoPath, webmPath);
+        
+        processedFiles.set(normalizedInstrumentName, webmPath);
+        videoFiles[normalizedInstrumentName] = webmPath;
 
-      // Rest of the processing code...
-      const baseNote = track.notes[0]?.midi || 60;
-      // ... rest of your existing track processing code ...
-    });
-
-    // ... rest of your existing code ...
-
-    // Update video files mapping with paths
-    videos.forEach(video => {
-      const instrumentMatch = video.fieldname.match(/\[(.*?)\]/);
-      if (instrumentMatch) {
-        const normalizedName = normalizeInstrumentName(instrumentMatch[1]);
-        const videoPath = join(sessionDir, `${normalizedName}.webm`);
-        writeFileSync(videoPath, video.buffer);
-        videoFiles[normalizedName] = videoPath;
+        // Clean up MP4 file after successful conversion
+        try {
+          await deleteFileWithRetry(videoPath);
+        } catch (err) {
+          console.warn(`Failed to clean up MP4 file: ${videoPath}`, err);
+        }
       }
     });
 
+    await Promise.all(trackPromises);
+
     const outputPath = join(sessionDir, 'output.mp4');
-    
-    // Use Python processor instead of ffmpeg
     const midiData = midi.toJSON();
     midiData.duration = midi.duration;
 
+    // Wait for any pending file operations to complete
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
     await processVideoWithPython(
       midiData,
-      videoFiles,
+      Object.fromEntries(processedFiles),
       outputPath
     );
 
-    // Send the result
     res.sendFile(outputPath, async (err) => {
       if (err) {
         console.error('Error sending file:', err);
       }
-      // Cleanup
-      await cleanupTempDirectory(sessionDir);
+      // Delay cleanup to ensure files are not in use
+      setTimeout(() => cleanupTempDirectory(sessionDir), 1000);
     });
   } catch (error) {
     console.error('Composition error:', error);
     res.status(500).json({ error: error.message });
-    // Cleanup on error
-    await cleanupTempDirectory(sessionDir);
+    // Delay cleanup to ensure files are not in use
+    setTimeout(() => cleanupTempDirectory(sessionDir), 1000);
   }
 };
 
@@ -858,5 +855,52 @@ async function cleanupTempDirectory(dirPath) {
     console.log(`Temp directory ${dirPath} cleaned up successfully.`);
   } catch (error) {
     console.error(`Error cleaning up temp directory ${dirPath}:`, error);
+  }
+}
+
+async function convertToWebM(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .output(outputPath)
+      .outputOptions([
+        '-c:v', 'libvpx',
+        '-c:a', 'libvorbis',
+        '-b:v', '1M',
+        '-deadline', 'realtime',
+        '-cpu-used', '5',
+        '-auto-alt-ref', '0',
+        '-qmin', '0',
+        '-qmax', '50'
+      ])
+      .on('end', () => {
+        // Verify the converted file
+        ffmpeg.ffprobe(outputPath, (err, metadata) => {
+          if (err || !metadata) {
+            reject(new Error(`Failed to verify WebM file: ${err?.message}`));
+            return;
+          }
+          console.log(`Successfully converted and verified ${outputPath}`);
+          resolve();
+        });
+      })
+      .on('error', (err) => {
+        console.error(`Error converting ${inputPath} to WebM:`, err);
+        reject(err);
+      })      .run();  });}
+// Add this helper function
+async function deleteFileWithRetry(filePath, retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await rm(filePath);
+      console.log(`Successfully deleted ${filePath}`);
+      break;
+    } catch (err) {
+      if (i < retries - 1) {
+        console.warn(`Retrying deletion of ${filePath} (${i + 1})`);
+        await new Promise(res => setTimeout(res, delay));
+      } else {
+        console.error(`Failed to delete ${filePath}:`, err);
+      }
+    }
   }
 }
