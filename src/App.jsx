@@ -6,6 +6,7 @@ import VideoRecorder from './components/videoRecorder'; // Updated import
 import VideoComposer from './components/VideoComposer'; // Updated import
 import { Midi } from '@tonejs/midi';
 import * as Tone from 'tone';
+import { isDrumTrack, DRUM_GROUPS } from './js/drumUtils';
 
 // Add this helper function at the top
 const normalizeInstrumentName = (name) => {
@@ -17,27 +18,79 @@ const calculateLongestNotes = (midiData) => {
   const instrumentDurations = {};
   
   midiData.tracks.forEach(track => {
-    const instrumentName = track.instrument.name;
-    let longestDuration = 0;
-    
-    track.notes.forEach(note => {
-      // duration is in seconds
-      const noteDuration = note.duration;
-      longestDuration = Math.max(longestDuration, noteDuration);
-    });
-    
-    // If we already have a duration for this instrument, take the longest
-    if (instrumentName in instrumentDurations) {
-      instrumentDurations[instrumentName] = Math.max(
-        instrumentDurations[instrumentName],
-        longestDuration
-      );
+    if (isDrumTrack(track)) {
+      // Group notes by drum type
+      const drumGroups = new Map();
+      track.notes.forEach(note => {
+        for (const [group, notes] of Object.entries(DRUM_GROUPS)) {
+          if (notes.includes(note.midi)) {
+            if (!drumGroups.has(group)) {
+              drumGroups.set(group, []);
+            }
+            drumGroups.get(group).push(note);
+            break;
+          }
+        }
+      });
+
+      // Calculate longest duration for each drum group
+      drumGroups.forEach((notes, group) => {
+        const groupName = `drum_${group}`;
+        let longestDuration = 0;
+        notes.forEach(note => {
+          longestDuration = Math.max(longestDuration, note.duration);
+        });
+        instrumentDurations[groupName] = longestDuration;
+      });
     } else {
-      instrumentDurations[instrumentName] = longestDuration;
+      // Handle regular instruments as before
+      const instrumentName = track.instrument.name;
+      let longestDuration = 0;
+      
+      track.notes.forEach(note => {
+        longestDuration = Math.max(longestDuration, note.duration);
+      });
+      
+      if (instrumentName in instrumentDurations) {
+        instrumentDurations[instrumentName] = Math.max(
+          instrumentDurations[instrumentName],
+          longestDuration
+        );
+      } else {
+        instrumentDurations[instrumentName] = longestDuration;
+      }
     }
   });
   
   return instrumentDurations;
+};
+
+// Add this helper function to extract drum instruments
+const extractDrumInstruments = (track) => {
+  if (!isDrumTrack(track)) return [];
+  
+  // Get unique MIDI notes from the track
+  const uniqueNotes = new Set(track.notes.map(note => note.midi));
+  
+  // Map notes to their drum groups
+  const drumGroups = new Set();
+  uniqueNotes.forEach(note => {
+    for (const [group, notes] of Object.entries(DRUM_GROUPS)) {
+      if (notes.includes(note)) {
+        drumGroups.add(group);
+        break;
+      }
+    }
+  });
+
+  // Create instrument objects for each drum group
+  return Array.from(drumGroups).map(group => ({
+    name: `drum_${group}`,
+    family: 'drums',
+    number: -1, // Use -1 to identify as drum instrument
+    isDrum: true,
+    group: group
+  }));
 };
 
 function App() {
@@ -58,16 +111,20 @@ function App() {
       console.error('Invalid blob:', blob);
       return;
     }
-
-    // Normalize the instrument name and create a key
-    const normalizedName = normalizeInstrumentName(instrument.name);
-    const key = `videos[${normalizedName}]`;
-
-    setVideoFiles((prev) => ({
+  
+    // Handle drum recordings
+    const key = instrument.isDrum ? 
+      `drum_${instrument.group}` : 
+      normalizeInstrumentName(instrument.name);
+  
+    const formData = new FormData();
+    formData.append(`videos[${key}]`, blob);
+  
+    setVideoFiles(prev => ({
       ...prev,
-      [key]: blob,
+      [key]: blob
     }));
-    setRecordedVideosCount((prevCount) => prevCount + 1);
+    setRecordedVideosCount(prev => prev + 1);
   };
 
   // Add useEffect to handle the state update
@@ -87,24 +144,43 @@ function App() {
       try {
         const midi = new Midi(arrayBuffer);
         setParsedMidiData(midi);
-        const instrumentSet = extractInstruments(midi);
-        const instrumentData = Array.from(instrumentSet).map((item) =>
-          JSON.parse(item)
-        ); // Convert back to objects
+        
+        // Extract all instruments including drum groups
+        const instrumentSet = new Set();
+        midi.tracks.forEach(track => {
+          if (isDrumTrack(track)) {
+            // Add individual drum instruments
+            extractDrumInstruments(track).forEach(drumInst => {
+              instrumentSet.add(JSON.stringify(drumInst));
+            });
+          } else {
+            // Add regular instruments
+            instrumentSet.add(JSON.stringify(track.instrument));
+          }
+        });
+
+        const instrumentData = Array.from(instrumentSet).map(item => JSON.parse(item));
         setInstruments(instrumentData);
 
-        // Calculate longest notes
+        // Calculate longest notes including drum groups
         const durations = calculateLongestNotes(midi);
         setLongestNotes(durations);
 
-        // Create a mapping of instruments to their respective tracks
+        // Create mapping including drum groups
         const trackMap = {};
         midi.tracks.forEach((track, index) => {
-          const instrumentName = track.instrument.name;
-          if (!trackMap[instrumentName]) {
-            trackMap[instrumentName] = [];
+          if (isDrumTrack(track)) {
+            // Map each drum group to this track
+            extractDrumInstruments(track).forEach(drumInst => {
+              trackMap[drumInst.name] = [index];
+            });
+          } else {
+            const instrumentName = track.instrument.name;
+            if (!trackMap[instrumentName]) {
+              trackMap[instrumentName] = [];
+            }
+            trackMap[instrumentName].push(index);
           }
-          trackMap[instrumentName].push(index);
         });
         setInstrumentTrackMap(trackMap);
       } catch (error) {
@@ -193,7 +269,11 @@ function App() {
         return (
           <div key={index} style={{ marginBottom: '20px' }}>
             <h3>
-              {instrument.family} - {instrument.name}
+              {instrument.isDrum ? (
+                `Drum - ${instrument.group.charAt(0).toUpperCase() + instrument.group.slice(1)}`
+              ) : (
+                `${instrument.family} - ${instrument.name}`
+              )}
             </h3>
             <p>
               Minimum recording duration: {recommendedDuration} seconds
