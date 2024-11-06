@@ -4,6 +4,7 @@ import { handleRecord } from '../js/handleRecordVideo';
 import ControlButtons from './ControlButtons';
 import LoadingSpinner from './LoadingSpinner';
 import './styles.css';
+import { isDrumTrack } from '../js/drumUtils';
 
 const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
   const videoRef = useRef(null);
@@ -18,6 +19,7 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(true); // Add state for autotune
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [isDrum] = useState(() => isDrumTrack(instrument));
 
   useEffect(() => {
     // Cleanup function for media streams and audio
@@ -84,15 +86,16 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
         },
         (autotunedURL) => {
           console.log('Autotuned video URL set');
-          // Only update if the URL is different
+          // For drums, use recorded URL directly without autotune
+          const finalURL = isDrum ? videoState.recordedURL : autotunedURL;
           setVideoState((prev) => {
-            if (prev.autotunedURL !== autotunedURL) {
-              return { ...prev, autotunedURL };
+            if (prev.autotunedURL !== finalURL) {
+              return { ...prev, autotunedURL: finalURL };
             }
             return prev;
           });
         },
-        isAutotuneEnabled // Pass the autotune flag
+        !isDrum && isAutotuneEnabled // Only apply autotune for non-drum tracks
       );
     } catch (error) {
       console.error('Recording failed:', error);

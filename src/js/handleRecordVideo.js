@@ -12,6 +12,7 @@ export const uploadVideo = async (videoFile) => {
   return audioFile;
 };
 
+// eslint-disable-next-line no-unused-vars
 const uploadDirectVideo = async (videoFile) => {
   try {
     console.log('Uploading video directly...', videoFile.size);
