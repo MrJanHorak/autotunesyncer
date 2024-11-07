@@ -36,6 +36,7 @@ const uploadDirectVideo = async (videoFile) => {
   }
 };
 
+// eslint-disable-next-line no-unused-vars
 const autotuneToMiddleC = async (videoFile) => {
   const formData = new FormData();
   formData.append('video', videoFile);
@@ -75,6 +76,55 @@ const autotuneToMiddleC = async (videoFile) => {
     throw error;
   }
 };
+
+// export async function handleRecord(onRecordingComplete, onAutotuneComplete, autotuneEnabled = true) {
+//   let mediaRecorder;
+//   const chunks = [];
+
+//   return new Promise((resolve, reject) => {
+//     // Start recording function
+//     const startRecording = (stream) => {
+//       mediaRecorder = new MediaRecorder(stream);
+
+//       mediaRecorder.ondataavailable = (e) => {
+//         if (e.data.size > 0) {
+//           chunks.push(e.data);
+//         }
+//       };
+
+//       mediaRecorder.onstop = async () => {
+//         const blob = new Blob(chunks, { type: 'video/webm' });
+//         const recordedURL = URL.createObjectURL(blob);
+//         onRecordingComplete(recordedURL);
+
+//         if (autotuneEnabled) {
+//           try {
+//             // Here you would implement your autotune processing
+//             // For now, we'll just pass through the recorded URL
+//             onAutotuneComplete(recordedURL);
+//           } catch (error) {
+//             console.error('Autotune processing failed:', error);
+//             onAutotuneComplete(recordedURL); // Fallback to original
+//           }
+//         } else {
+//           onAutotuneComplete(recordedURL);
+//         }
+//         resolve();
+//       };
+
+//       mediaRecorder.start(1000); // Save data every second
+//     };
+
+//     // Get the stream from the VideoRecorder component
+//     navigator.mediaDevices
+//       .getUserMedia({ video: true, audio: true })
+//       .then(startRecording)
+//       .catch((error) => {
+//         console.error('Error accessing media devices:', error);
+//         reject(error);
+//       });
+//   });
+// }
 
 export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL, isAutotuneEnabled = true) => {
   const stream = await navigator.mediaDevices.getUserMedia({
