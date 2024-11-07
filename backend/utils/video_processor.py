@@ -5,6 +5,9 @@ import numpy as np
 from PIL import Image
 import logging
 import time
+import os
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Replace '0' with the correct GPU index if necessary
 
 # Configure logging at the beginning of the file
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -101,39 +104,14 @@ def process_video_segments(midi_data, video_files, output_path):
         background = ColorClip(size=(960, 720), color=(0, 0, 0), duration=duration)
         clips_to_close.append(background)
         
-        # Separate drum and non-drum tracks
-        drum_tracks = {
-            track_id: data for track_id, data in video_files.items() 
-            if track_id.startswith('drum_')
-        }
-        melodic_tracks = {
-            track_id: data for track_id, data in video_files.items() 
-            if not track_id.startswith('drum_')
+        # Filter video files to only include those with notes
+        active_video_files = {
+            track_id: data for track_id, data in video_files.items()
+            if data.get('notes') and len(data['notes']) > 0
         }
         
-        # Map tracks including both melodic and drum tracks
-        track_mapping = {}
-        position_idx = 0
-        
-        # First map all melodic tracks
-        for idx, track in enumerate(tracks):
-            track_id = f"{track['instrument']['name'].replace(' ', '_').lower()}_track{idx}"
-            if track_id in melodic_tracks:
-                track_mapping[idx] = track_id
-                position_idx += 1
-                logging.info(f"Mapped melodic track {idx} to {track_id}")
-        
-        # Then map drum tracks
-        for track_id in drum_tracks:
-            if drum_tracks[track_id].get('notes'):  # Only map if there are notes
-                track_mapping[f"drum_{position_idx}"] = track_id
-                position_idx += 1
-                logging.info(f"Mapped drum track to {track_id}")
-
-        logging.info(f"Track mapping: {track_mapping}")
-        
-        # Calculate grid based on number of tracks
-        total_tracks = len(track_mapping)
+        # Calculate grid based on number of active tracks
+        total_tracks = len(active_video_files)
         grid_size = max(2, int(np.ceil(np.sqrt(total_tracks))))
         clip_width = 960 // grid_size
         clip_height = 720 // grid_size
@@ -145,15 +123,20 @@ def process_video_segments(midi_data, video_files, output_path):
         track_positions = {}
         position_idx = 0
         
-        # Load and position all tracks
-        for track_idx, track_id in track_mapping.items():
+        # Load and verify all video files first
+        for track_id, track_data in active_video_files.items():
             try:
-                video_path = video_files[track_id]['path']
+                video_path = track_data['path']
                 if not verify_video_file(video_path):
                     logging.error(f"Failed to verify video file for {track_id}")
                     continue
                     
                 source_clip = VideoFileClip(video_path, audio=True)
+                if not verify_frame_reading(source_clip):
+                    logging.error(f"Failed to verify frame reading for {track_id}")
+                    source_clip.close()
+                    continue
+                    
                 source_clips[track_id] = source_clip
                 clips_to_close.append(source_clip)
                 
@@ -165,25 +148,22 @@ def process_video_segments(midi_data, video_files, output_path):
                 logging.info(f"Loaded {track_id} at position ({x_pos}, {y_pos})")
             except Exception as e:
                 logging.error(f"Failed to load video for {track_id}: {e}")
+                continue
 
         # Process all tracks and notes
         all_clips = []
         
-        # Process each track
-        for track_idx, track in enumerate(tracks):
-            if track_idx not in track_mapping:
+        # Process each video file's notes directly
+        for track_id, track_data in active_video_files.items():
+            if track_id not in source_clips or track_id not in track_positions:
                 continue
-            
-            track_id = track_mapping[track_idx]
-            if track_id not in source_clips:
-                continue
-            
+                
             source_clip = source_clips[track_id]
-            is_drum = video_files[track_id].get('isDrum', False)
+            is_drum = track_data.get('isDrum', False)
             x_pos, y_pos = track_positions[track_id]
             
             # Process notes for this track
-            for note in track.get('notes', []):
+            for note in track_data.get('notes', []):
                 try:
                     start_time = float(note.get('time', 0))
                     note_duration = float(note.get('duration', 0))
@@ -207,71 +187,55 @@ def process_video_segments(midi_data, video_files, output_path):
                     all_clips.append(snippet)
                     clips_to_close.append(snippet)
                     
+                    if is_drum:
+                        logging.debug(f"Added drum snippet for {track_id} at time {start_time} with duration {note_duration}")
+                    
                 except Exception as e:
                     logging.error(f"Error processing note in {track_id}: {e}")
-                    continue
-
-        # Get drum tracks from video_files (if any)
-        drum_tracks = {
-            name: data for name, data in video_files.items() 
-            if name.startswith('drum_') and 'notes' in data
-        }
-
-        # Process drum tracks if any exist
-        for drum_name, drum_data in drum_tracks.items():
-            if drum_name not in source_clips:
-                continue
-                
-            source_clip = source_clips[drum_name]
-            x_pos, y_pos = track_positions[drum_name]
-            
-            for note in drum_data['notes']:
-                try:
-                    start_time = float(note.get('time', 0))
-                    note_duration = float(note.get('duration', 0))
-                    
-                    if note_duration <= 0:
-                        continue
-                        
-                    snippet = source_clip.subclip(0, min(note_duration, source_clip.duration))
-                    snippet = snippet.volumex(note.get('velocity', 1.0))
-                    snippet = (snippet
-                        .resize((clip_width, clip_height))
-                        .set_position((x_pos, y_pos))
-                        .set_start(start_time))
-                    
-                    all_clips.append(snippet)
-                    clips_to_close.append(snippet)
-                    
-                    logging.debug(f"Added drum snippet for {drum_name} at time {start_time} with duration {note_duration}")
-                    
-                except Exception as e:
-                    logging.error(f"Error processing note in {drum_name}: {e}")
                     continue
 
         if not all_clips:
             raise ValueError("No valid clips were created")
         
-        # Create final composition without duration parameter
+        # Create final composition
         logging.debug(f"Creating composite of {len(all_clips)} clips...")
         final_clip = CompositeVideoClip([background] + all_clips, size=(960, 720))
-        
-        # Set the duration after creation
         final_clip.duration = duration
         clips_to_close.append(final_clip)
         
-        # Write output
-        final_clip.write_videofile(
-            output_path,
-            codec='libx264',
-            audio_codec='aac',
-            temp_audiofile='temp-audio.m4a',
-            remove_temp=True,
-            fps=30,
-            threads=4,
-            preset='ultrafast',
-            audio=True
-        )
+        # Try NVENC first, fallback to CPU encoding if not available
+        try:
+            logging.info("Starting video encoding with NVENC")
+            final_clip.write_videofile(
+                output_path,
+                codec='h264_nvenc',
+                audio_codec='aac',
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True,
+                fps=30,
+                preset='llhp',# Valid NVENC preset: default, slow, medium, fast, hp, hq, bd, ll, llhq, llhp
+                audio=True,
+                verbose=True,
+                logger='bar',  # Set to None to enable verbose output
+                ffmpeg_params=['-gpu', '0']
+            )
+            logging.info("Completed video encoding with NVENC")
+        except Exception as e:
+            print(f"NVENC encoding failed: {e}")
+            logging.warning(f"NVENC encoding failed, falling back to CPU encoding: {e}")
+            final_clip.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True,
+                fps=30,
+                threads=4,
+                preset='ultrafast',  # ultrafast preset is valid for libx264
+                audio=True,
+                verbose=True,
+                logger='bar'  # Set to None to enable verbose output
+            )
         
         return True
         

@@ -902,107 +902,114 @@ export const composeVideo = async (req, res) => {
       }
     });
 
-    const trackPromises = midi.tracks.map(async (track, trackIndex) => {
-      console.log(`\nAnalyzing track ${trackIndex}:`, {
-        name: track.instrument.name,
-        notes: track.notes?.length || 0,
-        channel: track.channel
-      });
-
-      // Check if this is a drum track
-      const isDrumTrack = isGeneralMidiDrumKit(track.instrument.name, track.channel);
-      
-      if (isDrumTrack) {
-        // Group notes by drum type
-        const drumNoteGroups = {};
-        (track.notes || []).forEach(note => {
-          const group = getNoteGroup(note.midi);
-          if (!drumNoteGroups[group]) {
-            drumNoteGroups[group] = [];
-          }
-          drumNoteGroups[group].push({
-            midi: note.midi,
-            time: ticksToSeconds(note.ticks, midi),
-            duration: Math.max(ticksToSeconds(note.durationTicks, midi), 0.1),
-            velocity: note.velocity || 0.8
-          });
+    const trackPromises = midi.tracks
+      // First filter out empty tracks and clone channels
+      .filter(track => track.notes && track.notes.length > 0)
+      .map(async (track, trackIndex) => {
+        console.log(`\nProcessing track ${trackIndex}:`, {
+          name: track.instrument.name,
+          notes: track.notes.length,
+          channel: track.channel
         });
 
-        // Process each drum group that has a corresponding video
-        for (const [group, notes] of Object.entries(drumNoteGroups)) {
-          const drumVideoKey = `drum_${group}`;
-          const videoFile = videoFiles[drumVideoKey];
-          
-          if (videoFile) {
-            const uniqueTrackId = `${drumVideoKey}_track${trackIndex}`;
-            const tempVideoPath = join(sessionDir, `${uniqueTrackId}_temp.mp4`);
-            const finalVideoPath = join(sessionDir, `${uniqueTrackId}.mp4`);
-            
-            writeFileSync(tempVideoPath, videoFile.buffer);
-            
-            try {
-              await convertVideoFormat(tempVideoPath, finalVideoPath);
-              await rm(tempVideoPath);
-              
-              processedFiles.set(uniqueTrackId, {
-                path: finalVideoPath,
-                isDrum: true,
-                notes: notes,
-                trackIndex,
-                drumGroup: group
-              });
-              
-              console.log(`Processed ${uniqueTrackId} with ${notes.length} notes`);
-            } catch (error) {
-              console.error(`Error converting video for ${drumVideoKey}:`, error);
-            }
-          }
-        }
-      } else {
-        // Handle non-drum tracks
-        const normalizedInstrumentName = normalizeInstrumentName(track.instrument.name);
-        const uniqueTrackId = `${normalizedInstrumentName}_track${trackIndex}`;
-        
-        // Find corresponding video file
-        const videoFile = videoFiles[normalizedInstrumentName];
-        if (!videoFile) {
-          console.log(`No video found for instrument: ${track.instrument.name}`);
+        // Skip if no notes
+        if (!track.notes || track.notes.length === 0) {
+          console.log(`Skipping empty track ${trackIndex}`);
           return null;
         }
 
-        // Always process track even if it has no notes
-        const tempVideoPath = join(sessionDir, `${uniqueTrackId}_temp.mp4`);
-        const finalVideoPath = join(sessionDir, `${uniqueTrackId}.mp4`);
+        const isDrumTrack = isGeneralMidiDrumKit(track.instrument.name, track.channel);
         
-        // Write and convert video
-        writeFileSync(tempVideoPath, videoFile.buffer);
-        
-        try {
-          await convertVideoFormat(tempVideoPath, finalVideoPath);
-          await rm(tempVideoPath);
-          
-          // Convert MIDI ticks to seconds for timing
-          const notes = (track.notes || []).map(note => ({
-            midi: note.midi,
-            time: ticksToSeconds(note.ticks, midi),
-            duration: Math.max(ticksToSeconds(note.durationTicks, midi), 0.1),
-            velocity: note.velocity || 0.8
-          }));
-          
-          processedFiles.set(uniqueTrackId, {
-            path: finalVideoPath,
-            isDrum: false,
-            notes: notes,
-            trackIndex
+        if (isDrumTrack) {
+          // Existing drum track processing...
+          const drumNoteGroups = {};
+          track.notes.forEach(note => {
+            const group = getNoteGroup(note.midi);
+            if (!drumNoteGroups[group]) {
+              drumNoteGroups[group] = [];
+            }
+            drumNoteGroups[group].push({
+              midi: note.midi,
+              time: ticksToSeconds(note.ticks, midi),
+              duration: Math.max(ticksToSeconds(note.durationTicks, midi), 0.1),
+              velocity: note.velocity || 0.8
+            });
           });
 
-          console.log(`Processed ${uniqueTrackId} with ${notes.length} notes`);
-        } catch (error) {
-          console.error(`Error converting video format: ${error.message}`);
-          return null;
+          // Only process drum groups that have videos
+          const processedGroups = [];
+          for (const [group, notes] of Object.entries(drumNoteGroups)) {
+            const drumVideoKey = `drum_${group}`;
+            const videoFile = videoFiles[drumVideoKey];
+            
+            if (videoFile) {
+              const uniqueTrackId = `${drumVideoKey}_track${trackIndex}`;
+              const tempVideoPath = join(sessionDir, `${uniqueTrackId}_temp.mp4`);
+              const finalVideoPath = join(sessionDir, `${uniqueTrackId}.mp4`);
+              
+              try {
+                writeFileSync(tempVideoPath, videoFile.buffer);
+                await convertVideoFormat(tempVideoPath, finalVideoPath);
+                await rm(tempVideoPath);
+                
+                processedFiles.set(uniqueTrackId, {
+                  path: finalVideoPath,
+                  isDrum: true,
+                  notes: notes,
+                  trackIndex,
+                  drumGroup: group
+                });
+                
+                processedGroups.push(group);
+                console.log(`Processed ${uniqueTrackId} with ${notes.length} notes`);
+              } catch (error) {
+                console.error(`Error processing drum group ${group}:`, error);
+              }
+            }
+          }
+          return processedGroups;
+        } else {
+          // Handle melodic tracks
+          const normalizedInstrumentName = normalizeInstrumentName(track.instrument.name);
+          const uniqueTrackId = `${normalizedInstrumentName}_track${trackIndex}`;
+          
+          // Find corresponding video file
+          const videoFile = videoFiles[normalizedInstrumentName];
+          if (!videoFile) {
+            console.log(`No video found for instrument: ${track.instrument.name}`);
+            return null;
+          }
+
+          const tempVideoPath = join(sessionDir, `${uniqueTrackId}_temp.mp4`);
+          const finalVideoPath = join(sessionDir, `${uniqueTrackId}.mp4`);
+          
+          try {
+            writeFileSync(tempVideoPath, videoFile.buffer);
+            await convertVideoFormat(tempVideoPath, finalVideoPath);
+            await rm(tempVideoPath);
+            
+            const notes = track.notes.map(note => ({
+              midi: note.midi,
+              time: ticksToSeconds(note.ticks, midi),
+              duration: Math.max(ticksToSeconds(note.durationTicks, midi), 0.1),
+              velocity: note.velocity || 0.8
+            }));
+            
+            processedFiles.set(uniqueTrackId, {
+              path: finalVideoPath,
+              isDrum: false,
+              notes: notes,
+              trackIndex
+            });
+
+            console.log(`Processed ${uniqueTrackId} with ${notes.length} notes`);
+            return uniqueTrackId;
+          } catch (error) {
+            console.error(`Error processing melodic track ${uniqueTrackId}:`, error);
+            return null;
+          }
         }
-      }
-    });
+      });
 
     await Promise.all(trackPromises);
 

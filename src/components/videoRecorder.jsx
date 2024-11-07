@@ -51,15 +51,31 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
     }
   }, [videoState.autotunedURL, onVideoReady, instrument]);
 
+  useEffect(() => {
+    // When recording starts, initialize the recording timer
+    if (isRecording) {
+      setRecordingDuration(0);
+      recordingTimer.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+    } else {
+      // Clear timer when recording stops
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+      }
+    }
+
+    return () => {
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+      }
+    };
+  }, [isRecording]);
+
   const startRecording = async () => {
     try {
       setIsProcessing(true);
       setRecordingDuration(0);
-      
-      // Start timer to track recording duration
-      recordingTimer.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
-      }, 1000);
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -202,7 +218,16 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
           {isProcessing && <LoadingSpinner />}
         </div>
         {isRecording && (
-          <div className="recording-duration">
+          <div className="recording-duration" >
+          {/* style={{
+            position: 'absolute',
+            top: '10px',
+            left: '10px',
+            background: 'rgba(0,0,0,0.5)',
+            color: 'white',
+            padding: '5px',
+            borderRadius: '4px'
+          }}> */}
             Recording: {recordingDuration}s / {minDuration}s minimum
           </div>
         )}
