@@ -1,5 +1,73 @@
 import sys
 import os
+
+# Configure for CUDA 12.6
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+os.environ['CUDA_MODULE_LOADING'] = 'LAZY'  # Add this for CUDA 12.6
+
+# Import tensorflow first to configure GPU
+import tensorflow as tf
+
+def setup_gpu():
+    try:
+        # Print diagnostics with CUDA version check
+        print("\nGPU Setup Diagnostics:")
+        
+        # Check CUDA runtime version
+        try:
+            import ctypes
+            cuda_path = os.environ.get('CUDA_PATH', 'C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6')
+            cuda_dll = ctypes.CDLL(f"{cuda_path}/bin/cudart64_120.dll")
+            version = ctypes.c_int()
+            cuda_dll.cudaRuntimeGetVersion(ctypes.byref(version))
+            cuda_version = f"{version.value//1000}.{(version.value%1000)//10}"
+            print(f"CUDA Runtime version: {cuda_version}")
+        except Exception as e:
+            print(f"Could not get CUDA version: {e}")
+        
+        print(f"TensorFlow version: {tf.__version__}")
+        print(f"CUDA built: {tf.test.is_built_with_cuda()}")
+        print(f"GPU available: {tf.test.is_gpu_available()}")
+        
+        physical_devices = tf.config.list_physical_devices('GPU')
+        print(f"Physical devices: {physical_devices}")
+        
+        if not physical_devices:
+            print("\nNo GPU devices found. Environment info:")
+            print(f"CUDA_PATH: {os.environ.get('CUDA_PATH', 'Not set')}")
+            print(f"CUDA_HOME: {os.environ.get('CUDA_HOME', 'Not set')}")
+            print(f"PATH includes CUDA: {'cuda' in os.environ.get('PATH', '').lower()}")
+            return False
+        
+        # Configure memory growth
+        for device in physical_devices:
+            try:
+                tf.config.experimental.set_memory_growth(device, True)
+                print(f"\nEnabled memory growth for {device}")
+            except RuntimeError as e:
+                print(f"Memory growth configuration error: {e}")
+        
+        # Test GPU
+        with tf.device('/GPU:0'):
+            print("\nTesting GPU computation...")
+            a = tf.random.normal([1000, 1000])
+            b = tf.random.normal([1000, 1000])
+            c = tf.matmul(a, b)
+            print("GPU test successful!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"GPU setup error: {str(e)}")
+        return False
+
+# Call setup before other imports
+gpu_available = setup_gpu()
+
+# Rest of your imports
 import numpy as np
 import crepe
 import pytsmod as tsm
@@ -23,8 +91,6 @@ if sys.platform.startswith('win'):
 
 # Set environment variables for encoding and tensorflow
 os.environ['PYTHONIOENCODING'] = 'utf-8'
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 def get_pitch_crepe(audio, sr, hop_length=512):  # Increased from 128
     """

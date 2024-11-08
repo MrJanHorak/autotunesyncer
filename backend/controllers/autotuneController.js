@@ -13,12 +13,24 @@ const runFFmpeg = async (input, output, options = {}) => {
   return new Promise((resolve, reject) => {
     const command = ffmpeg(input);
     
+    // Enable NVIDIA GPU acceleration if available
+    command.inputOptions([
+      '-hwaccel', 'cuda',
+      '-hwaccel_output_format', 'cuda'
+    ]);
+    
     if (options.format) {
       command.toFormat(options.format);
     }
     
+    // Add NVIDIA-specific encoding options
     if (options.outputOptions) {
-      command.outputOptions(options.outputOptions);
+      command.outputOptions([
+        ...options.outputOptions,
+        '-c:v', 'h264_nvenc', // Use NVIDIA encoder
+        '-preset', 'p4',      // Faster NVIDIA preset
+        '-tune', 'hq'        // High quality mode
+      ]);
     }
     
     if (options.input) {
@@ -31,6 +43,48 @@ const runFFmpeg = async (input, output, options = {}) => {
       .on('error', reject)
       .run();
   });
+};
+
+// Enhanced GPU check function
+const checkGPUAvailability = async () => {
+  const promises = [
+    // Check NVIDIA driver
+    new Promise((resolve) => {
+      const nvinfo = spawn('nvidia-smi');
+      nvinfo.on('close', (code) => {
+        resolve({
+          type: 'NVIDIA Driver',
+          available: code === 0
+        });
+      });
+    }),
+    // Check TensorFlow GPU
+    new Promise((resolve) => {
+      const pythonProcess = spawn('python', ['-c', `
+import tensorflow as tf
+print('Num GPUs Available:', len(tf.config.list_physical_devices('GPU')))
+print('GPU Devices:', tf.config.list_physical_devices('GPU'))
+      `]);
+      
+      let output = '';
+      pythonProcess.stdout.on('data', (data) => {
+        output += data.toString();
+      });
+      
+      pythonProcess.on('close', (code) => {
+        resolve({
+          type: 'TensorFlow GPU',
+          available: code === 0 && output.includes('GPU') && !output.includes('Num GPUs Available: 0'),
+          details: output.trim()
+        });
+      });
+    })
+  ];
+
+  const results = await Promise.all(promises);
+  console.log('GPU Check Results:', results);
+  
+  return results.every(r => r.available);
 };
 
 // Helper function to run Python script
@@ -83,15 +137,42 @@ const logVideoInfo = async (filePath, label) => {
   });
 };
 
-// Helper function to check if a Python module is installed
+// Enhanced Python module check
 const checkPythonModule = async (moduleName) => {
   return new Promise((resolve, reject) => {
-    const pythonProcess = spawn('python', ['-c', `import ${moduleName}`]);
+    let checkScript = '';
+    if (moduleName === 'tensorflow') {
+      checkScript = `
+import tensorflow as tf
+if not tf.test.is_built_with_cuda():
+    raise ImportError("TensorFlow not built with CUDA support")
+if not tf.config.list_physical_devices('GPU'):
+    raise ImportError("No GPU devices available for TensorFlow")
+print(f"TensorFlow version: {tf.__version__}")
+print("GPU Devices:", tf.config.list_physical_devices('GPU'))
+      `;
+    } else {
+      checkScript = `import ${moduleName}`;
+    }
+
+    const pythonProcess = spawn('python', ['-c', checkScript]);
+    let output = '';
+    let error = '';
+
+    pythonProcess.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      error += data.toString();
+    });
+
     pythonProcess.on('close', (code) => {
       if (code === 0) {
+        console.log(`${moduleName} check output:`, output.trim());
         resolve(true);
       } else {
-        reject(new Error(`Python module '${moduleName}' is not installed`));
+        reject(new Error(`Python module '${moduleName}' check failed: ${error}`));
       }
     });
   });
@@ -103,6 +184,12 @@ export const autotuneVideo = async (req, res) => {
   try {
     if (!req.file) {
       throw new Error('No video file provided');
+    }
+
+    // Enhanced GPU availability check
+    const hasGPU = await checkGPUAvailability();
+    if (!hasGPU) {
+      console.warn('GPU acceleration not available. Processing may be slower.');
     }
 
     // Check if numpy is installed
