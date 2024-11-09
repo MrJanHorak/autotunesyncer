@@ -1,132 +1,102 @@
 import sys
 import os
+import warnings
+import shutil
 
-# Configure for CUDA 12.6
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
-os.environ['CUDA_MODULE_LOADING'] = 'LAZY'  # Add this for CUDA 12.6
+# Import configured GPU state
+from gpu_setup import gpu_available, tf
 
-# Import tensorflow first to configure GPU
-import tensorflow as tf
-
-def setup_gpu():
-    try:
-        # Print diagnostics with CUDA version check
-        print("\nGPU Setup Diagnostics:")
-        
-        # Check CUDA runtime version
-        try:
-            import ctypes
-            cuda_path = os.environ.get('CUDA_PATH', 'C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6')
-            cuda_dll = ctypes.CDLL(f"{cuda_path}/bin/cudart64_120.dll")
-            version = ctypes.c_int()
-            cuda_dll.cudaRuntimeGetVersion(ctypes.byref(version))
-            cuda_version = f"{version.value//1000}.{(version.value%1000)//10}"
-            print(f"CUDA Runtime version: {cuda_version}")
-        except Exception as e:
-            print(f"Could not get CUDA version: {e}")
-        
-        print(f"TensorFlow version: {tf.__version__}")
-        print(f"CUDA built: {tf.test.is_built_with_cuda()}")
-        print(f"GPU available: {tf.test.is_gpu_available()}")
-        
-        physical_devices = tf.config.list_physical_devices('GPU')
-        print(f"Physical devices: {physical_devices}")
-        
-        if not physical_devices:
-            print("\nNo GPU devices found. Environment info:")
-            print(f"CUDA_PATH: {os.environ.get('CUDA_PATH', 'Not set')}")
-            print(f"CUDA_HOME: {os.environ.get('CUDA_HOME', 'Not set')}")
-            print(f"PATH includes CUDA: {'cuda' in os.environ.get('PATH', '').lower()}")
-            return False
-        
-        # Configure memory growth
-        for device in physical_devices:
-            try:
-                tf.config.experimental.set_memory_growth(device, True)
-                print(f"\nEnabled memory growth for {device}")
-            except RuntimeError as e:
-                print(f"Memory growth configuration error: {e}")
-        
-        # Test GPU
-        with tf.device('/GPU:0'):
-            print("\nTesting GPU computation...")
-            a = tf.random.normal([1000, 1000])
-            b = tf.random.normal([1000, 1000])
-            c = tf.matmul(a, b)
-            print("GPU test successful!")
-        
-        return True
-        
-    except Exception as e:
-        print(f"GPU setup error: {str(e)}")
-        return False
-
-# Call setup before other imports
-gpu_available = setup_gpu()
-
-# Rest of your imports
+# Rest of imports
 import numpy as np
-import crepe
-import pytsmod as tsm
 import librosa
 import soundfile as sf
-import pyrubberband as pyrb
 from scipy import signal
 from scipy.interpolate import interp1d
-from scipy.io import wavfile
-import warnings
-warnings.filterwarnings('ignore')
 
-# Force UTF-8 encoding
-if sys.platform.startswith('win'):
-    import locale
-    if sys.version_info[0] < 3:
-        sys.stdout = codecs.getwriter(locale.getpreferredencoding())(sys.stdout)
-    else:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-
-# Set environment variables for encoding and tensorflow
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-
-def get_pitch_crepe(audio, sr, hop_length=512):  # Increased from 128
-    """
-    Get precise pitch using CREPE (deep learning pitch tracker)
-    """
+def setup_gpu():
+    """Verify GPU setup"""
+    if not gpu_available or tf is None:
+        return False
     try:
-        # Ensure audio is mono and 1D
-        if len(audio.shape) == 2:
-            audio = np.mean(audio, axis=0)
-        
-        # Ensure minimum length for resampling
-        min_samples = sr // 100  # At least 10ms of audio
-        if len(audio) < min_samples:
-            audio = np.pad(audio, (0, min_samples - len(audio)))
-        
-        # Convert to float32 for TensorFlow
-        audio = audio.astype(np.float32)
-        
-        # CREPE now uses simpler API
-        time, frequency, confidence, activation = crepe.predict(
+        with tf.device('/GPU:0'):
+            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
+            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
+            c = tf.matmul(a, b)
+        print("GPU test computation successful")
+        return True
+    except Exception as e:
+        print(f"GPU test failed: {e}")
+        return False
+
+# Initialize GPU
+setup_gpu()
+
+def check_rubberband():
+    """Check if rubberband-cli is available"""
+    return shutil.which('rubberband') is not None
+
+def get_pitch_crepe(audio, sr, hop_length=512):
+    """Get precise pitch using CREPE"""
+    if len(audio.shape) > 1:
+        audio = np.mean(audio, axis=1)
+    
+    if gpu_available and tf is not None:
+        try:
+            print("Using GPU for CREPE")
+            print(f"Available GPU devices: {tf.config.list_physical_devices('GPU')}")
+            
+            # Import CREPE here to ensure it uses our GPU configuration
+            import crepe
+            
+            # Use GPU without additional configuration
+            with tf.device('/GPU:0'):
+                print("Running CREPE prediction on GPU...")
+                result = crepe.predict(
+                    audio,
+                    sr,
+                    step_size=hop_length/sr*1000,
+                    viterbi=True,
+                    model_capacity='full',
+                    verbose=1
+                )
+                print("CREPE GPU processing completed")
+                return result
+        except Exception as e:
+            print(f"GPU CREPE failed: {e}")
+            print("Falling back to CPU")
+    
+    print("Using CPU for CREPE")
+    # Ensure we're not using GPU when falling back
+    with tf.device('/CPU:0'):
+        import crepe
+        result = crepe.predict(
             audio,
             sr,
-            step_size=hop_length/sr*1000,  # Convert to milliseconds
-            viterbi=True
+            step_size=hop_length/sr*1000,
+            viterbi=True,
+            model_capacity='medium',
+            verbose=1
         )
-        
-        # Relaxed confidence threshold
-        frequency[confidence < 0.5] = 0  # Changed from 0.7
-        return frequency, confidence, time
-    except Exception as e:
-        print(f"CREPE error: {str(e)}")
-        raise
+    return result
+
+def librosa_pitch_detect(audio, sr):
+    """Fallback pitch detection using librosa"""
+    print("Using librosa pitch detection")
+    frequency = librosa.pyin(
+        audio,
+        fmin=librosa.note_to_hz('C2'),
+        fmax=librosa.note_to_hz('C7'),
+        sr=sr,
+        frame_length=2048
+    )[0]
+    confidence = np.array([1.0 if f is not None else 0.0 for f in frequency])
+    frequency = np.array([f if f is not None else 0.0 for f in frequency])
+    time = librosa.times_like(frequency)
+    return time, frequency, confidence, None
 
 def autotune_frame(frame, current_pitch, target_pitch, sr):
     """
-    Autotune a single frame using both pytsmod and pyrubberband
+    Autotune a single frame using multiple methods
     """
     if current_pitch == 0 or target_pitch == 0:
         return frame
@@ -134,22 +104,31 @@ def autotune_frame(frame, current_pitch, target_pitch, sr):
     # Calculate pitch shift in semitones
     shift = 12 * np.log2(target_pitch / current_pitch)
     
+    # Try methods in order of preference
     try:
-        # Try pytsmod first (better quality)
-        shifted = tsm.pitch_shift(frame, shift)
-    except:
-        try:
-            # Fallback to pyrubberband
-            shifted = pyrb.pitch_shift(frame, sr, shift)
-        except:
-            # Last resort: basic resampling
-            rate = current_pitch / target_pitch
-            shifted = signal.resample(frame, int(len(frame) * rate))
-            if len(shifted) < len(frame):
-                shifted = np.pad(shifted, (0, len(frame) - len(shifted)))
-            else:
-                shifted = shifted[:len(frame)]
-    
+        if check_rubberband():
+            import pyrubberband as pyrb
+            return pyrb.pitch_shift(frame, sr, shift)
+    except Exception as e:
+        print(f"Rubberband failed: {e}, trying librosa")
+        
+    try:
+        return librosa.effects.pitch_shift(
+            frame,
+            sr=sr,
+            n_steps=shift,
+            bins_per_octave=12
+        )
+    except Exception as e:
+        print(f"Librosa pitch shift failed: {e}, using basic resampling")
+        
+    # Fallback to basic resampling
+    rate = current_pitch / target_pitch
+    shifted = signal.resample(frame, int(len(frame) * rate))
+    if len(shifted) < len(frame):
+        shifted = np.pad(shifted, (0, len(frame) - len(shifted)))
+    else:
+        shifted = shifted[:len(frame)]
     return shifted
 
 def smooth_pitch_curve(frequency, confidence, smoothing_window=15):
@@ -199,122 +178,122 @@ def validate_audio(audio, sr):
     if audio is None or len(audio) == 0:
         raise ValueError("Empty audio data")
     
-    # Force correct shape (samples, channels)
+    # Convert to float32
+    audio = audio.astype(np.float32)
+    
+    # Ensure correct shape (samples, channels)
     if len(audio.shape) == 1:
         audio = np.expand_dims(audio, axis=1)
     elif len(audio.shape) == 2:
-        if audio.shape[0] > audio.shape[1]:  # More samples than channels
+        # If channels are first dimension, transpose
+        if audio.shape[0] == 2 and audio.shape[1] > 2:
             audio = audio.T
     
-    # Verify shape is sensible
-    if audio.shape[1] > 2:  # If more than 2 channels, transpose
-        if audio.shape[0] == 2:
-            audio = audio.T
-        else:
-            raise ValueError(f"Unexpected audio shape: {audio.shape}")
+    # Verify shape
+    if len(audio.shape) != 2:
+        raise ValueError(f"Invalid audio shape: {audio.shape}")
+    if audio.shape[1] > audio.shape[0]:
+        raise ValueError(f"Suspicious audio shape (might need transpose): {audio.shape}")
     
     return audio
 
 def process_audio(audio, sr):
     """
-    Process audio with precise pitch detection and correction
+    Process audio with GPU acceleration when available
     """
-    try:
-        # Validate and fix audio shape first
-        audio = validate_audio(audio, sr)
-        print(f"Audio shape after validation: {audio.shape}")
+    if gpu_available and tf is not None:
+        print("\nGPU Diagnostics:")
+        print(f"TensorFlow version: {tf.__version__}")
+        print(f"GPU devices available: {tf.config.list_physical_devices('GPU')}")
+        print(f"CUDA available: {tf.test.is_built_with_cuda()}")
+        print(f"CUDA path: {os.environ.get('CUDA_PATH', 'Not set')}")
         
-        # Convert to mono for processing
-        mono_audio = np.mean(audio, axis=1)
-        
-        original_length = len(mono_audio)
-        print(f"Audio shape before processing: {audio.shape}")
-        print(f"Mono audio shape: {mono_audio.shape}")
-        
-        # Validate input audio
-        audio = validate_audio(audio, sr)
-        
-        # Convert to mono if stereo
-        if len(audio.shape) > 1:
-            mono_audio = np.mean(audio, axis=1)
-        else:
-            mono_audio = audio
-        
-        original_length = len(mono_audio)
-        print(f"Audio range: {np.min(mono_audio):.2f} to {np.max(mono_audio):.2f}")
-        
-        # Get pitch using CREPE with more conservative settings
-        print("Detecting pitch...")
+        # Simple GPU test
         try:
-            import tensorflow  # Check if tensorflow is available
-            frequency, confidence, time = get_pitch_crepe(mono_audio, sr, hop_length=1024)
-        except ImportError:
-            print("CREPE (tensorflow) not available, using basic pitch detection")
-            frequency = librosa.pyin(
-                mono_audio,
-                fmin=librosa.note_to_hz('C2'),
-                fmax=librosa.note_to_hz('C7'),
-                sr=sr,
-                frame_length=2048
-            )[0]
-            confidence = np.array([1.0 if f is not None else 0.0 for f in frequency])
-            frequency = np.array([f if f is not None else 0.0 for f in frequency])
-            time = librosa.times_like(frequency)
+            with tf.device('/GPU:0'):
+                x = tf.random.normal([1000, 1000])
+                tf.matmul(x, x)
+            print("GPU compute test successful")
+        except Exception as e:
+            print(f"GPU compute test failed: {e}")
+    
+    # Validate and fix audio shape
+    audio = validate_audio(audio, sr)
+    
+    # Convert to mono for processing
+    mono_audio = np.mean(audio, axis=1)
+    original_length = len(mono_audio)
+    
+    print(f"Processing {original_length} samples at {sr}Hz")
+    
+    # Verify we have enough samples
+    if original_length < sr * 0.1:  # Less than 0.1 seconds
+        raise ValueError(f"Audio too short: {original_length} samples")
+    
+    # Get pitch
+    time, frequency, confidence, _ = get_pitch_crepe(mono_audio, sr)
+    
+    # Remove NaN values before smoothing
+    frequency = np.nan_to_num(frequency, nan=0.0)
+    confidence = np.nan_to_num(confidence, nan=0.0)
+    
+    # Smooth pitch curve with better handling of edge cases
+    print("Smoothing pitch curve...")
+    smooth_frequency = smooth_pitch_curve(frequency, confidence)
+    
+    # Target frequency (Middle C)
+    target_freq = 261.63
+    
+    # Process in overlapping frames with larger sizes
+    frame_length = 4096
+    hop_length = frame_length // 4  # 75% overlap
+    
+    # Add padding to ensure we process the entire signal
+    pad_length = frame_length
+    padded_audio = np.pad(mono_audio, (pad_length, pad_length), mode='reflect')
+    output = np.zeros(len(padded_audio))
+    
+    print("\nProcessing audio frames...")
+    for i in range(0, len(padded_audio) - frame_length, hop_length):
+        frame = padded_audio[i:i+frame_length]
+        frame_index = max(0, min(i//hop_length, len(smooth_frequency)-1))
+        frame_pitch = smooth_frequency[frame_index]
+        
+        if frame_pitch > 0:  # Only process if we detected a pitch
+            shifted_frame = autotune_frame(frame, frame_pitch, target_freq, sr)
+            # Apply window without mixing original
+            window = signal.windows.hann(frame_length)
+            shifted_frame = shifted_frame * window
+            output[i:i+frame_length] += shifted_frame
 
-        if np.all(frequency == 0) or np.all(np.isnan(frequency)):
-            raise ValueError("No valid pitch detected in audio")
-        
-        # Smooth pitch curve
-        print("Smoothing pitch curve...")
-        smooth_frequency = smooth_pitch_curve(frequency, confidence)
-        
-        # Target frequency (Middle C)
-        target_freq = 261.63
-        
-        # Process in overlapping frames with larger sizes
-        frame_length = 4096
-        hop_length = frame_length // 4  # 75% overlap
-        
-        # Add padding to ensure we process the entire signal
-        pad_length = frame_length
-        padded_audio = np.pad(mono_audio, (pad_length, pad_length), mode='reflect')
-        output = np.zeros(len(padded_audio))
-        
-        print("\nProcessing audio frames...")
-        for i in range(0, len(padded_audio) - frame_length, hop_length):
-            frame = padded_audio[i:i+frame_length]
-            frame_index = max(0, min(i//hop_length, len(smooth_frequency)-1))
-            frame_pitch = smooth_frequency[frame_index]
-            
-            if frame_pitch > 0:  # Only process if we detected a pitch
-                shifted_frame = autotune_frame(frame, frame_pitch, target_freq, sr)
-                shifted_frame = 0.8 * shifted_frame + 0.2 * frame
-                window = signal.windows.hann(frame_length)
-                shifted_frame = shifted_frame * window
-                output[i:i+frame_length] += shifted_frame
-        
-        # Remove padding and ensure exact length match
-        output = output[pad_length:pad_length + original_length]
-        
-        # Ensure output is clean
-        output = np.nan_to_num(output, nan=0.0, posinf=1.0, neginf=-1.0)
-        output = np.clip(output, -1.0, 1.0) * 0.98
-        
-        # Create stereo output if input was stereo
-        if len(audio.shape) > 1:
-            stereo_output = np.vstack((output, output)).T
-        else:
-            stereo_output = output
-        
-        print(f"Output audio range: {np.min(stereo_output):.2f} to {np.max(stereo_output):.2f}")
-        return stereo_output, smooth_frequency, frequency
-        
-    except Exception as e:
-        print(f"Error in audio processing: {str(e)}")
-        raise
+    # Normalize output
+    output = output / np.max(np.abs(output))
+    
+    # Remove padding and ensure exact length match
+    output = output[pad_length:pad_length + original_length]
+    
+    # Ensure output is clean
+    output = np.nan_to_num(output, nan=0.0, posinf=1.0, neginf=-1.0)
+    output = np.clip(output, -1.0, 1.0) * 0.98
+    
+    # Ensure stereo output has correct shape (samples, channels)
+    if len(audio.shape) > 1 and audio.shape[1] > 1:
+        stereo_output = np.column_stack((output, output))
+    else:
+        stereo_output = np.expand_dims(output, axis=1)
+    
+    print(f"Final output shape: {stereo_output.shape}")
+    print(f"Output audio range: {np.min(stereo_output):.2f} to {np.max(stereo_output):.2f}")
+    
+    return stereo_output, smooth_frequency, frequency
 
 def main():
     try:
+        # Verify GPU configuration at start
+        print(f"GPU available: {gpu_available}")
+        if gpu_available:
+            print(f"GPU devices: {tf.config.list_physical_devices('GPU')}")
+        
         if len(sys.argv) != 3:
             print("Usage: python autotune.py input_path output_path")
             sys.exit(1)
@@ -332,14 +311,7 @@ def main():
         try:
             audio, sr = sf.read(input_path)
             print(f"Initial audio shape: {audio.shape}")
-            
-            # Ensure consistent shape (samples, channels)
-            if len(audio.shape) == 1:
-                audio = np.expand_dims(audio, axis=1)
-            if len(audio.shape) == 2 and audio.shape[1] != 2:
-                audio = audio.T
-                
-            print(f"Normalized audio shape: {audio.shape}")
+            print(f"Sample rate: {sr} Hz")
             
         except Exception as e:
             print(f"Soundfile loading failed: {e}, trying alternative methods")
@@ -348,15 +320,12 @@ def main():
                 audio = audio.astype(np.float32)
                 if audio.dtype.kind == 'i':
                     audio = audio / np.iinfo(audio.dtype).max
-                if len(audio.shape) == 1:
-                    audio = np.expand_dims(audio, axis=0)
-                elif len(audio.shape) == 2:
-                    audio = audio.T
             except Exception as e:
                 print(f"Wavfile loading failed: {e}, trying librosa")
                 audio, sr = librosa.load(input_path, sr=None, mono=False)
-                if len(audio.shape) == 1:
-                    audio = np.expand_dims(audio, axis=0)
+        
+        # Validate audio shape
+        audio = validate_audio(audio, sr)
         
         print(f"Loaded audio format: {audio.dtype}, shape: {audio.shape}")
         
@@ -373,16 +342,18 @@ def main():
         # Process audio
         processed, smooth_pitch, raw_pitch = process_audio(audio, sr)
         
-        # Calculate average pitches
+        # Calculate average pitches with NaN handling
         valid_pitch = raw_pitch[raw_pitch > 0]
         valid_smooth = smooth_pitch[smooth_pitch > 0]
         
         print("\nPitch Statistics:")
-        print(f"Original average pitch: {np.mean(valid_pitch):.2f} Hz")
-        print(f"Smoothed average pitch: {np.mean(valid_smooth):.2f} Hz")
+        if len(valid_pitch) > 0:
+            print(f"Original average pitch: {np.nanmean(valid_pitch):.2f} Hz")
+        if len(valid_smooth) > 0:
+            print(f"Smoothed average pitch: {np.nanmean(valid_smooth):.2f} Hz")
         print(f"Target pitch (Middle C): 261.63 Hz")
         
-        # Save with specific format
+        # Save with specific format and ensure correct shape
         print(f"\nSaving to: {output_path}")
         sf.write(
             output_path,
@@ -402,4 +373,10 @@ def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

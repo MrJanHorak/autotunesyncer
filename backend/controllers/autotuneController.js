@@ -144,10 +144,6 @@ const checkPythonModule = async (moduleName) => {
     if (moduleName === 'tensorflow') {
       checkScript = `
 import tensorflow as tf
-if not tf.test.is_built_with_cuda():
-    raise ImportError("TensorFlow not built with CUDA support")
-if not tf.config.list_physical_devices('GPU'):
-    raise ImportError("No GPU devices available for TensorFlow")
 print(f"TensorFlow version: {tf.__version__}")
 print("GPU Devices:", tf.config.list_physical_devices('GPU'))
       `;
@@ -172,7 +168,13 @@ print("GPU Devices:", tf.config.list_physical_devices('GPU'))
         console.log(`${moduleName} check output:`, output.trim());
         resolve(true);
       } else {
-        reject(new Error(`Python module '${moduleName}' check failed: ${error}`));
+        // Don't fail for tensorflow, just log warning
+        if (moduleName === 'tensorflow') {
+          console.warn(`TensorFlow GPU not available: ${error}`);
+          resolve(false);
+        } else {
+          reject(new Error(`Python module '${moduleName}' check failed: ${error}`));
+        }
       }
     });
   });
