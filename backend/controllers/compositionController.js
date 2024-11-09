@@ -16,6 +16,7 @@ import { dirname } from 'path';
 import { spawn } from 'child_process';
 import { rm } from 'fs/promises';
 import { isDrumTrack, DRUM_NOTE_MAP, getNoteGroup } from '../utils/drumUtils.js';
+import { createReadStream, statSync } from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -756,6 +757,30 @@ function debugMidiTrack(track, index) {
 
 // Modify the composeVideo function to use the Python processor
 export const composeVideo = async (req, res) => {
+  console.log('Received composition request');
+  console.log('Files:', req.files?.map(f => ({
+    fieldname: f.fieldname,
+    size: f.size,
+    mimetype: f.mimetype
+  })));
+  
+  if (!req.files || req.files.length === 0) {
+    console.error('No files received');
+    return res.status(400).json({ error: 'No files were uploaded' });
+  }
+
+  const midiFile = req.files.find(file => file.fieldname === 'midiData');
+  if (!midiFile) {
+    console.error('No MIDI data found');
+    return res.status(400).json({ error: 'MIDI data is missing' });
+  }
+
+  const videoFiles = req.files.filter(file => file.fieldname.startsWith('videos['));
+  if (videoFiles.length === 0) {
+    console.error('No video files found');
+    return res.status(400).json({ error: 'No video files were uploaded' });
+  }
+
   const sessionId = uuidv4();
   const sessionDir = join(TEMP_DIR, sessionId);
   
@@ -1049,24 +1074,54 @@ export const composeVideo = async (req, res) => {
       outputPath
     );
 
-    // Validate that the output file exists before sending
-    if (!existsSync(outputPath)) {
+    // Instead of sendFile, use streaming
+    if (existsSync(outputPath)) {
+      const stat = statSync(outputPath);
+      const fileSize = stat.size;
+      const head = {
+        'Content-Length': fileSize,
+        'Content-Type': 'video/mp4',
+        'Content-Disposition': 'attachment; filename="composed-video.mp4"'
+      };
+
+      res.writeHead(200, head);
+      const readStream = createReadStream(outputPath);
+      
+      // Handle stream events
+      readStream.on('error', (error) => {
+        console.error('Stream error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to stream video' });
+        }
+        cleanup();
+      });
+
+      readStream.on('end', () => {
+        console.log('Stream completed');
+        cleanup();
+      });
+
+      // Pipe the file to response
+      readStream.pipe(res);
+    } else {
       throw new Error('Output video file was not created');
     }
 
-    res.sendFile(outputPath, async (err) => {
-      if (err) {
-        logging.error('Error sending file:', err);
-        return res.status(500).json({ error: 'Failed to send video file' });
-      }
-      // Delay cleanup to ensure files are not in use
-      setTimeout(() => cleanupTempDirectory(sessionDir), 1000);
-    });
+    // Cleanup function
+    function cleanup() {
+      setTimeout(() => {
+        cleanupTempDirectory(sessionDir).catch(console.error);
+      }, 1000);
+    }
+
   } catch (error) {
     logging.error('Composition error:', error);
-    res.status(500).json({ error: error.message });
-    // Delay cleanup to ensure files are not in use
-    setTimeout(() => cleanupTempDirectory(sessionDir), 1000);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+    setTimeout(() => {
+      cleanupTempDirectory(sessionDir).catch(console.error);
+    }, 1000);
   }
 };
 
