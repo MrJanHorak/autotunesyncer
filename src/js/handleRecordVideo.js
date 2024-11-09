@@ -126,47 +126,60 @@ const autotuneToMiddleC = async (videoFile) => {
 //   });
 // }
 
-export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL, isAutotuneEnabled = true) => {
+export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL, isAutotuneEnabled = true, duration = 5000) => {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: true,
     audio: true,
   });
 
-  // Set proper MIME type and codec for MP4
-  const mediaRecorder = new MediaRecorder(stream, {
-    mimeType: 'video/webm;codecs=h264,opus'
-  });
+  return new Promise((resolve, reject) => {
+    const mediaRecorder = new MediaRecorder(stream, {
+      mimeType: 'video/webm;codecs=h264,opus'
+    });
 
-  mediaRecorder.start();
-  let chunks = [];
-  mediaRecorder.ondataavailable = (e) => {
-    chunks.push(e.data);
-  };
+    let chunks = [];
+    let recordingStopped = false;
 
-  mediaRecorder.onstop = async () => {
-    try {
-      const videoBlob = new Blob(chunks, { type: 'video/mp4' });
-      const videoURL = URL.createObjectURL(videoBlob);
-      setRecordedVideoURL(videoURL);
-
-      const videoFile = new File([videoBlob], 'webcam-video.mp4', { type: 'video/mp4' });
-
-      if (isAutotuneEnabled) {
-        console.log('Processing video for autotuning...');
-        const autotunedVideoFile = await autotuneToMiddleC(videoFile);
-        const autotunedVideoURL = URL.createObjectURL(autotunedVideoFile);
-        setAutotunedVideoURL(autotunedVideoURL);
-      } else {
-        console.log('Recording completed without autotuning.');
-        setAutotunedVideoURL(videoURL); // Set the same URL for consistency
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        chunks.push(e.data);
       }
-    } catch (error) {
-      console.error('Error in recording stop handler:', error);
-    }
-  };
+    };
 
-  // Stop recording after 5 seconds
-  setTimeout(() => {
-    mediaRecorder.stop();
-  }, 5000);
+    mediaRecorder.onstop = async () => {
+      try {
+        const videoBlob = new Blob(chunks, { type: 'video/mp4' });
+        const videoURL = URL.createObjectURL(videoBlob);
+        setRecordedVideoURL(videoURL);
+
+        const videoFile = new File([videoBlob], 'webcam-video.mp4', { type: 'video/mp4' });
+
+        if (isAutotuneEnabled) {
+          console.log('Processing video for autotuning...');
+          const autotunedVideoFile = await autotuneToMiddleC(videoFile);
+          const autotunedVideoURL = URL.createObjectURL(autotunedVideoFile);
+          setAutotunedVideoURL(autotunedVideoURL);
+        } else {
+          console.log('Recording completed without autotuning.');
+          setAutotunedVideoURL(videoURL);
+        }
+        resolve();
+      } catch (error) {
+        console.error('Error in recording stop handler:', error);
+        reject(error);
+      }
+    };
+
+    // Start recording with smaller time slices for more frequent data availability
+    mediaRecorder.start(100);
+
+    // Set timeout to stop recording after specified duration
+    setTimeout(() => {
+      if (!recordingStopped) {
+        recordingStopped = true;
+        mediaRecorder.stop();
+        stream.getTracks().forEach(track => track.stop());
+      }
+    }, duration);
+  });
 };

@@ -80,3 +80,8 @@ Thanks to all the contributors and the open-source community.
 - [MIDI Parser JS Specifications](https://github.com/colxi/midi-parser-js/wiki/MIDI-File-Format-Specifications)
 
 - [MIDI File Format Specs](https://github.com/colxi/midi-parser-js/wiki/MIDI-File-Format-Specifications)
+
+To run the backend and handle the video sizes start the server using:
+```bash
+node --max-old-space-size=8192 server.js
+```

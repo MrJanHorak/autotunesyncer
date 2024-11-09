@@ -83,17 +83,27 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
       });
       mediaStreamRef.current = stream;
 
-      // Mute audio feedback
-      const audioTracks = stream.getAudioTracks();
-      audioTracks.forEach((track) => {
-        track.enabled = true; // Keep enabled for recording
-      });
-
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.muted = true; // Mute the video element
+        videoRef.current.muted = true;
         videoRef.current.play();
       }
+
+      // Convert minDuration from seconds to milliseconds and add a small buffer
+      const recordingDurationMs = (minDuration + 0.5) * 1000;
+      console.log(`Starting recording for ${recordingDurationMs}ms`);
+
+      // Start the recording timer
+      recordingTimer.current = setInterval(() => {
+        setRecordingDuration(prev => {
+          // Stop recording if we've reached the minimum duration
+          if (prev >= minDuration) {
+            stopRecording();
+            return prev;
+          }
+          return prev + 1;
+        });
+      }, 1000);
 
       await handleRecord(
         (recordedURL) => {
@@ -102,7 +112,6 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
         },
         (autotunedURL) => {
           console.log('Autotuned video URL set');
-          // For drums, use recorded URL directly without autotune
           const finalURL = isDrum ? videoState.recordedURL : autotunedURL;
           setVideoState((prev) => {
             if (prev.autotunedURL !== finalURL) {
@@ -111,7 +120,8 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
             return prev;
           });
         },
-        !isDrum && isAutotuneEnabled // Only apply autotune for non-drum tracks
+        !isDrum && isAutotuneEnabled,
+        recordingDurationMs
       );
     } catch (error) {
       console.error('Recording failed:', error);
@@ -122,25 +132,24 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
   };
 
   const stopRecording = useCallback(() => {
+    console.log('Stopping recording at duration:', recordingDuration);
+    
     if (recordingTimer.current) {
       clearInterval(recordingTimer.current);
+      recordingTimer.current = null;
     }
-
-    if (recordingDuration < minDuration) {
-      alert(`Recording must be at least ${minDuration} seconds long. Please try again.`);
-      handleReRecord();
-      return;
-    }
-
+  
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     }
+  
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+  
     setIsRecording(false);
-  }, [recordingDuration, minDuration]);
+  }, [recordingDuration]);
 
   const handleReRecord = useCallback(() => {
     if (mediaStreamRef.current) {
@@ -218,16 +227,16 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration }) => {
           {isProcessing && <LoadingSpinner />}
         </div>
         {isRecording && (
-          <div className="recording-duration" >
-          {/* style={{
+          <div className="recording-duration" style={{
             position: 'absolute',
             top: '10px',
             left: '10px',
-            background: 'rgba(0,0,0,0.5)',
+            background: 'rgba(0,0,0,0.7)',
             color: 'white',
             padding: '5px',
-            borderRadius: '4px'
-          }}> */}
+            borderRadius: '4px',
+            zIndex: 1000
+          }}>
             Recording: {recordingDuration}s / {minDuration}s minimum
           </div>
         )}

@@ -22,30 +22,40 @@ const VideoComposer = ({ videoFiles, midiData }) => {
     try {
       const formData = new FormData();
 
-      // Convert MIDI data to JSON and append
-      const midiJsonString = JSON.stringify(midiData.toJSON());
+      // Add MIDI data
+      const midiJsonString = JSON.stringify(midiData);
       const midiBlob = new Blob([midiJsonString], { type: 'application/json' });
       formData.append('midiData', midiBlob, 'midi.json');
 
-      // Process and append each video file
-      await Promise.all(Object.entries(videoFiles).map(async ([instrumentName, videoUrl]) => {
+      // Process and append videos
+      let totalSize = midiBlob.size;
+      for (const [instrumentName, videoUrl] of Object.entries(videoFiles)) {
         try {
-          // Fetch the video from the URL
-          const response = await fetch(videoUrl);
-          if (!response.ok) throw new Error(`Failed to fetch video for ${instrumentName}`);
+          console.log(`Processing video for ${instrumentName}`);
           
-          const videoBlob = await response.blob();
-          formData.append(`videos[${instrumentName}]`, videoBlob, `${instrumentName}.webm`);
-          console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}`);
+          let videoBlob;
+          if (typeof videoUrl === 'string') {
+            const response = await fetch(videoUrl);
+            if (!response.ok) throw new Error(`Failed to fetch video for ${instrumentName}`);
+            videoBlob = await response.blob();
+          } else if (videoUrl instanceof Blob) {
+            videoBlob = videoUrl;
+          } else {
+            console.error(`Invalid video data for ${instrumentName}:`, videoUrl);
+            continue;
+          }
+
+          totalSize += videoBlob.size;
+          if (totalSize > 500 * 1024 * 1024) { // 500MB limit
+            throw new Error('Total upload size exceeds limit');
+          }
+
+          formData.append(`videos[${instrumentName}]`, videoBlob, `${instrumentName}.mp4`);
+          console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}, total: ${totalSize}`);
         } catch (error) {
-          console.error(`Error processing video for ${instrumentName}:`, error);
+          console.error(`Error processing ${instrumentName}:`, error);
           throw error;
         }
-      }));
-
-      // Log form data contents for debugging
-      for (let pair of formData.entries()) {
-        console.log('FormData entry:', pair[0], pair[1] instanceof Blob ? `Blob size: ${pair[1].size}` : pair[1]);
       }
 
       const response = await axios.post('http://localhost:3000/api/compose', formData, {
@@ -53,25 +63,56 @@ const VideoComposer = ({ videoFiles, midiData }) => {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 900000, // 15 minutes
+        timeoutErrorMessage: 'Video composition took too long. Please try again.',
         onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setProgress(percentCompleted);
+        },
+        // Add download progress handling
+        onDownloadProgress: (progressEvent) => {
           if (progressEvent.total) {
-            const percentCompleted = Math.round(
-              (progressEvent.loaded * 100) / progressEvent.total
-            );
-            setProgress(percentCompleted);
+            const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            setProgress(percent);
           }
         },
       });
 
-      const url = URL.createObjectURL(response.data);
-      setComposedVideoUrl(url);
+      if (response.data instanceof Blob) {
+        // Check if the blob is an error message
+        if (response.data.type.includes('application/json')) {
+          const text = await response.data.text();
+          const error = JSON.parse(text);
+          throw new Error(error.error || 'Failed to process video');
+        }
+        
+        const url = URL.createObjectURL(response.data);
+        setComposedVideoUrl(url);
+      } else {
+        throw new Error('Invalid response format');
+      }
     } catch (error) {
       console.error('Composition failed:', error);
-      setError(error.response?.data?.error || 'Composition failed');
+      setError(error.message || 'Failed to compose video');
+      
+      if (error.code === 'ECONNABORTED') {
+        setError('Video processing took too long. Try with fewer or shorter videos.');
+      }
     } finally {
       setIsProcessing(false);
     }
   };
+
+  // Cleanup URLs when component unmounts
+  useEffect(() => {
+    return () => {
+      if (composedVideoUrl) {
+        URL.revokeObjectURL(composedVideoUrl);
+      }
+    };
+  }, [composedVideoUrl]);
 
   return (
     <div className="video-composer">
