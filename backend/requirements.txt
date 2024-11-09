@@ -7,5 +7,5 @@ pyrubberband==0.4.0
 pytsmod==0.3.8
 scipy==1.14.1
 soundfile==0.12.1
-tensorflow==2.15.0
+tensorflow==2.10.0
 tensorflow-io-gcs-filesystem==0.31.0
