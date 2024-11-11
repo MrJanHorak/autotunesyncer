@@ -110,45 +110,80 @@ def process_video_segments(midi_data, video_files, output_path):
             if data.get('notes') and len(data['notes']) > 0
         }
         
-        # Calculate grid based on number of active tracks
         total_tracks = len(active_video_files)
-        grid_size = max(2, int(np.ceil(np.sqrt(total_tracks))))
-        clip_width = 960 // grid_size
-        clip_height = 720 // grid_size
-        
-        logging.info(f"Grid layout: {grid_size}x{grid_size}, clip size: {clip_width}x{clip_height}")
+        logging.info(f"Active tracks with notes: {total_tracks}")
 
-        # Pre-load clips and assign positions
+        # Handle special layout cases
         source_clips = {}
         track_positions = {}
-        position_idx = 0
-        
-        # Load and verify all video files first
-        for track_id, track_data in active_video_files.items():
+        clip_dimensions = {}  # Store dimensions for each track
+
+        if total_tracks == 1:
+            # Single track - use full screen layout
+            track_id, track_data = next(iter(active_video_files.items()))
             try:
-                video_path = track_data['path']
-                if not verify_video_file(video_path):
-                    logging.error(f"Failed to verify video file for {track_id}")
-                    continue
-                    
-                source_clip = VideoFileClip(video_path, audio=True)
+                source_clip = VideoFileClip(track_data['path'], audio=True)
                 if not verify_frame_reading(source_clip):
-                    logging.error(f"Failed to verify frame reading for {track_id}")
-                    source_clip.close()
-                    continue
-                    
+                    raise ValueError(f"Failed to verify frame reading for {track_id}")
+                
+                # Center crop the video to fill the screen while maintaining aspect ratio
+                source_clip = source_clip.resize((960, 720))
                 source_clips[track_id] = source_clip
+                track_positions[track_id] = (0, 0)
+                clip_dimensions[track_id] = {'width': 960, 'height': 720}
                 clips_to_close.append(source_clip)
                 
-                x_pos = (position_idx % grid_size) * clip_width
-                y_pos = (position_idx // grid_size) * clip_height
-                track_positions[track_id] = (x_pos, y_pos)
-                position_idx += 1
-                
-                logging.info(f"Loaded {track_id} at position ({x_pos}, {y_pos})")
             except Exception as e:
-                logging.error(f"Failed to load video for {track_id}: {e}")
-                continue
+                logging.error(f"Failed to load single video track: {e}")
+                raise
+                
+        elif total_tracks == 2:
+            # Two tracks - split screen horizontally
+            for i, (track_id, track_data) in enumerate(active_video_files.items()):
+                try:
+                    source_clip = VideoFileClip(track_data['path'], audio=True)
+                    if not verify_frame_reading(source_clip):
+                        continue
+                    
+                    # Position horizontally side by side
+                    x_pos = i * 480  # 960/2 = 480 for each half
+                    source_clip = source_clip.resize((480, 720))
+                    
+                    source_clips[track_id] = source_clip
+                    track_positions[track_id] = (x_pos, 0)
+                    clip_dimensions[track_id] = {'width': 480, 'height': 720}
+                    clips_to_close.append(source_clip)
+                    
+                except Exception as e:
+                    logging.error(f"Failed to load video for track {track_id}: {e}")
+                    continue
+                    
+        else:
+            # Default grid layout for 3+ tracks
+            grid_size = max(2, int(np.ceil(np.sqrt(total_tracks))))
+            clip_width = 960 // grid_size
+            clip_height = 720 // grid_size
+            position_idx = 0
+            
+            for track_id, track_data in active_video_files.items():
+                try:
+                    source_clip = VideoFileClip(track_data['path'], audio=True)
+                    if not verify_frame_reading(source_clip):
+                        continue
+                        
+                    x_pos = (position_idx % grid_size) * clip_width
+                    y_pos = (position_idx // grid_size) * clip_height
+                    source_clip = source_clip.resize((clip_width, clip_height))
+                    
+                    source_clips[track_id] = source_clip
+                    track_positions[track_id] = (x_pos, y_pos)
+                    clip_dimensions[track_id] = {'width': clip_width, 'height': clip_height}
+                    clips_to_close.append(source_clip)
+                    position_idx += 1
+                    
+                except Exception as e:
+                    logging.error(f"Failed to load video for grid layout: {e}")
+                    continue
 
         # Process all tracks and notes
         all_clips = []
@@ -161,6 +196,7 @@ def process_video_segments(midi_data, video_files, output_path):
             source_clip = source_clips[track_id]
             is_drum = track_data.get('isDrum', False)
             x_pos, y_pos = track_positions[track_id]
+            dimensions = clip_dimensions[track_id]
             
             # Process notes for this track
             for note in track_data.get('notes', []):
@@ -180,7 +216,7 @@ def process_video_segments(midi_data, video_files, output_path):
                     snippet = snippet.volumex(note.get('velocity', 1.0))
                     
                     snippet = (snippet
-                        .resize((clip_width, clip_height))
+                        .resize((dimensions['width'], dimensions['height']))
                         .set_position((x_pos, y_pos))
                         .set_start(start_time))
                     
