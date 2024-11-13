@@ -127,96 +127,226 @@ def execute_ffmpeg_command(ffmpeg_cmd: List[str]) -> None:
         logging.error(f"Error executing FFmpeg command: {e}")
         raise
 
-def process_segment(
-    segment_clips: List[Dict],
-    duration: float,
-    segment_start: float,
-    segment_duration: float,
-    temp_dir: str,
-    segment_idx: int
-) -> str:
-    """Process a single segment of video clips."""
+def process_segment(segment_clips: List[Dict], duration: float, segment_start: float, 
+                   segment_duration: float, temp_dir: str, segment_idx: int) -> str:
+    """Process a single segment of video clips with pitch shifting."""
     try:
+        # Group clips by track for better processing
+        tracks = {}
+        for clip in segment_clips:
+            track_id = clip['track_id']
+            if track_id not in tracks:
+                tracks[track_id] = []
+            tracks[track_id].append(clip)
+
+        # Process each track separately first
+        track_outputs = []
+        for track_id, track_clips in tracks.items():
+            track_out = process_track(track_clips, segment_duration, segment_start, temp_dir, f"{segment_idx}_{track_id}")
+            if track_out:
+                track_outputs.append(track_out)
+
+        # Combine track outputs
         out_file = f"{temp_dir}{os.sep}{segment_idx:02d}.mp4"
-        logging.info(f"Processing segment {segment_idx}")
-
-        ffmpeg_cmd = [
-            'ffmpeg', '-y',
-            '-f', 'lavfi',
-            '-i', f'color=black:s=960x720:d={segment_duration}'
-        ]
-
-        # Filter clips for this segment
-        segment_clips = [
-            clip for clip in segment_clips
-            if (clip['start_time'] + clip['duration'] > segment_start and 
-                clip['start_time'] < segment_start + segment_duration)
-        ]
-
-        if segment_clips:
-            # Add inputs with minimal paths
-            for clip in segment_clips:
-                if not os.path.exists(clip['source_path']):
-                    raise ValueError(f"Missing source: {clip['source_path']}")
-                ffmpeg_cmd.extend(['-i', clip['source_path']])
-
-            # Adjust timestamps
-            for clip in segment_clips:
-                clip['start_time'] = max(0, clip['start_time'] - segment_start)
-
-            # Generate minimal filter
-            filters = []
-            last = "[0:v]"
-            for i, clip in enumerate(segment_clips, 1):
-                v = f"[v{i}]"
-                filters.extend([
-                    f"[{i}:v]scale={clip['width']}:{clip['height']}[s{i}]",
-                    f"{last}[s{i}]overlay={clip['x']}:{clip['y']}:enable='between(t\\,{clip['start_time']}\\,{clip['start_time'] + clip['duration']})'{v if i < len(segment_clips) else ''}"
-                ])
-                last = v
-
-            filter_complex_str = ';'.join(filters)
-
-            # Write filter complex to a temporary file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as filter_file:
-                filter_file.write(filter_complex_str)
-                filter_file_path = filter_file.name
-
-            ffmpeg_cmd.extend([
-                '-filter_complex_script', filter_file_path,
-                '-c:v', 'h264_nvenc',
-                '-preset', 'p7',
-                '-rc', 'vbr',
-                '-b:v', '5M',
-                out_file
-            ])
-
-            # Clean up the filter complex temporary file after execution
-            cleanup_filter_file = True
-        else:
-            # Correct FFmpeg command for empty segments
-            ffmpeg_cmd.extend([
-                '-c:v', 'h264_nvenc',
-                '-t', str(segment_duration),
-                out_file
-            ])
-            cleanup_filter_file = False
-
-        # Execute the FFmpeg command
-        execute_ffmpeg_command(ffmpeg_cmd)
-
-        if not os.path.exists(out_file) or os.path.getsize(out_file) == 0:
-            raise Exception("Output not created")
-
-        # Clean up the filter complex temporary file if it was created
-        if cleanup_filter_file and 'filter_file_path' in locals():
-            if os.path.exists(filter_file_path):
-                os.remove(filter_file_path)
+        combine_tracks(track_outputs, out_file, segment_duration)
+        
+        # Cleanup track files
+        for file in track_outputs:
+            try:
+                os.remove(file)
+            except:
+                pass
 
         return out_file
 
     except Exception as e:
-        logging.error(f"Segment {segment_idx} failed: {str(e)}")
+        logging.error(f"Segment processing failed: {e}")
+        raise
+
+def process_track(track_clips: List[Dict], duration: float, segment_start: float, 
+                 temp_dir: str, track_id: str) -> str:
+    try:
+        CHUNK_SIZE = 5
+        chunk_outputs = []
+        
+        for i in range(0, len(track_clips), CHUNK_SIZE):
+            chunk = track_clips[i:i + CHUNK_SIZE]
+            chunk_out = f"{temp_dir}{os.sep}chunk_{track_id}_{i}.mp4"
+            
+            # Base command
+            base_cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-i', f'color=black:s={chunk[0]["width"]}x{chunk[0]["height"]}:d={duration}:r=30',
+                '-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}'
+            ]
+            
+            # Add clip inputs
+            for clip in chunk:
+                base_cmd.extend(['-i', clip['source_path']])
+
+            # Build separate video and audio filter chains
+            video_chain = ["[0:v]null[v0]"]  # Start with black video
+            audio_chain = []
+            current = "v0"
+            
+            # Process clips
+            for idx, clip in enumerate(chunk, 1):
+                clip_time = clip['start_time'] - segment_start
+                if clip_time < 0 or clip_time >= duration:
+                    continue
+                
+                # Video chain
+                vout = f"v{idx}"
+                video_chain.append(
+                    f"[{idx}:v]scale={clip['width']}:{clip['height']}[s{idx}];" +
+                    f"[{current}][s{idx}]overlay=x=0:y=0:enable='between(t,{clip_time},{clip_time + clip['duration']})'[{vout}]"
+                )
+                current = vout
+                
+                # Audio chain - keep separate from video
+                if not clip.get('is_drum', False):
+                    speed_factor = pow(2, (clip['midi_note'] - 60) / 12)
+                    audio_chain.append(
+                        f"[{idx}:a]atrim=0:{clip['duration']},asetpts=PTS-STARTPTS," +
+                        f"asetrate=44100*{speed_factor},aresample=44100," +
+                        f"adelay={int(clip_time*1000)}|{int(clip_time*1000)}," +
+                        f"volume={clip.get('velocity', 1.0)}[a{idx}]"
+                    )
+
+            # Finalize chains
+            filters = []
+            
+            # Add video chain
+            filters.extend(video_chain)
+            filters.append(f"[{current}]null[outv]")  # Ensure final video output
+            
+            # Add audio chain and mixer
+            if audio_chain:
+                filters.extend(audio_chain)
+                audio_mix_inputs = ''.join(f'[a{i}]' for i in range(1, len(audio_chain) + 1))
+                if audio_mix_inputs:
+                    filters.append(f"{audio_mix_inputs}amix=inputs={len(audio_chain)}:dropout_transition=0[outa]")
+            
+            # Build filter complex
+            filter_complex = ';'.join(filters)
+            base_cmd.extend(['-filter_complex', filter_complex])
+            
+            # Map outputs
+            base_cmd.extend(['-map', '[outv]'])
+            if audio_chain:
+                base_cmd.extend(['-map', '[outa]'])
+            else:
+                base_cmd.extend(['-map', '1:a'])
+            
+            # Output settings
+            base_cmd.extend([
+                '-c:v', 'h264_nvenc',
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-b:a', '192k',
+                chunk_out
+            ])
+            
+            # Execute and validate
+            execute_ffmpeg_command(base_cmd)
+            if os.path.exists(chunk_out):
+                chunk_outputs.append(chunk_out)
+
+        # Combine chunks if needed
+        if len(chunk_outputs) > 1:
+            final_output = f"{temp_dir}{os.sep}track_{track_id}.mp4"
+            combine_chunks(chunk_outputs, final_output)
+            return final_output
+        elif chunk_outputs:
+            return chunk_outputs[0]
+        
+        return None
+
+    except Exception as e:
+        logging.error(f"Track processing failed: {e}")
+        raise
+
+def combine_chunks(chunk_files: List[str], output: str) -> None:
+    """Combine multiple chunk files."""
+    try:
+        # Create concat file
+        concat_file = os.path.splitext(output)[0] + '_concat.txt'
+        with open(concat_file, 'w') as f:
+            for file in chunk_files:
+                f.write(f"file '{file}'\n")
+        
+        # Combine chunks
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_file,
+            '-c', 'copy',
+            output
+        ]
+        
+        execute_ffmpeg_command(cmd)
+        
+        # Cleanup concat file
+        try:
+            os.remove(concat_file)
+        except:
+            pass
+            
+    except Exception as e:
+        logging.error(f"Error combining chunks: {e}")
+        raise
+
+def combine_tracks(track_files: List[str], output: str, duration: float) -> None:
+    """Combine multiple track videos into final output."""
+    try:
+        if not track_files:
+            return
+
+        cmd = ['ffmpeg', '-y']
+        
+        # Add inputs
+        for file in track_files:
+            cmd.extend(['-i', file])
+        
+        # Create overlay chain
+        filters = []
+        current = '[0:v]'
+        audio_inputs = []
+        
+        for i in range(1, len(track_files)):
+            next_out = '[v]' if i == len(track_files) - 1 else f'[v{i}]'
+            filters.append(f"{current}[{i}:v]overlay=shortest=1{next_out}")
+            current = next_out
+            audio_inputs.append(f"[{i}:a]")
+        
+        # Add audio mixing
+        if len(track_files) > 1:
+            filters.append(f"[0:a]{(''.join(audio_inputs))}amix=inputs={len(track_files)}:dropout_transition=0[a]")
+        
+        # Add filter complex
+        if filters:
+            cmd.extend(['-filter_complex', ';'.join(filters)])
+            cmd.extend(['-map', '[v]'])
+            if len(track_files) > 1:
+                cmd.extend(['-map', '[a]'])
+            else:
+                cmd.extend(['-map', '0:a'])
+        
+        # Add output options
+        cmd.extend([
+            '-c:v', 'h264_nvenc',
+            '-c:a', 'aac',
+            '-ar', '44100',
+            '-b:a', '192k',
+            '-t', str(duration),
+            output
+        ])
+        
+        execute_ffmpeg_command(cmd)
+
+    except Exception as e:
+        logging.error(f"Track combination failed: {e}")
         raise
 
 def process_large_segment(segment_clips: List[Dict], duration: float, segment_start: float,
@@ -251,7 +381,7 @@ def process_large_segment(segment_clips: List[Dict], duration: float, segment_st
                 filter_complex_file = filter_file.name
 
             ffmpeg_cmd.extend([
-                '-filter_complex_script', filter_complex_file,
+                '-filter_complex', f"@{filter_complex_file}",
                 '-map', '[v]',
                 '-c:v', 'h264_nvenc',
                 '-preset', 'p7',
@@ -310,77 +440,55 @@ def process_large_segment(segment_clips: List[Dict], duration: float, segment_st
         raise
 
 def process_video_segments(midi_data: Dict, video_files: Dict, output_path: str) -> bool:
-    work_dir = None
     try:
         # Create working directory and copy files
         work_dir = setup_working_directory(output_path)
         file_map = copy_to_work_dir(video_files, work_dir)
         
-        # Update video_files with new minimal paths
+        # Update paths in video_files
         for track_id, track_data in video_files.items():
             if track_id in file_map:
                 track_data['path'] = file_map[track_id]
 
-        # Rest of processing remains the same, but use work_dir instead of creating new temp dir
+        # Get duration from MIDI data
         duration = float(midi_data.get('duration', 0))
         if duration <= 0:
             raise ValueError("Invalid duration in MIDI data")
 
+        logging.info(f"Total duration: {duration} seconds")
+
         # Prepare clips data
         clips_data = prepare_clips_data(video_files, duration)
-        
         if not clips_data:
             raise ValueError("No valid clips to process")
 
-        # Split into 30-second segments (or adjust based on your needs)
+        # Process in 30-second segments
         segment_duration = 30.0
         num_segments = math.ceil(duration / segment_duration)
         segment_files = []
 
-        BATCH_THRESHOLD = 50  # Set a threshold for batch processing
+        logging.info(f"Processing {num_segments} segments")
 
-        # Process segments sequentially instead of parallel for better stability
         for i in range(num_segments):
+            segment_start = i * segment_duration
+            current_duration = min(segment_duration, duration - segment_start)
+            
+            logging.info(f"Processing segment {i+1}/{num_segments} "
+                        f"(start: {segment_start}, duration: {current_duration})")
+
             try:
-                segment_start = i * segment_duration
-                current_duration = min(segment_duration, duration - segment_start)
-
-                # Filter clips for this segment
-                segment_clips = [
-                    clip for clip in clips_data
-                    if (clip['start_time'] + clip['duration'] > segment_start and 
-                        clip['start_time'] < segment_start + current_duration)
-                ]
-
-                # Log the number of clips in the segment
-                logging.debug(f"Segment {i}: {len(segment_clips)} clips")
-
-                # Use process_large_segment if number of clips exceeds threshold
-                if len(segment_clips) > BATCH_THRESHOLD:
-                    segment_file = process_large_segment(
-                        segment_clips,
-                        duration,
-                        segment_start,
-                        current_duration,
-                        work_dir,
-                        i,
-                        batch_size=5  # Adjust batch size as needed
-                    )
-                else:
-                    segment_file = process_segment(
-                        segment_clips,
-                        duration,
-                        segment_start,
-                        current_duration,
-                        work_dir,
-                        i
-                    )
-                
+                segment_file = process_segment(
+                    clips_data,
+                    duration,
+                    segment_start,
+                    current_duration,
+                    work_dir,
+                    i
+                )
                 if os.path.exists(segment_file) and os.path.getsize(segment_file) > 0:
                     segment_files.append(segment_file)
                 else:
-                    logging.error(f"Invalid segment file created: {segment_file}")
-                    
+                    raise Exception(f"Invalid segment file: {segment_file}")
             except Exception as e:
                 logging.error(f"Failed to process segment {i}: {e}")
                 raise
@@ -389,109 +497,65 @@ def process_video_segments(midi_data: Dict, video_files: Dict, output_path: str)
             raise ValueError("No segments were successfully created")
 
         # Concatenate segments
-        if segment_files:
-            # Ensure segments exist and are valid
-            valid_segments = []
-            for file in sorted(segment_files):
-                if os.path.exists(file) and os.path.getsize(file) > 0:
-                    valid_segments.append(file)
-                else:
-                    logging.warning(f"Skipping invalid segment file: {file}")
+        concat_file = os.path.join(work_dir, 'concat.txt')
+        with open(concat_file, 'w') as f:
+            for file in segment_files:
+                f.write(f"file '{file}'\n")
 
-            if not valid_segments:
-                raise ValueError("No valid segments to concatenate")
+        concat_cmd = [
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_file,
+            '-c', 'copy',
+            '-t', str(duration),  # Explicitly set final duration
+            output_path
+        ]
 
-            # Create concat file with absolute paths
-            concat_file = os.path.join(work_dir, 'list.txt')
-            logging.info(f"Creating concat file at: {concat_file}")
-            logging.info(f"Segments to concatenate: {valid_segments}")
+        execute_ffmpeg_command(concat_cmd)
 
-            with open(concat_file, 'w') as f:
-                for file in valid_segments:
-                    abs_path = os.path.abspath(file)
-                    f.write(f"file '{abs_path.replace(os.sep, '/')}'\n")
-
-            # Execute concatenation with detailed logging
-            concat_cmd = [
-                'ffmpeg', '-y',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', concat_file,
-                '-c', 'copy',
-                output_path
-            ]
-
-            logging.info(f"Running concat command: {' '.join(concat_cmd)}")
-            process = subprocess.Popen(
-                concat_cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE,
-                text=True  # Get string output instead of bytes
-            )
-            stdout, stderr = process.communicate()
-
-            if process.returncode != 0:
-                logging.error(f"Concatenation failed with error: {stderr}")
-                raise Exception(f"Final concatenation failed: {stderr}")
-            else:
-                logging.info("Concatenation completed successfully")
-
-            # Cleanup temp files and directory
-            for file in segment_files + [concat_file]:
-                try:
-                    if os.path.exists(file):
-                        os.remove(file)
-                except:
-                    pass
+        # Cleanup
+        for file in segment_files + [concat_file]:
             try:
-                os.rmdir(work_dir)
+                os.remove(file)
             except:
                 pass
 
         return True
 
+    except Exception as e:
+        logging.error(f"Video processing failed: {e}")
+        raise
     finally:
         # Cleanup working directory
-        if work_dir and os.path.exists(work_dir):
-            for file in os.listdir(work_dir):
-                try:
-                    os.remove(os.path.join(work_dir, file))
-                except:
-                    pass
-            try:
-                os.rmdir(work_dir)
-            except:
-                pass
+        if 'work_dir' in locals() and os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 def prepare_clips_data(video_files: Dict, duration: float) -> List[Dict]:
-    """Prepare clips data with optimized layout calculations."""
+    """Prepare clips data with proper MIDI note mapping."""
     clips_data = []
     
-    # Process each track's notes
     for track_id, track_data in video_files.items():
         if not track_data.get('notes'):
             continue
 
-        source_path = track_data['path']
-        is_drum = track_data.get('isDrum', False)
-        
-        # Calculate clip dimensions based on track count
+        # Calculate track position in grid
         total_tracks = len([t for t in video_files.values() if t.get('notes')])
+        track_idx = list(video_files.keys()).index(track_id)
+        
+        # Calculate dimensions based on track count
         if total_tracks == 1:
             width, height = 960, 720
             x, y = 0, 0
-        elif total_tracks == 2:
-            width, height = 480, 720
-            x = len(clips_data) * 480
-            y = 0
         else:
-            grid_size = max(2, int(np.ceil(np.sqrt(total_tracks))))
-            width = 960 // grid_size
-            height = 720 // grid_size
-            x = (len(clips_data) % grid_size) * width
-            y = (len(clips_data) // grid_size) * height
+            cols = math.ceil(math.sqrt(total_tracks))
+            rows = math.ceil(total_tracks / cols)
+            width = 960 // cols
+            height = 720 // rows
+            x = (track_idx % cols) * width
+            y = (track_idx // cols) * height
 
-        # Add each note as a clip
+        # Process each note in the track
         for note in track_data['notes']:
             clips_data.append({
                 'x': x,
@@ -500,11 +564,15 @@ def prepare_clips_data(video_files: Dict, duration: float) -> List[Dict]:
                 'height': height,
                 'start_time': float(note['time']),
                 'duration': float(note['duration']),
-                'is_drum': is_drum,
+                'is_drum': track_data.get('isDrum', False),
                 'velocity': note.get('velocity', 1.0),
-                'source_path': source_path
+                'source_path': track_data['path'],
+                'midi_note': note['midi'],
+                'track_id': track_id
             })
 
+    # Sort by start time for efficient processing
+    clips_data.sort(key=lambda x: x['start_time'])
     return clips_data
 
 def main():
@@ -524,7 +592,7 @@ def main():
             
         process_video_segments(midi_data, video_files, output_path)
     except Exception as e:
-        print(f"Error in video processing: {str(e)}")
+        print(f"Error in video processing: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
