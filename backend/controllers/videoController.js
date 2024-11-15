@@ -31,7 +31,7 @@ const extractAudio = (videoPath, outputAudioPath) => {
 
 export const uploadVideo = async (req, res) => {
   console.log('Uploading video:', req.file);
-  
+
   try {
     const videoPath = req.file.path;
     console.log('Video uploaded:', videoPath);
