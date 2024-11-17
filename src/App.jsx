@@ -104,6 +104,7 @@ function App() {
   const [isReadyToCompose, setIsReadyToCompose] = useState(false); // New state
   const [error, setError] = useState(null); // Add error state
   const [longestNotes, setLongestNotes] = useState({});
+  const [instrumentVideos, setInstrumentVideos] = useState({});
 
   const handleRecordingComplete = (blob, instrument, trackIndex) => {
     console.log('Recording complete:', instrument, blob);
@@ -214,20 +215,23 @@ function App() {
   };
 
   const handleVideoReady = useCallback((url, instrument) => {
-    const normalizedName = normalizeInstrumentName(instrument.name);
-    setVideoFiles(prev => {
-      // Only update if the URL is different
-      if (prev[normalizedName] !== url) {
-        return {
-          ...prev,
-          [normalizedName]: url
-        };
-      }
-      return prev;
+    // Get the normalized instrument name
+    const instrumentName = instrument.isDrum 
+      ? `drum_${instrument.group}`
+      : normalizeInstrumentName(instrument.name);
+
+    setInstrumentVideos(prev => {
+      const newState = {
+        ...prev,
+        [instrumentName]: url
+      };
+      console.log('New instrumentVideos state:', newState);
+      return newState;
     });
+
     // Only increment count if we haven't recorded this instrument before
     setRecordedVideosCount(prev => {
-      if (!videoFiles[normalizedName]) {
+      if (!videoFiles[instrumentName]) {
         return prev + 1;
       }
       return prev;
@@ -263,29 +267,28 @@ function App() {
       )}
 
       {instruments.map((instrument, index) => {
-        const minDuration = longestNotes[instrument.name] || 0;
-        const recommendedDuration = Math.ceil(minDuration + 1); // Add 1 second buffer
-        
+        const instrumentName = instrument.isDrum 
+          ? `drum_${instrument.group}`
+          : instrument.name;
+        const minDuration = longestNotes[instrumentName] || 0;
+        const recommendedDuration = Math.ceil(minDuration + 1);
+
         return (
           <div key={index} style={{ marginBottom: '20px' }}>
             <h3>
-              {instrument.isDrum ? (
-                `Drum - ${instrument.group.charAt(0).toUpperCase() + instrument.group.slice(1)}`
-              ) : (
-                `${instrument.family} - ${instrument.name}`
-              )}
-            </h3>
-            <p>
-              Minimum recording duration: {recommendedDuration} seconds
-            </p>
-            <VideoRecorder
-              onRecordingComplete={(blob) =>
-                handleRecordingComplete(blob, instrument, index)
+              {instrument.isDrum 
+                ? `Drum - ${instrument.group.charAt(0).toUpperCase() + instrument.group.slice(1)}`
+                : `${instrument.family} - ${instrument.name}`
               }
+            </h3>
+            <p>Minimum recording duration: {recommendedDuration} seconds</p>
+            <VideoRecorder
+              onRecordingComplete={(blob) => handleRecordingComplete(blob, instrument, index)}
               style={{ width: '300px', height: '200px' }}
               instrument={instrument}
               onVideoReady={(url) => handleVideoReady(url, instrument)}
               minDuration={recommendedDuration}
+              currentVideo={instrumentVideos[instrumentName]}
             />
           </div>
         );

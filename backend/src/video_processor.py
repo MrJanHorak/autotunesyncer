@@ -2,6 +2,7 @@ import sys
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 # Use absolute imports
@@ -20,6 +21,88 @@ def validate_input_files(midi_path: str, video_path: str) -> bool:
         return False
     
     return True
+
+def ensure_video_format(input_path: str, output_path: str = None) -> str:
+    """
+    Ensure video is in the correct format for processing.
+    Returns path to the properly formatted video.
+    """
+    if output_path is None:
+        output_path = str(Path(input_path).with_suffix('.mp4'))
+        
+    try:
+        # Check current format
+        probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+                    '-show_entries', 'stream=codec_name,width,height,r_frame_rate', 
+                    '-of', 'json', input_path]
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+        stream_info = json.loads(probe_result.stdout)
+        
+        # If format is already correct, return original path
+        if (stream_info.get('streams', [{}])[0].get('codec_name') == 'h264' and
+            Path(input_path).suffix.lower() == '.mp4'):
+            return input_path
+            
+        # Convert to standard format
+        convert_cmd = [
+            'ffmpeg', '-i', input_path,
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            '-r', '30',
+            '-vf', 'scale=960:720',
+            '-c:a', 'aac',
+            '-ar', '48000',
+            '-ac', '2',
+            '-b:a', '192k',
+            '-movflags', '+faststart',
+            '-y',
+            output_path
+        ]
+        
+        subprocess.run(convert_cmd, check=True)
+        return output_path
+        
+    except Exception as e:
+        logging.error(f"Error ensuring video format: {e}")
+        return input_path
+
+def process_video_segments(midi_data, video_files, output_path):
+    """Process video segments with format standardization"""
+    try:
+        # Create temp directory for processed videos
+        temp_dir = Path(output_path).parent / 'temp_processed'
+        temp_dir.mkdir(exist_ok=True)
+        
+        # Process each video file
+        processed_videos = {}
+        for track_id, track_data in video_files.items():
+            video_path = track_data['path']
+            processed_path = temp_dir / f"{Path(video_path).stem}_processed.mp4"
+            
+            # Ensure video is in correct format
+            standardized_path = ensure_video_format(video_path, str(processed_path))
+            processed_videos[track_id] = {
+                **track_data,
+                'path': standardized_path
+            }
+        
+        # Continue with existing processing logic using processed_videos
+        # ...existing processing code...
+        
+        # Cleanup temp files
+        for file in temp_dir.glob('*'):
+            try:
+                file.unlink()
+            except Exception as e:
+                logging.warning(f"Failed to cleanup temp file {file}: {e}")
+        temp_dir.rmdir()
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error in video processing: {e}")
+        return False
 
 def main():
     if len(sys.argv) != 4:
