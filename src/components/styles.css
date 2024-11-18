@@ -20,7 +20,7 @@
 .video-element {
   width: 100%;
   height: 100%;
-  object-fit: contain; /* Changed from cover to contain to show full video */
+  object-fit: cover; /* Changed from contain to cover to show full video */
   background-color: #000;
 }
 
@@ -81,12 +81,14 @@
 .recording-duration {
   position: absolute;
   bottom: 10px;
-  left: 10px;
+  left: 50%;
+  transform: translateX(-50%);
   background: rgba(0, 0, 0, 0.7);
   color: white;
   padding: 5px 10px;
   border-radius: 4px;
   font-size: 14px;
+  z-index: 1;
 }
 
 .countdown-overlay {
@@ -99,7 +101,7 @@
   justify-content: center;
   align-items: center;
   background: rgba(0, 0, 0, 0.5);
-  z-index: 1000;
+  z-index: 2;
 }
 
 .countdown-number {

@@ -28,30 +28,25 @@ const VideoComposer = ({ videoFiles, midiData }) => {
       formData.append('midiData', midiBlob, 'midi.json');
 
       // Process and append videos
-      let totalSize = midiBlob.size;
       for (const [instrumentName, videoUrl] of Object.entries(videoFiles)) {
         try {
-          console.log(`Processing video for ${instrumentName}`);
-          
           let videoBlob;
-          if (typeof videoUrl === 'string') {
+          
+          // Handle both Blob and URL string cases
+          if (videoUrl instanceof Blob) {
+            videoBlob = videoUrl;
+          } else if (typeof videoUrl === 'string') {
+            // Handle URLs (could be object URLs or regular URLs)
             const response = await fetch(videoUrl);
             if (!response.ok) throw new Error(`Failed to fetch video for ${instrumentName}`);
             videoBlob = await response.blob();
-          } else if (videoUrl instanceof Blob) {
-            videoBlob = videoUrl;
           } else {
             console.error(`Invalid video data for ${instrumentName}:`, videoUrl);
             continue;
           }
 
-          totalSize += videoBlob.size;
-          if (totalSize > 500 * 1024 * 1024) { // 500MB limit
-            throw new Error('Total upload size exceeds limit');
-          }
-
           formData.append(`videos[${instrumentName}]`, videoBlob, `${instrumentName}.mp4`);
-          console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}, total: ${totalSize}`);
+          console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}`);
         } catch (error) {
           console.error(`Error processing ${instrumentName}:`, error);
           throw error;
@@ -118,7 +113,7 @@ const VideoComposer = ({ videoFiles, midiData }) => {
     <div className="video-composer">
       <button
         onClick={startComposition}
-        disabled={isProcessing}
+        disabled={isProcessing || Object.keys(videoFiles).length === 0}
         className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
       >
         {isProcessing ? 'Processing...' : 'Start Composition'}

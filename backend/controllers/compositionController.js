@@ -231,6 +231,7 @@ async function composeFinalVideo(tracks, outputPath, midiDuration) {
     blackFrame: join(outputDir, 'black_frame.mp4'),
     videoOverlay: join(outputDir, 'video_with_overlays_temp.mp4'),
     mergedAudio: join(outputDir, 'merged_audio_temp.mp4'),
+    finalOutput: outputPath, // Ensure final output path is included
   };
 
   // Ensure output directory exists and is writable
@@ -307,6 +308,16 @@ async function composeFinalVideo(tracks, outputPath, midiDuration) {
     await createMergedAudio(validSegments, tempFiles.mergedAudio);
 
     // Final merge
+    await mergeFinalVideo(
+      tempFiles.videoOverlay,
+      tempFiles.mergedAudio,
+      sanitizedOutputPath,
+      midiDuration
+    );
+
+    // Ensure audio is included in the final merge
+    // Add explicit audio mapping and codec settings
+
     await mergeFinalVideo(
       tempFiles.videoOverlay,
       tempFiles.mergedAudio,
@@ -673,18 +684,19 @@ async function mergeFinalVideo(
         '-c:v',
         'copy',
         '-c:a',
-        'aac',
-        '-strict',
-        'experimental',
+        'libmp3lame', // Ensure audio codec matches video_processor.py
+        '-b:a',
+        '192k',
+        '-ar',
+        '44100',
+        '-ac',
+        '2',
         '-map',
         '0:v:0',
         '-map',
         '1:a:0',
-        '-t',
-        String(totalDuration), // Set the total duration here
+        '-shortest', // Ensures the output duration matches the shortest input
         '-y',
-        '-filter:a:1',
-        'volume=2.0', // Increase audio volume
       ])
       .on('start', (commandLine) => {
         console.log('FFmpeg command (final merge):', commandLine);
@@ -710,15 +722,13 @@ const normalizeInstrumentName = (name) => {
 async function processVideoWithPython(midiData, processedFiles, outputPath) {
   return new Promise((resolve, reject) => {
     try {
-      console.log('Processing files type:', typeof processedFiles, processedFiles instanceof Map);
-      
-      // Convert the processed files to the format Python expects
       const videoFilesForPython = {};
 
-      if (processedFiles instanceof Map) {
-        processedFiles.forEach((value, key) => {
+      processedFiles.forEach((value, key) => {
+        // Verify file exists and has audio
+        if (existsSync(value.path)) {
           videoFilesForPython[key] = {
-            path: value.path,
+            path: value.path.replace(/\\/g, '/'),  // Normalize path for Python
             isDrum: value.isDrum,
             notes: value.notes.map(note => ({
               time: note.time,
@@ -726,41 +736,26 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
               velocity: note.velocity || 1.0,
               midi: note.midi
             })),
-            // Add layout information
-            layout: {
+            layout: value.layout || {
               x: 0,
               y: 0,
               width: 960,
-              height: 720,
-              fullscreen: processedFiles.size === 1
+              height: 720
             }
           };
-        });
-      } else {
-        // Handle if somehow a plain object is passed
-        Object.entries(processedFiles).forEach(([key, value]) => {
-          videoFilesForPython[key] = {
-            path: value.path,
-            isDrum: value.isDrum,
-            notes: value.notes.map(note => ({
-              time: note.time,
-              duration: note.duration,
-              velocity: note.velocity || 1.0,
-              midi: note.midi
-            }))
-          };
-        });
-      }
+        } else {
+          console.warn(`Video file not found: ${value.path}`);
+        }
+      });
 
-      // Create temporary JSON files for the data
+      // Ensure all video files have audio streams before processing
       const midiJsonPath = join(TEMP_DIR, 'midi_data.json');
       const videoFilesJsonPath = join(TEMP_DIR, 'video_files.json');
       
-      // Write the data to temporary files
       writeFileSync(midiJsonPath, JSON.stringify(midiData));
       writeFileSync(videoFilesJsonPath, JSON.stringify(videoFilesForPython));
 
-      // Spawn Python process
+      // Spawn Python process with detailed logging
       const pythonProcess = spawn('python', [
         join(__dirname, '../utils/video_processor.py'),
         midiJsonPath,
@@ -768,7 +763,6 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
         outputPath
       ]);
       
-      // Handle process events
       pythonProcess.stdout.on('data', (data) => {
         console.log(`Python stdout: ${data}`);
       });
@@ -779,14 +773,29 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
       
       pythonProcess.on('close', (code) => {
         if (code === 0) {
-          resolve();
+          // Verify output video has audio
+          ffmpeg.ffprobe(outputPath, (err, metadata) => {
+            if (err) {
+              console.error('Error verifying output video:', err);
+              reject(err);
+              return;
+            }
+            
+            const hasAudio = metadata.streams.some(s => s.codec_type === 'audio');
+            if (!hasAudio) {
+              console.error('Output video has no audio stream!');
+              reject(new Error('Output video missing audio'));
+              return;
+            }
+            
+            resolve();
+          });
         } else {
           reject(new Error(`Python process exited with code ${code}`));
         }
       });
     } catch (error) {
-      console.error('Error preparing data:', error);
-      reject(new Error(`Failed to prepare data for Python: ${error.message}`));
+      reject(error);
     }
   });
 }
@@ -1297,64 +1306,80 @@ async function convertVideoFormat(inputPath, outputPath) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       await new Promise((resolve, reject) => {
-        // Create FFmpeg command with more conservative settings
-        const command = ffmpeg(inputPath)
-          .outputOptions([
+        ffmpeg.ffprobe(inputPath, (err, metadata) => {
+          if (err) return reject(err);
+
+          const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
+          console.log(`[Attempt ${attempt}] Input audio stream:`, audioStream);
+
+          const command = ffmpeg(inputPath);
+
+          // Add specific input handling for different codecs
+          if (audioStream) {
+            switch (audioStream.codec_name) {
+              case 'opus':
+                command.inputOptions(['-c:a', 'libopus']);
+                break;
+              case 'vorbis':
+                command.inputOptions(['-c:a', 'libvorbis']);
+                break;
+              case 'aac':
+                command.inputOptions(['-c:a', 'aac']);
+                break;
+            }
+          }
+
+          command.outputOptions([
             // Video settings
-            '-c:v', 'libx264',          // Use CPU encoding instead of NVENC
-            '-preset', 'ultrafast',      // Faster encoding
-            '-pix_fmt', 'yuv420p',      // Standard pixel format
-            '-vf', 'scale=960:720',     // Target resolution
-            '-r', '30',                 // Target framerate
-            '-analyzeduration', '10000000',  // Increase analyze duration
-            '-probesize', '10000000',    // Increase probe size
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=960:720',
+            '-r', '30',
             
             // Audio settings
-            '-c:a', 'aac',              
-            '-ar', '48000',             
-            '-ac', '2',                 
-            '-b:a', '192k',             
+            '-c:a', 'aac',
+            '-ar', '44100',
+            '-ac', '2',
+            '-b:a', '192k',
+            
+            // Audio filters for proper handling and normalization
+            '-af', [
+              'aresample=44100:first_pts=0',
+              'aformat=sample_fmts=fltp:channel_layouts=stereo',
+              'pan=stereo|c0=c0|c1=c1',
+              'dynaudnorm=f=75:g=25:p=0.95:m=10',
+              'volume=1.5'
+            ].join(','),
             
             // General settings
-            '-y',                       // Overwrite output
-            '-movflags', '+faststart'   // Enable streaming
+            '-y',
+            '-movflags', '+faststart',
+            '-map_metadata', '-1',
+            '-map', '0:v:0',
+            '-map', '0:a:0?',
+            
+            // Extended probe size for better format detection
+            '-analyzeduration', '10000000',
+            '-probesize', '10000000'
           ]);
 
-        // Add event handlers
-        command
-          .on('start', (cmdline) => {
-            console.log(`[Attempt ${attempt}] Running FFmpeg command:`, cmdline);
-          })
-          .on('progress', (progress) => {
-            if (progress.percent) {
-              console.log(`[Attempt ${attempt}] Processing: ${Math.floor(progress.percent)}% done`);
-            }
-          })
-          .on('stderr', (stderrLine) => {
-            console.log(`[Attempt ${attempt}] FFmpeg stderr: ${stderrLine}`);
-          })
-          .on('error', (err) => {
-            console.error(`[Attempt ${attempt}] Conversion error:`, err);
-            reject(err);
-          })
-          .on('end', () => {
-            console.log(`[Attempt ${attempt}] Conversion completed successfully`);
-            resolve();
-          })
-          .save(outputPath);
+          command
+            .on('start', cmdline => console.log(`[Attempt ${attempt}] Running FFmpeg command:`, cmdline))
+            .on('stderr', stderrLine => console.log(`[Attempt ${attempt}] FFmpeg stderr:`, stderrLine))
+            .on('end', () => resolve())
+            .on('error', err => reject(err))
+            .save(outputPath);
+        });
       });
       
-      // If successful, break out of retry loop
-      return;
+      return; // Success - exit retry loop
       
     } catch (error) {
       console.error(`Attempt ${attempt} failed:`, error);
-      
       if (attempt === maxRetries) {
         throw new Error(`Failed to convert video after ${maxRetries} attempts: ${error.message}`);
       }
-      
-      // Wait before retrying
       await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
     }
   }
@@ -1383,56 +1408,157 @@ function isGeneralMidiDrumKit(instrumentName, channel) {
 // Add these utility functions after the other helper functions
 async function standardizeVideo(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .outputOptions([
-        // Video settings
-        '-c:v', 'libx264',          // Use H.264 codec
-        '-preset', 'ultrafast',      // Faster encoding
-        '-pix_fmt', 'yuv420p',      // Standard pixel format
-        '-r', '30',                 // 30fps
-        '-vf', 'scale=960:720',     // Standardize resolution
-        
-        // Audio settings
-        '-c:a', 'aac',              // AAC audio codec
-        '-ar', '48000',             // Sample rate
-        '-ac', '2',                 // Stereo audio
-        '-b:a', '192k',             // Audio bitrate
-        
-        // Container settings
-        '-movflags', '+faststart',   // Enable fast start for web playback
-        '-y'                         // Overwrite output
-      ])
-      .on('start', (cmd) => console.log('Started standardizing video:', cmd))
-      .on('progress', (progress) => {
-        if (progress.percent) {
-          console.log(`Standardizing progress: ${Math.floor(progress.percent)}%`);
+    // First probe the input file for audio stream info
+    ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      if (err) {
+        return reject(err);
+      }
+
+      // Find audio stream
+      const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
+      console.log('Input audio stream:', audioStream);
+
+      const command = ffmpeg(inputPath)
+        .outputOptions([
+          // Video settings
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast',
+          '-pix_fmt', 'yuv420p',
+          '-r', '30',
+          '-vf', 'scale=960:720',
+          
+          // Audio settings with explicit format conversion
+          '-c:a', 'aac',
+          '-ar', '44100',            // Force 44.1kHz sampling
+          '-ac', '2',                // Force stereo
+          '-b:a', '192k',           // Consistent bitrate
+          
+          // Audio filters for normalization and resampling
+          '-af', [
+            'aresample=44100:first_pts=0',  // Resample with proper timestamps
+            'aformat=sample_fmts=fltp',      // Convert to float planar format
+            'pan=stereo|c0=c0|c1=c1',       // Ensure proper stereo mapping
+            'dynaudnorm=f=75:g=25',         // Dynamic audio normalization
+            'volume=1.5'                     // Boost volume slightly
+          ].join(','),
+          
+          // Container settings
+          '-movflags', '+faststart',
+          '-map_metadata', '-1',      // Remove metadata
+          '-map', '0:v:0',           // Map first video stream
+          '-map', '0:a:0?',          // Map first audio stream if it exists
+          '-y'
+        ]);
+
+      // Add specific handling for different input formats
+      if (audioStream) {
+        if (audioStream.codec_name === 'opus') {
+          command.inputOptions(['-c:a', 'libopus']);
+        } else if (audioStream.codec_name === 'vorbis') {
+          command.inputOptions(['-c:a', 'libvorbis']);
         }
-      })
-      .on('end', () => resolve(outputPath))
-      .on('error', (err) => reject(err))
-      .save(outputPath);
+      }
+
+      command
+        .on('start', (cmd) => console.log('Started standardizing video:', cmd))
+        .on('stderr', (stderrLine) => console.log('FFmpeg stderr:', stderrLine))
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            console.log(`Standardizing progress: ${Math.floor(progress.percent)}%`);
+          }
+        })
+        .on('end', () => {
+          console.log('Video standardization completed');
+          resolve(outputPath);
+        })
+        .on('error', (err) => reject(err))
+        .save(outputPath);
+    });
   });
 }
 
-// Modify the video processing part in composeVideo function
-const processVideoFile = async (file, sessionDir, trackInfo, midi) => {
+async function standardizeAudioVideo(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      if (err) return reject(err);
+
+      const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
+      console.log('Processing audio stream:', audioStream);
+
+      const command = ffmpeg(inputPath)
+        .outputOptions([
+          // Video settings (copy to avoid re-encoding)
+          '-c:v', 'copy',
+          
+          // Standardized audio settings
+          '-c:a', 'aac',
+          '-ar', '44100',
+          '-ac', '2',
+          '-b:a', '192k',
+          
+          // Audio filters for normalization
+          '-af', [
+            'aresample=44100:first_pts=0',
+            'aformat=sample_fmts=fltp',
+            'pan=stereo|c0=c0|c1=c1',
+            'dynaudnorm=f=75:g=25:p=0.95',
+            'volume=1.5'
+          ].join(','),
+          
+          // General settings
+          '-movflags', '+faststart',
+          '-y'
+        ]);
+
+      // Add codec-specific input handling
+      if (audioStream) {
+        const codecName = audioStream.codec_name;
+        console.log(`Detected audio codec: ${codecName}`);
+        
+        switch (codecName) {
+          case 'opus':
+            command.inputOptions(['-c:a', 'libopus']);
+            break;
+          case 'vorbis':
+            command.inputOptions(['-c:a', 'libvorbis']);
+            break;
+          case 'aac':
+            command.inputOptions(['-c:a', 'aac']);
+            break;
+          default:
+            console.log(`Using default handling for codec: ${codecName}`);
+        }
+      }
+
+      command
+        .on('start', cmd => console.log('Standardization command:', cmd))
+        .on('stderr', line => console.log('FFmpeg:', line))
+        .on('end', () => resolve(outputPath))
+        .on('error', err => reject(err))
+        .save(outputPath);
+    });
+  });
+}
+
+// Modify the processVideoFile function
+const processVideoFile = async (file, sessionDir, trackInfo) => {
   const { uniqueTrackId } = trackInfo;
-  const tempPath = join(sessionDir, `${uniqueTrackId}_original.mp4`);
-  const standardPath = join(sessionDir, `${uniqueTrackId}_standard.mp4`);
+  const originalPath = join(sessionDir, `${uniqueTrackId}_original.mp4`);
+  const standardizedPath = join(sessionDir, `${uniqueTrackId}_standardized.mp4`);
 
   try {
     // Save uploaded file
-    writeFileSync(tempPath, file.buffer);
+    writeFileSync(originalPath, file.buffer);
     
-    // Standardize the video
-    await standardizeVideo(tempPath, standardPath);
+    // Standardize audio/video
+    await standardizeAudioVideo(originalPath, standardizedPath);
     
     // Cleanup original
-    await rm(tempPath);
+    await rm(originalPath);
     
-    return standardPath;
+    return standardizedPath;
   } catch (error) {
-    console.error(`Error processing video for ${uniqueTrackId}:`, error);
+    console.error(`Error processing ${uniqueTrackId}:`, error);
     throw error;
   }
 };
