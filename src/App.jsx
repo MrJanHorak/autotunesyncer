@@ -93,7 +93,7 @@ const extractDrumInstruments = (track) => {
   }));
 };
 
-function App() {
+const App = () => {
   const [midiFile, setMidiFile] = useState(null);
   const [videoFiles, setVideoFiles] = useState({});
   const [parsedMidiData, setParsedMidiData] = useState(null);
@@ -105,6 +105,7 @@ function App() {
   const [error, setError] = useState(null); // Add error state
   const [longestNotes, setLongestNotes] = useState({});
   const [instrumentVideos, setInstrumentVideos] = useState({});
+  const [readyForComposition, setReadyForComposition] = useState(false);
 
   const handleRecordingComplete = (blob, instrument, trackIndex) => {
     console.log('Recording complete:', instrument, blob);
@@ -214,29 +215,62 @@ function App() {
     }
   };
 
-  const handleVideoReady = useCallback((url, instrument) => {
-    // Get the normalized instrument name
-    const instrumentName = instrument.isDrum 
-      ? `drum_${instrument.group}`
-      : normalizeInstrumentName(instrument.name);
+  // Add this function to check if all required videos are ready
+  const checkCompositionReady = useCallback((videos) => {
+    if (!instruments.length) return false;
+    
+    const requiredInstruments = new Set(
+      instruments.map(instrument => 
+        instrument.isDrum ? `drum_${instrument.group}` : instrument.name
+      )
+    );
 
-    setInstrumentVideos(prev => {
-      const newState = {
-        ...prev,
-        [instrumentName]: url
-      };
-      console.log('New instrumentVideos state:', newState);
-      return newState;
-    });
+    const availableVideos = new Set(Object.keys(videos));
+    const isReady = Array.from(requiredInstruments).every(inst => 
+      availableVideos.has(inst)
+    );
 
-    // Only increment count if we haven't recorded this instrument before
-    setRecordedVideosCount(prev => {
-      if (!videoFiles[instrumentName]) {
-        return prev + 1;
-      }
-      return prev;
+    setReadyForComposition(isReady);
+    return isReady;
+  }, [instruments]);
+
+  // Update the handleVideoReady function
+  const handleVideoReady = useCallback((videoUrl, instrument) => {
+    const instrumentKey = instrument.isDrum ? `drum_${instrument.group}` : instrument.name;
+    
+    setVideoFiles(prev => {
+      const newFiles = { ...prev, [instrumentKey]: videoUrl };
+      // Check if we're ready for composition after adding new video
+      checkCompositionReady(newFiles);
+      return newFiles;
     });
-  }, [videoFiles]);
+    
+    setInstrumentVideos(prev => ({
+      ...prev,
+      [instrumentKey]: videoUrl
+    }));
+  }, [checkCompositionReady]);
+
+  // Add composition section render
+  const renderCompositionSection = () => {
+    if (!readyForComposition) {
+      return (
+        <div className="mt-4 p-4 bg-yellow-100 text-yellow-700 rounded">
+          Please record or upload videos for all instruments to enable composition.
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-4">
+        <h2 className="text-xl font-bold mb-4">Video Composition</h2>
+        <VideoComposer 
+          videoFiles={videoFiles} 
+          midiData={parsedMidiData} 
+        />
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -308,6 +342,9 @@ function App() {
           <button onClick={startAudioContext}>Start Audio Context</button>
         </div>
       )}
+
+      {/* Add composition section at the bottom */}
+      {renderCompositionSection()}
     </div>
   );
 }

@@ -8,29 +8,71 @@ import { isDrumTrack } from '../js/drumUtils';
 import CountdownTimer from './CountdownTimer';
 import VideoTrimmer from './VideoTrimmer';
 
-const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVideo }) => {
+const useRecordingState = (currentVideo) => {
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const recordingTimer = useRef(null);
-
-  // Initialize videoState with currentVideo if it exists
-  const [videoState, setVideoState] = useState({
+  
+  const [recordingState, setRecordingState] = useState({
+    isRecording: false,
+    showCountdown: false,
+    isProcessing: false,
+    recordingDuration: 0,
     recordedURL: null,
     autotunedURL: currentVideo || null,
+    isCountingDown: false, // Add this new state
   });
-  const [isRecording, setIsRecording] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(true); // Add state for autotune
-  const [recordingDuration, setRecordingDuration] = useState(0);
+
+  const cleanupMediaStream = useCallback(() => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      cleanupMediaStream();
+      if (recordingTimer.current) {
+        clearInterval(recordingTimer.current);
+      }
+      if (recordingState.recordedURL) URL.revokeObjectURL(recordingState.recordedURL);
+      if (recordingState.autotunedURL) URL.revokeObjectURL(recordingState.autotunedURL);
+    };
+  }, [cleanupMediaStream, recordingState.recordedURL, recordingState.autotunedURL]);
+
+  return {
+    videoRef,
+    mediaStreamRef,
+    recordingTimer,
+    recordingState,
+    setRecordingState,
+    cleanupMediaStream,
+  };
+};
+
+const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVideo }) => {
+  const {
+    videoRef,
+    mediaStreamRef,
+    recordingTimer,
+    recordingState,
+    setRecordingState,
+    cleanupMediaStream,
+  } = useRecordingState(currentVideo);
+
+  const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(true);
   const [isDrum] = useState(() => isDrumTrack(instrument));
-  const [showCountdown, setShowCountdown] = useState(false);
+  const [isUploadMode, setIsUploadMode] = useState(false);
   const [showTrimmer, setShowTrimmer] = useState(false);
   const countdownDuration = 3; // Can be made configurable later
   const duration = 60; // Example duration, replace with actual value
   const STEP = 1; // Example step value, replace with actual value
   const [startTime, setStartTime] = useState(0);
   const [endTime, setEndTime] = useState(duration);
-  const [isUploadMode, setIsUploadMode] = useState(false);
   
   const handleTimeUpdate = (value, isStart) => {
     if (isStart) {
@@ -52,52 +94,30 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
   };
 
   useEffect(() => {
-    // Cleanup function for media streams and audio
-    return () => {
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
-      if (recordingTimer.current) {
-        clearInterval(recordingTimer.current);
-      }
-      // Cleanup object URLs
-      if (videoState.recordedURL) URL.revokeObjectURL(videoState.recordedURL);
-      if (videoState.autotunedURL) URL.revokeObjectURL(videoState.autotunedURL);
-    };
-  }, [videoState]);
-
-  useEffect(() => {
-    if (isRecording) {
-      startRecording().catch(console.error);
+    if (recordingState.autotunedURL && !recordingState.isProcessing) {
+      onVideoReady?.(recordingState.autotunedURL, instrument);
     }
-  }, [isRecording]);
-
-  useEffect(() => {
-    if (videoState.autotunedURL) {
-      console.log('Autotuned video URL updated:', videoState.autotunedURL);
-      // Only call onVideoReady once per autotuned URL
-      const currentURL = videoState.autotunedURL;
-      onVideoReady?.(currentURL, instrument);
-    }
-  }, [videoState.autotunedURL, onVideoReady, instrument]);
+  }, [recordingState.autotunedURL, recordingState.isProcessing, instrument, onVideoReady]);
 
   // Update videoState when currentVideo changes
   useEffect(() => {
-    if (currentVideo && currentVideo !== videoState.autotunedURL) {
-      setVideoState(prev => ({
+    if (currentVideo && currentVideo !== recordingState.autotunedURL) {
+      setRecordingState(prev => ({
         ...prev,
-        autotunedURL: currentVideo
+        autotunedURL: currentVideo,
+        isProcessing: false
       }));
     }
   }, [currentVideo]);
 
   useEffect(() => {
     // When recording starts, initialize the recording timer
-    if (isRecording) {
-      setRecordingDuration(0);
-      recordingTimer.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
+    if (recordingState.isRecording) {
+      setRecordingState(prev => ({ ...prev, recordingDuration: 0 }));
+      const timer = setInterval(() => {
+        setRecordingState(prev => ({ ...prev, recordingDuration: prev.recordingDuration + 1 }));
       }, 1000);
+      recordingTimer.current = timer;
     } else {
       // Clear timer when recording stops
       if (recordingTimer.current) {
@@ -106,27 +126,45 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
     }
 
     return () => {
-      if (recordingTimer.current) {
-        clearInterval(recordingTimer.current);
+      const currentTimer = recordingTimer.current;
+      if (currentTimer) {
+        clearInterval(currentTimer);
       }
     };
-  }, [isRecording]);
+  }, [recordingState.isRecording]);
 
   const startRecording = async () => {
     try {
-      setShowCountdown(true);
+      // Clean up any existing streams before starting new recording
+      cleanupMediaStream();
+      setRecordingState(prev => ({ 
+        ...prev, 
+        showCountdown: true, 
+        isCountingDown: true 
+      }));
     } catch (error) {
       console.error('Recording failed:', error);
       alert('Failed to start recording. Please check your camera permissions.');
+      setRecordingState(prev => ({ 
+        ...prev, 
+        isRecording: false, 
+        isCountingDown: false 
+      }));
     }
   };
 
-  const handleCountdownComplete = async () => {
-    setShowCountdown(false);
-    setIsProcessing(true);
-    setRecordingDuration(0);
+  const handleCountdownComplete = useCallback(async () => {
+    setRecordingState(prev => ({
+      ...prev,
+      showCountdown: false,
+      isCountingDown: false,
+      isProcessing: false,
+      recordingDuration: 0,
+    }));
 
     try {
+      cleanupMediaStream();
+      
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
@@ -136,83 +174,64 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.muted = true;
-        videoRef.current.play();
+        await videoRef.current.play();
       }
 
-      // Convert minDuration from seconds to milliseconds and add a small buffer
-      const recordingDurationMs = (minDuration + 0.5) * 1000;
-      console.log(`Starting recording for ${recordingDurationMs}ms`);
+      setRecordingState(prev => ({ ...prev, isRecording: true }));
 
-      // Start the recording timer
-      recordingTimer.current = setInterval(() => {
-        setRecordingDuration(prev => {
-          // Stop recording if we've reached the minimum duration
-          if (prev >= minDuration) {
-            stopRecording();
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, 1000);
+      const recordingDurationMs = (minDuration + 0.5) * 1000;
 
       await handleRecord(
         (recordedURL) => {
-          console.log('Recorded video URL set');
-          setVideoState((prev) => ({ ...prev, recordedURL }));
+          setRecordingState(prev => ({ ...prev, recordedURL, isProcessing: true }));
         },
         (autotunedURL) => {
-          console.log('Autotuned video URL set');
-          const finalURL = isDrum ? videoState.recordedURL : autotunedURL;
-          setVideoState((prev) => {
-            if (prev.autotunedURL !== finalURL) {
-              return { ...prev, autotunedURL: finalURL };
-            }
-            return prev;
-          });
+          const finalURL = isDrum ? recordingState.recordedURL : autotunedURL;
+          setRecordingState(prev => ({
+            ...prev,
+            autotunedURL: finalURL,
+            isProcessing: false
+          }));
         },
         !isDrum && isAutotuneEnabled,
         recordingDurationMs
       );
     } catch (error) {
       console.error('Recording failed:', error);
-      setIsProcessing(false);
+      setRecordingState(prev => ({
+        ...prev,
+        isProcessing: false,
+        isRecording: false,
+      }));
     }
-  };
+  }, [cleanupMediaStream, isDrum, isAutotuneEnabled, minDuration]);
 
   const stopRecording = useCallback(() => {
-    console.log('Stopping recording at duration:', recordingDuration);
+    console.log('Stopping recording at duration:', recordingState.recordingDuration);
     
     if (recordingTimer.current) {
       clearInterval(recordingTimer.current);
       recordingTimer.current = null;
     }
-  
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-  
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-  
-    setIsRecording(false);
-  }, [recordingDuration]);
+    
+    cleanupMediaStream();
+    setRecordingState(prev => ({ ...prev, isRecording: false }));
+  }, [recordingState.recordingDuration, cleanupMediaStream, recordingTimer]);
 
   const handleReRecord = useCallback(() => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setVideoState({ recordedURL: null, autotunedURL: null });
-    setIsRecording(false);
-  }, []);
+    cleanupMediaStream();
+    setRecordingState(prev => ({
+      ...prev,
+      recordedURL: null,
+      autotunedURL: null,
+      isRecording: false,
+      isProcessing: false,
+      recordingDuration: 0
+    }));
+  }, [cleanupMediaStream]);
 
   const handleTrimComplete = (trimmedVideoUrl) => {
-    setVideoState(prev => ({ ...prev, autotunedURL: trimmedVideoUrl }));
+    setRecordingState(prev => ({ ...prev, autotunedURL: trimmedVideoUrl }));
     setShowTrimmer(false);
     onVideoReady?.(trimmedVideoUrl, instrument);
   };
@@ -228,13 +247,13 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
       return;
     }
   
-    setIsProcessing(true);
+    setRecordingState(prev => ({ ...prev, isProcessing: true }));
     try {
       const uploadedVideoUrl = URL.createObjectURL(file);
       
       // If it's a drum track or autotune is disabled, use the uploaded video directly
       if (isDrum || !isAutotuneEnabled) {
-        setVideoState({
+        setRecordingState({
           recordedURL: uploadedVideoUrl,
           autotunedURL: uploadedVideoUrl
         });
@@ -242,13 +261,13 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
         onVideoReady?.(uploadedVideoUrl, instrument);
       } else {
         // Handle autotune processing for uploaded video
-        setVideoState(prev => ({ ...prev, recordedURL: uploadedVideoUrl }));
+        setRecordingState(prev => ({ ...prev, recordedURL: uploadedVideoUrl }));
         
         // Pass instrument to handleUploadedVideoAutotune
         await handleUploadedVideoAutotune(
           file,
           (autotunedURL) => {
-            setVideoState(prev => ({ ...prev, autotunedURL }));
+            setRecordingState(prev => ({ ...prev, autotunedURL }));
             // Explicitly pass the instrument parameter to onVideoReady
             onVideoReady?.(autotunedURL, instrument);
           },
@@ -259,29 +278,34 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
       console.error('Error processing uploaded video:', error);
       alert('Failed to process the uploaded video');
     } finally {
-      setIsProcessing(false);
+      setRecordingState(prev => ({ ...prev, isProcessing: false }));
     }
   };
 
   const renderVideo = () => {
-    if (isRecording) {
+    if (recordingState.isRecording) {
       return (
-        <video
-          ref={videoRef}
-          className='video-element'
-          muted
-          autoPlay
-          playsInline
-        ></video>
+        <div className="video-container">
+          <video
+            ref={videoRef}
+            className='video-element'
+            muted
+            autoPlay
+            playsInline
+          ></video>
+          <div className="recording-duration">
+            Recording: {recordingState.recordingDuration}s / {minDuration}s minimum
+          </div>
+        </div>
       );
     }
 
-    if (videoState.autotunedURL) {
+    if (recordingState.autotunedURL) {
       return (
         <video
-          key={videoState.autotunedURL}
+          key={recordingState.autotunedURL}
           ref={showTrimmer ? videoRef : null}
-          src={videoState.autotunedURL}
+          src={recordingState.autotunedURL}
           className='video-element'
           controls={!showTrimmer}
           autoPlay
@@ -291,10 +315,10 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
       );
     }
 
-    if (videoState.recordedURL) {
+    if (recordingState.recordedURL) {
       return (
         <video
-          src={videoState.recordedURL}
+          src={recordingState.recordedURL}
           className='video-element'
           controls
           autoPlay
@@ -350,16 +374,17 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
           </div>
         ) : (
           <ControlButtons
-            isRecording={isRecording}
-            hasRecordedVideo={!!videoState.recordedURL}
-            onStartRecording={() => setIsRecording(true)}
+            isRecording={recordingState.isRecording}
+            hasRecordedVideo={!!recordingState.recordedURL}
+            onStartRecording={startRecording}
             onStopRecording={stopRecording}
             onReRecord={handleReRecord}
+            disabled={recordingState.isCountingDown} // Add this prop
             instrument={instrumentName} // Pass the string name instead of object
           />
         )}
   
-        {videoState.autotunedURL && !isRecording && (
+        {recordingState.autotunedURL && !recordingState.isRecording && (
           <button onClick={() => setShowTrimmer(!showTrimmer)}>
             {showTrimmer ? 'Hide Trimmer' : 'Trim Video'}
           </button>
@@ -380,17 +405,17 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
     <>
       <div className='recorder-wrapper' style={style}>
         <div className='video-container'>
-          {showCountdown && !isRecording && !isUploadMode && (
+          {recordingState.showCountdown && !recordingState.isRecording && !isUploadMode && (
             <CountdownTimer 
               duration={countdownDuration} 
               onComplete={handleCountdownComplete} 
             />
           )}
           {renderVideo()}
-          {isProcessing && <LoadingSpinner />}
+          {recordingState.isProcessing && <LoadingSpinner />}
         </div>
         
-        {showTrimmer && videoState.autotunedURL && (
+        {showTrimmer && recordingState.autotunedURL && (
           <div className="trim-controls-container">
             <div className="trim-slider">
               <input
@@ -419,7 +444,7 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
           </div>
         )}
         
-        {isRecording && (
+        {recordingState.isRecording && (
           <div className="recording-duration" style={{
             position: 'absolute',
             top: '10px',
@@ -430,14 +455,14 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
             borderRadius: '4px',
             zIndex: 1000
           }}>
-            Recording: {recordingDuration}s / {minDuration}s minimum
+            Recording: {recordingState.recordingDuration}s / {minDuration}s minimum
           </div>
         )}
       </div>
       {renderControls()}
-      {showTrimmer && videoState.autotunedURL && (
+      {showTrimmer && recordingState.autotunedURL && (
         <VideoTrimmer
-          videoUrl={videoState.autotunedURL}
+          videoUrl={recordingState.autotunedURL}
           onTrimComplete={handleTrimComplete}
         />
       )}
