@@ -54,7 +54,7 @@ const useRecordingState = (currentVideo) => {
   };
 };
 
-const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVideo }) => {
+const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, minDuration, currentVideo, audioEnabled }) => {
   const {
     videoRef,
     mediaStreamRef,
@@ -153,58 +153,79 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
     }
   };
 
+  const handleRecord = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+      
+      return new Promise((resolve) => {
+        const mediaRecorder = new MediaRecorder(stream);
+        const chunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) {
+            chunks.push(e.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          console.log('Created video blob:', blob.size); // Debug log
+          stream.getTracks().forEach(track => track.stop());
+          onRecordingComplete(blob, instrument); // Pass both blob and instrument
+          resolve(blob);
+        };
+
+        mediaRecorder.start();
+        setTimeout(() => mediaRecorder.stop(), minDuration * 1000);
+      });
+    } catch (error) {
+      console.error('Recording failed:', error);
+      throw error;
+    }
+  }, [minDuration, instrument, onRecordingComplete]);
+
   const handleCountdownComplete = useCallback(async () => {
     setRecordingState(prev => ({
       ...prev,
       showCountdown: false,
       isCountingDown: false,
-      isProcessing: false,
-      recordingDuration: 0,
+      isRecording: true,
     }));
 
     try {
-      cleanupMediaStream();
-      
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
-      mediaStreamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.muted = true;
-        await videoRef.current.play();
-      }
-
-      setRecordingState(prev => ({ ...prev, isRecording: true }));
-
-      const recordingDurationMs = (minDuration + 0.5) * 1000;
-
-      await handleRecord(
-        (recordedURL) => {
-          setRecordingState(prev => ({ ...prev, recordedURL, isProcessing: true }));
-        },
-        (autotunedURL) => {
-          const finalURL = isDrum ? recordingState.recordedURL : autotunedURL;
-          setRecordingState(prev => ({
-            ...prev,
-            autotunedURL: finalURL,
-            isProcessing: false
-          }));
-        },
-        !isDrum && isAutotuneEnabled,
-        recordingDurationMs
-      );
+      const blob = await handleRecord();
+      setRecordingState(prev => ({
+        ...prev,
+        isRecording: false,
+        recordedURL: URL.createObjectURL(blob)
+      }));
     } catch (error) {
       console.error('Recording failed:', error);
       setRecordingState(prev => ({
         ...prev,
-        isProcessing: false,
         isRecording: false,
       }));
     }
-  }, [cleanupMediaStream, isDrum, isAutotuneEnabled, minDuration]);
+  }, [handleRecord]);
+
+  const handleRecordingFinished = useCallback(async (blob) => {
+    if (!(blob instanceof Blob)) {
+      console.error('Invalid recording blob');
+      return;
+    }
+
+    console.log('Recording finished, blob size:', blob.size); // Debug log
+
+    // Ensure we're passing both the blob and instrument
+    onRecordingComplete(blob, instrument);
+    
+    // Create URL for preview
+    const url = URL.createObjectURL(blob);
+    onVideoReady?.(url, instrument);
+  }, [instrument, onRecordingComplete, onVideoReady]);
 
   const stopRecording = useCallback(() => {
     console.log('Stopping recording at duration:', recordingState.recordingDuration);
@@ -216,7 +237,9 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
     
     cleanupMediaStream();
     setRecordingState(prev => ({ ...prev, isRecording: false }));
-  }, [recordingState.recordingDuration, cleanupMediaStream, recordingTimer]);
+    
+    // The mediaRecorder.onstop event will trigger handleRecordingFinished
+  }, [recordingState.recordingDuration, cleanupMediaStream]);
 
   const handleReRecord = useCallback(() => {
     cleanupMediaStream();
@@ -281,6 +304,28 @@ const VideoRecorder = ({ style, instrument, onVideoReady, minDuration, currentVi
       setRecordingState(prev => ({ ...prev, isProcessing: false }));
     }
   };
+
+  const playSampleSound = useCallback(async () => {
+    if (!audioEnabled) {
+      console.log('Audio context not initialized');
+      return;
+    }
+
+    try {
+      // Your existing sample sound code
+      // ...
+    } catch (error) {
+      console.error('Error playing sample:', error);
+    }
+  }, [audioEnabled]); // Add audioEnabled to dependencies
+
+  useEffect(() => {
+    // Remove any Tone.js initialization from here
+    // Only handle cleanup if needed
+    return () => {
+      // Your cleanup code
+    };
+  }, []);
 
   const renderVideo = () => {
     if (recordingState.isRecording) {

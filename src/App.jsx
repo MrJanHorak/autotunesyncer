@@ -106,90 +106,203 @@ const App = () => {
   const [longestNotes, setLongestNotes] = useState({});
   const [instrumentVideos, setInstrumentVideos] = useState({});
   const [readyForComposition, setReadyForComposition] = useState(false);
+  const [isAudioContextReady, setIsAudioContextReady] = useState(false);
 
-  const handleRecordingComplete = (blob, instrument, trackIndex) => {
-    console.log('Recording complete:', instrument, blob);
+  // Add a useEffect to monitor video recording progress
+  useEffect(() => {
+    if (!instruments.length) return;
+    
+    const allInstrumentKeys = instruments.map(instrument => 
+      instrument.isDrum ? `drum_${instrument.group}` : normalizeInstrumentName(instrument.name)
+    );
+    
+    const recordedCount = Object.keys(videoFiles).length;
+    const isComplete = recordedCount === allInstrumentKeys.length;
+
+    // Batch state updates
+    if (recordedCount !== recordedVideosCount) {
+      setRecordedVideosCount(recordedCount);
+    }
+    
+    if (isComplete !== readyForComposition) {
+      setReadyForComposition(isComplete);
+      setIsReadyToCompose(isComplete);
+    }
+  }, [instruments, videoFiles, recordedVideosCount, readyForComposition]);
+
+  // Memoize checkCompositionReady
+  const checkCompositionReady = useCallback((videos) => {
+    if (!instruments.length) return false;
+    
+    const requiredInstruments = new Set(
+      instruments.map(instrument => 
+        instrument.isDrum ? `drum_${instrument.group}` : normalizeInstrumentName(instrument.name)
+      )
+    );
+
+    return Array.from(requiredInstruments).every(inst => 
+      videos.hasOwnProperty(inst)
+    );
+  }, [instruments]);
+
+  // Update composition ready state when videos change
+  useEffect(() => {
+    const isReady = checkCompositionReady(videoFiles);
+    if (isReady !== readyForComposition) {
+      setReadyForComposition(isReady);
+      setIsReadyToCompose(isReady);
+    }
+  }, [videoFiles, checkCompositionReady, readyForComposition]);
+
+  // Add this effect to initialize audio context on first user interaction
+  useEffect(() => {
+    const initAudioContext = async () => {
+      try {
+        await Tone.start();
+        const context = Tone.context;
+        await context.resume();
+        setAudioContextStarted(true);
+        setIsAudioContextReady(true);
+        console.log('Audio context initialized successfully');
+      } catch (error) {
+        console.error('Failed to initialize audio context:', error);
+        setError('Failed to initialize audio context: ' + error.message);
+      }
+    };
+
+    // Add click handler to document
+    const handleClick = () => {
+      if (!isAudioContextReady) {
+        initAudioContext();
+      }
+    };
+
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, [isAudioContextReady]);
+
+  // Update handleRecordingComplete to use the blob directly
+  const handleRecordingComplete = useCallback((blob, instrument) => {
     if (!(blob instanceof Blob)) {
       console.error('Invalid blob:', blob);
       return;
     }
   
-    // Handle drum recordings
     const key = instrument.isDrum ? 
       `drum_${instrument.group}` : 
       normalizeInstrumentName(instrument.name);
   
-    const formData = new FormData();
-    formData.append(`videos[${key}]`, blob);
-  
-    setVideoFiles(prev => ({
+    console.log('Recording complete for instrument:', key, 'blob size:', blob.size);
+    
+    // Update video files
+    setVideoFiles(prev => {
+      const newFiles = { ...prev, [key]: blob };
+      console.log('Updated video files:', Object.keys(newFiles));
+      return newFiles;
+    });
+
+    // Create object URL for preview
+    const videoUrl = URL.createObjectURL(blob);
+    setInstrumentVideos(prev => ({
       ...prev,
-      [key]: blob
+      [key]: videoUrl
     }));
-    setRecordedVideosCount(prev => prev + 1);
-  };
 
-  // Add useEffect to handle the state update
-  useEffect(() => {
-    if (recordedVideosCount + 1 === instruments.length) {
+    // Explicitly trigger composition check
+    const updatedVideoCount = Object.keys(videoFiles).length + 1;
+    setRecordedVideosCount(updatedVideoCount);
+    
+    if (updatedVideoCount === instruments.length) {
       setIsReadyToCompose(true);
+      setReadyForComposition(true);
     }
-  }, [recordedVideosCount, instruments.length]);
+  }, [instruments.length, videoFiles]);
 
-  const handleMidiUpload = (acceptedFiles) => {
+  // Remove the separate monitoring effects and combine them into one
+  useEffect(() => {
+    if (!instruments.length) return;
+
+    const videoCount = Object.keys(videoFiles).length;
+    console.log('Current videos:', Object.keys(videoFiles));
+    console.log('Video count:', videoCount, 'Required:', instruments.length);
+
+    const isComplete = videoCount === instruments.length;
+    setRecordedVideosCount(videoCount);
+    setReadyForComposition(isComplete);
+    setIsReadyToCompose(isComplete);
+  }, [instruments, videoFiles]);
+
+  const handleMidiUpload = async (acceptedFiles) => {
     const file = acceptedFiles[0];
-    setMidiFile(file);
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const arrayBuffer = e.target.result;
-      try {
-        const midi = new Midi(arrayBuffer);
-        setParsedMidiData(midi);
-        
-        // Extract all instruments including drum groups
-        const instrumentSet = new Set();
-        midi.tracks.forEach(track => {
-          if (isDrumTrack(track)) {
-            // Add individual drum instruments
-            extractDrumInstruments(track).forEach(drumInst => {
-              instrumentSet.add(JSON.stringify(drumInst));
-            });
-          } else {
-            // Add regular instruments
-            instrumentSet.add(JSON.stringify(track.instrument));
-          }
-        });
-
-        const instrumentData = Array.from(instrumentSet).map(item => JSON.parse(item));
-        setInstruments(instrumentData);
-
-        // Calculate longest notes including drum groups
-        const durations = calculateLongestNotes(midi);
-        setLongestNotes(durations);
-
-        // Create mapping including drum groups
-        const trackMap = {};
-        midi.tracks.forEach((track, index) => {
-          if (isDrumTrack(track)) {
-            // Map each drum group to this track
-            extractDrumInstruments(track).forEach(drumInst => {
-              trackMap[drumInst.name] = [index];
-            });
-          } else {
-            const instrumentName = track.instrument.name;
-            if (!trackMap[instrumentName]) {
-              trackMap[instrumentName] = [];
-            }
-            trackMap[instrumentName].push(index);
-          }
-        });
-        setInstrumentTrackMap(trackMap);
-      } catch (error) {
-        console.error('Error parsing MIDI file:', error);
+    
+    try {
+      // First, initialize audio context if not started
+      if (!audioContextStarted) {
+        // Create a temporary user interaction to start audio context
+        const tempContext = new (window.AudioContext || window.webkitAudioContext)();
+        await tempContext.resume();
+        await Tone.start();
+        setAudioContextStarted(true);
       }
-    };
-    reader.readAsArrayBuffer(file);
+  
+      setMidiFile(file);
+      const reader = new FileReader();
+      
+      reader.onload = (e) => {
+        const arrayBuffer = e.target.result;
+        try {
+          const midi = new Midi(arrayBuffer);
+          setParsedMidiData(midi);
+          
+          // Extract all instruments including drum groups
+          const instrumentSet = new Set();
+          midi.tracks.forEach(track => {
+            if (isDrumTrack(track)) {
+              // Add individual drum instruments
+              extractDrumInstruments(track).forEach(drumInst => {
+                instrumentSet.add(JSON.stringify(drumInst));
+              });
+            } else {
+              // Add regular instruments
+              instrumentSet.add(JSON.stringify(track.instrument));
+            }
+          });
+  
+          const instrumentData = Array.from(instrumentSet).map(item => JSON.parse(item));
+          setInstruments(instrumentData);
+  
+          // Calculate longest notes including drum groups
+          const durations = calculateLongestNotes(midi);
+          setLongestNotes(durations);
+  
+          // Create mapping including drum groups
+          const trackMap = {};
+          midi.tracks.forEach((track, index) => {
+            if (isDrumTrack(track)) {
+              // Map each drum group to this track
+              extractDrumInstruments(track).forEach(drumInst => {
+                trackMap[drumInst.name] = [index];
+              });
+            } else {
+              const instrumentName = track.instrument.name;
+              if (!trackMap[instrumentName]) {
+                trackMap[instrumentName] = [];
+              }
+              trackMap[instrumentName].push(index);
+            }
+          });
+          setInstrumentTrackMap(trackMap);
+        } catch (error) {
+          console.error('Error parsing MIDI file:', error);
+          setError('Error parsing MIDI file: ' + error.message);
+        }
+      };
+  
+      reader.readAsArrayBuffer(file);
+    } catch (error) {
+      console.error('Error initializing audio:', error);
+      setError('Error initializing audio: ' + error.message);
+    }
   };
 
   const extractInstruments = (obj, instruments = new Set()) => {
@@ -205,51 +318,21 @@ const App = () => {
     return instruments;
   };
 
-  const startAudioContext = async () => {
-    try {
-      await Tone.start();
-      setAudioContextStarted(true);
-    } catch (err) {
-      console.error('Failed to start audio context:', err);
-      setError('Failed to initialize audio. Please try again.');
-    }
-  };
-
-  // Add this function to check if all required videos are ready
-  const checkCompositionReady = useCallback((videos) => {
-    if (!instruments.length) return false;
-    
-    const requiredInstruments = new Set(
-      instruments.map(instrument => 
-        instrument.isDrum ? `drum_${instrument.group}` : instrument.name
-      )
-    );
-
-    const availableVideos = new Set(Object.keys(videos));
-    const isReady = Array.from(requiredInstruments).every(inst => 
-      availableVideos.has(inst)
-    );
-
-    setReadyForComposition(isReady);
-    return isReady;
-  }, [instruments]);
-
-  // Update the handleVideoReady function
+  // Memoize handleVideoReady to prevent unnecessary re-renders
   const handleVideoReady = useCallback((videoUrl, instrument) => {
-    const instrumentKey = instrument.isDrum ? `drum_${instrument.group}` : instrument.name;
+    const instrumentKey = instrument.isDrum ? 
+      `drum_${instrument.group}` : 
+      normalizeInstrumentName(instrument.name);
     
-    setVideoFiles(prev => {
-      const newFiles = { ...prev, [instrumentKey]: videoUrl };
-      // Check if we're ready for composition after adding new video
-      checkCompositionReady(newFiles);
-      return newFiles;
+    // Only update if the URL has changed
+    setInstrumentVideos(prev => {
+      if (prev[instrumentKey] === videoUrl) return prev;
+      return {
+        ...prev,
+        [instrumentKey]: videoUrl
+      };
     });
-    
-    setInstrumentVideos(prev => ({
-      ...prev,
-      [instrumentKey]: videoUrl
-    }));
-  }, [checkCompositionReady]);
+  }, []); // Empty dependency array since this function doesn't depend on any props or state
 
   // Add composition section render
   const renderCompositionSection = () => {
@@ -274,6 +357,13 @@ const App = () => {
 
   return (
     <div>
+      {/* Add a message to inform users about audio context */}
+      {!audioContextStarted && (
+        <div className="bg-yellow-100 p-4 rounded mb-4">
+          Click anywhere on the page to initialize audio system
+        </div>
+      )}
+      
       <h1>Upload MIDI File</h1>
       <Dropzone onDrop={handleMidiUpload}>
         {({ getRootProps, getInputProps }) => (
@@ -323,23 +413,27 @@ const App = () => {
               onVideoReady={(url) => handleVideoReady(url, instrument)}
               minDuration={recommendedDuration}
               currentVideo={instrumentVideos[instrumentName]}
+              audioEnabled={audioContextStarted}
             />
           </div>
         );
       })}
 
-      {console.log('Recorded Videos Count:', recordedVideosCount)}
-      {console.log('Number of Tracks:', parsedMidiData?.tracks.length)}
-
       {isReadyToCompose && (
-        <div>
-          <VideoComposer videoFiles={videoFiles} midiData={parsedMidiData} />
+        <div className="mt-4 bg-green-100 p-4 rounded">
+          <h2 className="text-xl font-bold mb-2">Ready to Compose</h2>
+          <p>Recorded {recordedVideosCount} videos out of {instruments.length} instruments</p>
+          <VideoComposer 
+            videoFiles={videoFiles} 
+            midiData={parsedMidiData}
+            instrumentTrackMap={instrumentTrackMap} // Add this prop
+          />
         </div>
       )}
 
-      {!audioContextStarted && (
-        <div>
-          <button onClick={startAudioContext}>Start Audio Context</button>
+      {!isReadyToCompose && instruments.length > 0 && (
+        <div className="mt-4 bg-yellow-100 p-4 rounded">
+          <p>Recording Progress: {recordedVideosCount} / {instruments.length}</p>
         </div>
       )}
 
