@@ -21,6 +21,7 @@ const useRecordingState = (currentVideo) => {
     recordedURL: null,
     autotunedURL: currentVideo || null,
     isCountingDown: false, // Add this new state
+    lastVideoSource: null, // 'recorded' or 'uploaded'
   });
 
   const cleanupMediaStream = useCallback(() => {
@@ -88,9 +89,53 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
     return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
   };
   
-  const handleTrim = () => {
-    // Implement trim logic here
-    console.log('Trim applied from', startTime, 'to', endTime);
+  const handleTrim = async () => {
+    if (!videoRef.current) return;
+
+    const trimmedVideo = await trimVideo(videoRef.current, startTime, endTime);
+    if (trimmedVideo) {
+      // Update state with trimmed video
+      setRecordingState(prev => ({
+        ...prev,
+        recordedURL: URL.createObjectURL(trimmedVideo),
+        autotunedURL: URL.createObjectURL(trimmedVideo),
+        recordingDuration: endTime - startTime
+      }));
+
+      // Send trimmed video to backend
+      onRecordingComplete(trimmedVideo, instrument);
+      onVideoReady?.(URL.createObjectURL(trimmedVideo), instrument);
+      setShowTrimmer(false);
+    }
+  };
+
+  // Helper function to trim video (you'll need to implement this)
+  const trimVideo = async (videoElement, start, end) => {
+    // Implementation depends on your video processing library
+    // This is a placeholder - you'll need to implement actual video trimming
+    try {
+      // Example using MediaRecorder to record the video element playing
+      const stream = videoElement.captureStream();
+      const mediaRecorder = new MediaRecorder(stream);
+      const chunks = [];
+
+      return new Promise((resolve) => {
+        mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+        mediaRecorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+
+        videoElement.currentTime = start;
+        videoElement.play();
+        mediaRecorder.start();
+
+        setTimeout(() => {
+          mediaRecorder.stop();
+          videoElement.pause();
+        }, (end - start) * 1000);
+      });
+    } catch (error) {
+      console.error('Error trimming video:', error);
+      return null;
+    }
   };
 
   useEffect(() => {
@@ -218,6 +263,11 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
     }
 
     console.log('Recording finished, blob size:', blob.size); // Debug log
+    
+    setRecordingState(prev => ({
+      ...prev,
+      lastVideoSource: 'recorded'
+    }));
 
     // Ensure we're passing both the blob and instrument
     onRecordingComplete(blob, instrument);
@@ -274,6 +324,23 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
     try {
       const uploadedVideoUrl = URL.createObjectURL(file);
       
+      // Create a temporary video element to get duration
+      const video = document.createElement('video');
+      video.src = uploadedVideoUrl;
+      
+      await new Promise((resolve) => {
+        video.addEventListener('loadedmetadata', () => {
+          const duration = Math.round(video.duration);
+          setRecordingState(prev => ({ 
+            ...prev, 
+            recordingDuration: duration,
+            recordedURL: uploadedVideoUrl,
+            lastVideoSource: 'uploaded'
+          }));
+          resolve();
+        });
+      });
+
       // If it's a drum track or autotune is disabled, use the uploaded video directly
       if (isDrum || !isAutotuneEnabled) {
         setRecordingState({
@@ -282,6 +349,7 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
         });
         // Explicitly pass the instrument parameter to onVideoReady
         onVideoReady?.(uploadedVideoUrl, instrument);
+        handleRecordingFinished(file); // Use the original file
       } else {
         // Handle autotune processing for uploaded video
         setRecordingState(prev => ({ ...prev, recordedURL: uploadedVideoUrl }));
