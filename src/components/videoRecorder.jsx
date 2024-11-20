@@ -22,6 +22,7 @@ const useRecordingState = (currentVideo) => {
     autotunedURL: currentVideo || null,
     isCountingDown: false, // Add this new state
     lastVideoSource: null, // 'recorded' or 'uploaded'
+    hasVideo: !!currentVideo // Add this to track if we have a video
   });
 
   const cleanupMediaStream = useCallback(() => {
@@ -40,10 +41,11 @@ const useRecordingState = (currentVideo) => {
       if (recordingTimer.current) {
         clearInterval(recordingTimer.current);
       }
-      if (recordingState.recordedURL) URL.revokeObjectURL(recordingState.recordedURL);
-      if (recordingState.autotunedURL) URL.revokeObjectURL(recordingState.autotunedURL);
+      // Remove or comment out the following lines
+      // if (recordingState.recordedURL) URL.revokeObjectURL(recordingState.recordedURL);
+      // if (recordingState.autotunedURL) URL.revokeObjectURL(recordingState.autotunedURL);
     };
-  }, [cleanupMediaStream, recordingState.recordedURL, recordingState.autotunedURL]);
+  }, [cleanupMediaStream]);
 
   return {
     videoRef,
@@ -65,7 +67,7 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
     cleanupMediaStream,
   } = useRecordingState(currentVideo);
 
-  const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(true);
+  const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(false);
   const [isDrum] = useState(() => isDrumTrack(instrument));
   const [isUploadMode, setIsUploadMode] = useState(false);
   const [showTrimmer, setShowTrimmer] = useState(false);
@@ -144,16 +146,23 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
     }
   }, [recordingState.autotunedURL, recordingState.isProcessing, instrument, onVideoReady]);
 
-  // Update videoState when currentVideo changes
+  // Add a ref to keep track of the previous currentVideo
+  const prevCurrentVideo = useRef(currentVideo);
+
+  // Modify the useEffect that calls onVideoReady
   useEffect(() => {
-    if (currentVideo && currentVideo !== recordingState.autotunedURL) {
-      setRecordingState(prev => ({
-        ...prev,
-        autotunedURL: currentVideo,
-        isProcessing: false
-      }));
+    if (
+      recordingState.autotunedURL &&
+      !recordingState.isProcessing &&
+      recordingState.autotunedURL !== prevAutotunedURL.current
+    ) {
+      onVideoReady?.(recordingState.autotunedURL, instrument);
+      prevAutotunedURL.current = recordingState.autotunedURL;
     }
-  }, [currentVideo]);
+  }, [recordingState.autotunedURL, recordingState.isProcessing, instrument, onVideoReady]);
+
+  // Add a ref to keep track of the previous autotunedURL
+  const prevAutotunedURL = useRef(recordingState.autotunedURL);
 
   useEffect(() => {
     // When recording starts, initialize the recording timer
@@ -292,6 +301,14 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
   }, [recordingState.recordingDuration, cleanupMediaStream]);
 
   const handleReRecord = useCallback(() => {
+    // Revoke existing blob URLs
+    if (recordingState.recordedURL) {
+      URL.revokeObjectURL(recordingState.recordedURL);
+    }
+    if (recordingState.autotunedURL) {
+      URL.revokeObjectURL(recordingState.autotunedURL);
+    }
+
     cleanupMediaStream();
     setRecordingState(prev => ({
       ...prev,
@@ -299,9 +316,10 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
       autotunedURL: null,
       isRecording: false,
       isProcessing: false,
-      recordingDuration: 0
+      recordingDuration: 0,
+      hasVideo: false
     }));
-  }, [cleanupMediaStream]);
+  }, [cleanupMediaStream, recordingState.recordedURL, recordingState.autotunedURL]);
 
   const handleTrimComplete = (trimmedVideoUrl) => {
     setRecordingState(prev => ({ ...prev, autotunedURL: trimmedVideoUrl }));
@@ -320,6 +338,14 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
       return;
     }
   
+    // Revoke existing blob URLs before setting new ones
+    if (recordingState.recordedURL) {
+      URL.revokeObjectURL(recordingState.recordedURL);
+    }
+    if (recordingState.autotunedURL) {
+      URL.revokeObjectURL(recordingState.autotunedURL);
+    }
+
     setRecordingState(prev => ({ ...prev, isProcessing: true }));
     try {
       const uploadedVideoUrl = URL.createObjectURL(file);
@@ -335,7 +361,8 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
             ...prev, 
             recordingDuration: duration,
             recordedURL: uploadedVideoUrl,
-            lastVideoSource: 'uploaded'
+            lastVideoSource: 'uploaded',
+            hasVideo: true // Mark that we have a video
           }));
           resolve();
         });
@@ -455,6 +482,9 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
       
     const uploadId = `video-upload-${instrumentName}`; // Use normalized name for ID
   
+    const hasValidVideo = recordingState.hasVideo && 
+      (recordingState.recordingDuration >= minDuration || recordingState.lastVideoSource === 'uploaded');
+  
     return (
       <div className='controls-section'>
         <div className="mode-selector">
@@ -482,13 +512,19 @@ const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, m
               style={{ display: 'none' }}
             />
             <label htmlFor={uploadId} className="upload-button">
-              Choose Video File for {instrumentName} {/* Use the display name */}
+              {recordingState.hasVideo ? 'Replace Video' : 'Choose Video File'} for {instrumentName}
             </label>
+            {recordingState.recordingDuration > 0 && (
+              <div className="video-duration">
+                Duration: {recordingState.recordingDuration}s
+                {minDuration > 0 && ` / ${minDuration}s minimum`}
+              </div>
+            )}
           </div>
         ) : (
           <ControlButtons
             isRecording={recordingState.isRecording}
-            hasRecordedVideo={!!recordingState.recordedURL}
+            hasRecordedVideo={hasValidVideo}
             onStartRecording={startRecording}
             onStopRecording={stopRecording}
             onReRecord={handleReRecord}
