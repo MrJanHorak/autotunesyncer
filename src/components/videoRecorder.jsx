@@ -60,6 +60,7 @@ const useRecordingState = (currentVideo) => {
 const VideoRecorder = ({ onRecordingComplete, style, instrument, onVideoReady, minDuration, currentVideo, audioEnabled }) => {
   const {
     videoRef,
+    // eslint-disable-next-line no-unused-vars
     mediaStreamRef,
     recordingTimer,
     recordingState,
