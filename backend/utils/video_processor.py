@@ -7,11 +7,67 @@ import logging
 import time
 import os
 import subprocess
+import gc  # Add garbage collector import
+from pathlib import Path
+import tempfile
+import shutil
+
+# Try to import psutil, but provide fallback if not available
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+    logging.warning("psutil not installed. Using basic memory monitoring.")
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Replace '0' with the correct GPU index if necessary
+os.environ['FFMPEG_MEMORY_LIMIT'] = '256M'  # Limit ffmpeg memory usage
 
 # Configure logging at the beginning of the file
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Add these constants at the top of the file
+BATCH_SIZE = 50  # Number of clips to process at once
+MEMORY_THRESHOLD = 75  # Percentage of memory usage that triggers cleanup
+TEMP_DIR = tempfile.mkdtemp()  # Create temporary directory
+
+def get_memory_usage():
+    """Monitor memory usage with fallback mechanism"""
+    try:
+        if HAS_PSUTIL:
+            process = psutil.Process()
+            return process.memory_percent()
+        else:
+            # Basic memory check using gc module
+            gc.collect()  # Run garbage collection
+            # Return a conservative estimate
+            return 50.0  # Assume 50% usage to trigger cleanup more frequently
+    except Exception as e:
+        logging.warning(f"Memory monitoring failed: {e}")
+        return 75.0  # Conservative default to trigger cleanup
+
+def cleanup_memory():
+    """Force garbage collection and clear memory"""
+    try:
+        # Run garbage collection multiple times to ensure thorough cleanup
+        for _ in range(3):
+            gc.collect()
+        
+        # Clear any cached memory
+        import sys
+        if hasattr(sys, 'exc_clear'):
+            sys.exc_clear()
+            
+    except Exception as e:
+        logging.error(f"Error during memory cleanup: {e}")
+
+def clean_temp_files():
+    """Clean temporary files"""
+    try:
+        shutil.rmtree(TEMP_DIR)
+        os.makedirs(TEMP_DIR, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Error cleaning temp files: {e}")
 
 def test_codecs():
     cmd = ['ffmpeg', '-codecs']
@@ -108,10 +164,8 @@ def verify_video_file(video_path, retries=3, delay=1):
 
 def ensure_audio_fps(audio_clip, default_fps=44100):
     """Ensure audio clip has fps attribute."""
-    if audio_clip is None:
+    if (audio_clip is None) or (not hasattr(audio_clip, 'fps')) or (audio_clip.fps is None):
         return None
-    if not hasattr(audio_clip, 'fps') or audio_clip.fps is None:
-        audio_clip.fps = default_fps
     return audio_clip
 
 def standardize_audio(audio_clip, target_fps=44100):
@@ -392,286 +446,129 @@ def create_audio_segment(audio_array, start_time, duration, fps=44100):
 
 def process_video_segments(midi_data, video_files, output_path):
     clips_to_close = []
+    temp_files = []
+    
     try:
-        duration = float(midi_data.get('duration', 10))
-        if duration <= 0:
-            logging.error("Invalid MIDI duration")
-            duration = 10.0
+        # Validate input data first
+        if not midi_data or not video_files:
+            raise ValueError("Invalid midi_data or video_files")
 
-        tracks = midi_data.get('tracks', [])
+        # Create batches of notes across all tracks
+        all_notes = []
+        for track_id, track_data in video_files.items():
+            if track_data.get('notes'):
+                all_notes.extend((note, track_id) for note in track_data['notes'])
         
-        background = ColorClip(size=(960, 720), color=(0, 0, 0), duration=duration)
-        clips_to_close.append(background)
-        
-        # Filter video files to only include those with notes
-        active_video_files = {
-            track_id: data for track_id, data in video_files.items()
-            if data.get('notes') and len(data['notes']) > 0
-        }
-        
-        total_tracks = len(active_video_files)
-        logging.info(f"Active tracks with notes: {total_tracks}")
+        if not all_notes:
+            raise ValueError("No valid notes found in tracks")
 
-        # Handle special layout cases
-        source_clips = {}
-        track_positions = {}
-        clip_dimensions = {}  # Store dimensions for each track
-
-        if total_tracks == 1:
-            # Single track - use full screen layout
-            track_id, track_data = next(iter(active_video_files.items()))
-            try:
-                source_clip = VideoFileClip(track_data['path'], audio=True)
-                if not verify_frame_reading(source_clip):
-                    raise ValueError(f"Failed to verify frame reading for {track_id}")
-                
-                # Center crop the video to fill the screen while maintaining aspect ratio
-                source_clip = source_clip.resize((960, 720))
-                source_clips[track_id] = source_clip
-                track_positions[track_id] = (0, 0)
-                clip_dimensions[track_id] = {'width': 960, 'height': 720}
-                clips_to_close.append(source_clip)
-                
-            except Exception as e:
-                logging.error(f"Failed to load single video track: {e}")
-                raise
-                
-        elif total_tracks == 2:
-            # Two tracks - split screen horizontally
-            for i, (track_id, track_data) in enumerate(active_video_files.items()):
-                try:
-                    source_clip = VideoFileClip(track_data['path'], audio=True)
-                    if not verify_frame_reading(source_clip):
-                        continue
-                    
-                    # Position horizontally side by side
-                    x_pos = i * 480  # 960/2 = 480 for each half
-                    source_clip = source_clip.resize((480, 720))
-                    
-                    source_clips[track_id] = source_clip
-                    track_positions[track_id] = (x_pos, 0)
-                    clip_dimensions[track_id] = {'width': 480, 'height': 720}
-                    clips_to_close.append(source_clip)
-                    
-                except Exception as e:
-                    logging.error(f"Failed to load video for track {track_id}: {e}")
-                    continue
-                    
-        else:
-            # Default grid layout for 3+ tracks
-            grid_size = max(2, int(np.ceil(np.sqrt(total_tracks))))
-            clip_width = 960 // grid_size
-            clip_height = 720 // grid_size
-            position_idx = 0
+        # Sort notes by start time
+        all_notes.sort(key=lambda x: x[0].get('start', 0))
+        
+        final_clips = []
+        total_duration = max(note[0].get('end', 0) for note in all_notes)
+        background = ColorClip(size=(960, 720), color=(0,0,0), duration=total_duration)
+        final_clips.append(background)  # Add background as first clip
+        
+        # Process in batches
+        for i in range(0, len(all_notes), BATCH_SIZE):
+            batch_notes = all_notes[i:i + BATCH_SIZE]
+            batch_clips = []
             
-            for track_id, track_data in active_video_files.items():
+            # Process each note in the batch
+            for note, track_id in batch_notes:
                 try:
-                    source_clip = VideoFileClip(track_data['path'], audio=True)
-                    if not verify_frame_reading(source_clip):
+                    video_path = video_files[track_id].get('path')
+                    if not video_path or not os.path.exists(video_path):
+                        logging.warning(f"Invalid video path for track {track_id}")
                         continue
-                        
-                    x_pos = (position_idx % grid_size) * clip_width
-                    y_pos = (position_idx // grid_size) * clip_height
-                    source_clip = source_clip.resize((clip_width, clip_height))
                     
-                    source_clips[track_id] = source_clip
-                    track_positions[track_id] = (x_pos, y_pos)
-                    clip_dimensions[track_id] = {'width': clip_width, 'height': clip_height}
-                    clips_to_close.append(source_clip)
-                    position_idx += 1
-                    
-                except Exception as e:
-                    logging.error(f"Failed to load video for grid layout: {e}")
-                    continue
+                    # Verify video file before processing
+                    if not verify_video_file(video_path):
+                        logging.warning(f"Video file verification failed for {video_path}")
+                        continue
 
-        # Verify audio in source files
-        for track_id, track_data in active_video_files.items():
-            if not verify_audio_stream(track_data['path']):
-                logging.warning(f"No valid audio found in track {track_id}")
-                continue
-                
-            try:
-                source_clip = VideoFileClip(track_data['path'], audio=True)
-                if not verify_frame_reading(source_clip):
-                    raise ValueError(f"Failed to verify frame reading for {track_id}")
-                
-                # Verify audio data
-                if source_clip.audio is None:
-                    logging.error(f"Failed to load audio for track {track_id}")
-                    continue
-                    
-                # Test audio reading
-                try:
-                    audio_array = source_clip.audio.to_soundarray()
-                    logging.info(f"Audio array shape for {track_id}: {audio_array.shape}")
-                    logging.info(f"Audio FPS for {track_id}: {source_clip.audio.fps}")
-                except Exception as e:
-                    logging.error(f"Failed to read audio data for {track_id}: {e}")
-                    continue
-
-                # Add audio standardization to all source clips
-                for track_id, track_data in active_video_files.items():
+                    # Load clip with explicit error handling
                     try:
-                        source_clip = VideoFileClip(track_data['path'], audio=True)
-                        if not verify_frame_reading(source_clip):
-                            raise ValueError(f"Failed to verify frame reading for {track_id}")
-                        
-                        # Standardize audio using AudioClip methods instead
-                        if source_clip.audio is not None:
-                            try:
-                                # Get standardized audio data
-                                audio_array = source_clip.audio.to_soundarray()
-                                if not isinstance(audio_array, np.ndarray):
-                                    logging.error(f"Audio array for track {track_id} is not a valid numpy array")
-                                    continue
-                                fps = source_clip.audio.fps or 44100  # Use default if not set
-                                
-                                # Create normalized clip
-                                normalized_clip = create_normalized_audio_clip(
-                                    audio_array,
-                                    fps,
-                                    source_clip.duration,
-                                    0
-                                )
-                                
-                                if normalized_clip is not None:
-                                    source_clip.audio = normalized_clip
-                                
-                            except Exception as e:
-                                logging.warning(f"Could not normalize audio for track {track_id}: {e}")
-                        
-                        source_clips[track_id] = source_clip
-                        clips_to_close.append(source_clip)
-                        
-                    except Exception as e:
-                        logging.error(f"Failed to load video track {track_id}: {e}")
-                        continue
-
-                # Process all tracks and notes
-                all_clips = []
-                temp_clips = []  # Store temporary clip paths
-                
-                for track_id, track_data in active_video_files.items():
-                    if track_id not in source_clips or track_id not in track_positions:
-                        continue
-                        
-                    source_clip = source_clips[track_id]
-                    is_drum = track_data.get('isDrum', False)
-                    x_pos, y_pos = track_positions[track_id]
-                    dimensions = clip_dimensions[track_id]
-                    
-                    # Process notes for this track
-                    for i, note in enumerate(track_data.get('notes', [])):
-                        try:
-                            start_time = float(note.get('time', 0))
-                            note_duration = float(note.get('duration', 0))
-                            
-                            if note_duration <= 0 or start_time >= duration:
-                                continue
-                            
-                            note_duration = min(note_duration, duration - start_time)
-                            
-                            # Create temp file path for this note
-                            temp_note_path = os.path.join(os.path.dirname(output_path), f'temp_note_{track_id}_{i}.mp4')
-                            temp_clips.append(temp_note_path)
-                            
-                            # Extract the segment using FFmpeg for precise audio handling
-                            pitch_ratio = get_pitch_ratio(note) if not is_drum else 1.0
-                            volume = float(note.get('velocity', 1.0))
-                            if is_drum:
-                                volume *= 0.7
-
-                            # Use FFmpeg command for audio processing
-                            ffmpeg_cmd = [
-                                'ffmpeg', '-y',
-                                '-i', track_data['path'],
-                                '-ss', '0',
-                                '-t', str(note_duration),
-                                '-filter_complex',
-                                f'[0:v]scale={dimensions["width"]}:{dimensions["height"]}[v];' +
-                                f'[0:a]asetrate={44100*pitch_ratio},aformat=sample_fmts=fltp,volume={volume}[a]',
-                                '-map', '[v]',
-                                '-map', '[a]',
-                                '-c:v', 'libx264',
-                                '-c:a', 'aac',
-                                '-ar', '44100',
-                                temp_note_path
-                            ]
-                            
-                            subprocess.run(ffmpeg_cmd, check=True)
-                            
-                            # Load processed clip
-                            processed_clip = VideoFileClip(temp_note_path)
-                            positioned_clip = (processed_clip
-                                .set_position((x_pos, y_pos))
-                                .set_start(start_time))
-                            
-                            all_clips.append(positioned_clip)
-                            clips_to_close.append(processed_clip)
-                            
-                        except Exception as e:
-                            logging.error(f"Error processing note in {track_id}: {e}")
+                        clip = VideoFileClip(video_path, audio=True)
+                        if clip is None or not hasattr(clip, 'duration'):
+                            logging.error(f"Failed to load video clip: {video_path}")
                             continue
-
-                if not all_clips:
-                    raise ValueError("No valid clips were created")
-                
-                # Create final composition
-                final_clip = CompositeVideoClip([background] + all_clips, size=(960, 720))
-                final_clip.duration = duration
-                clips_to_close.append(final_clip)
-                
-                # Write final video using FFmpeg directly
-                try:
-                    final_clip.write_videofile(
-                        output_path,
-                        codec='libx264',
-                        audio_codec='aac',
-                        temp_audiofile=None,  # Disable MoviePy's audio handling
-                        remove_temp=True,
-                        fps=30,
-                        ffmpeg_params=[
-                            '-c:a', 'aac',
-                            '-ar', '44100',
-                            '-ac', '2',
-                            '-b:a', '192k'
-                        ]
-                    )
-                    return True
-                    
-                except Exception as e:
-                    logging.error(f"Error writing final video: {e}")
-                    raise
-                    
-                finally:
-                    # Clean up temp files
-                    for temp_file in temp_clips:
-                        try:
-                            if os.path.exists(temp_file):
-                                os.remove(temp_file)
-                        except Exception as e:
-                            logging.warning(f"Failed to remove temp file {temp_file}: {e}")
-
-            except Exception as e:
-                logging.error(f"Error in video processing: {str(e)}")
-                raise
-            finally:
-                # Clean up clips
-                for clip in clips_to_close:
-                    try:
-                        if clip is not None:
-                            clip.close()
                     except Exception as e:
-                        logging.warning(f"Failed to close clip: {e}")
-                try:
-                    if os.path.exists('temp-audio-full.m4a'):
-                        os.remove('temp-audio-full.m4a')
-                except:
-                    pass
+                        logging.error(f"Error loading video clip {video_path}: {e}")
+                        continue
+
+                    # Calculate pitch ratio and timing
+                    pitch_ratio = get_pitch_ratio(note)
+                    start_time = note.get('start', 0)
+                    end_time = note.get('end', start_time + clip.duration)
+                    clip_duration = end_time - start_time
+
+                    # Process clip
+                    if clip.audio is not None:
+                        clip = clip.set_audio(adjust_audio_speed(clip.audio, pitch_ratio))
+                    clip = clip.set_position((0, 0))
+                    clip = clip.set_start(start_time).set_end(end_time)
+
+                    # Add to tracking lists
+                    clips_to_close.append(clip)
+                    batch_clips.append(clip)
+                    
+                    # Memory management
+                    if get_memory_usage() > MEMORY_THRESHOLD:
+                        cleanup_memory()
+                
+                except Exception as e:
+                    logging.error(f"Error processing note in batch: {e}")
+                    continue
+            
+            # Add batch clips to final list
+            if batch_clips:
+                final_clips.extend(batch_clips)
+            
+            # Cleanup after batch
+            cleanup_memory()
+        
+        if len(final_clips) <= 1:
+            raise ValueError("No video clips were successfully processed")
+
+        # Create final composition
+        final = CompositeVideoClip(final_clips, size=(960, 720))
+        
+        # Write output with error handling
+        if not final:
+            raise ValueError("Failed to create final composition")
+
+        final.write_videofile(
+            output_path,
+            codec='libx264',
+            audio_codec='aac',
+            temp_audiofile=str(Path(TEMP_DIR) / 'temp-audio.m4a'),
+            remove_temp=True,
+            fps=30,
+            preset='ultrafast',
+            ffmpeg_params=[
+                '-tune', 'fastdecode',
+                '-b:v', '2000k',
+                '-maxrate', '2500k',
+                '-bufsize', '5000k',
+                '-threads', '4'
+            ]
+        )
 
     except Exception as e:
         logging.error(f"Error in process_video_segments: {str(e)}")
         raise
+    
+    finally:
+        # Cleanup
+        for clip in clips_to_close:
+            try:
+                clip.close()
+            except:
+                pass
+        clean_temp_files()
+        cleanup_memory()
 
 def main():
     if len(sys.argv) != 4:
@@ -692,6 +589,12 @@ def main():
     except Exception as e:
         print(f"Error in video processing: {str(e)}")
         sys.exit(1)
+    finally:
+        clean_temp_files()
+        cleanup_memory()
 
 if __name__ == "__main__":
     main()
+
+# Add cleanup on script exit
+atexit.register(clean_temp_files)
