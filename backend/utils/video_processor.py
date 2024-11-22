@@ -448,13 +448,18 @@ def create_audio_segment(audio_array, start_time, duration, fps=44100):
 
 def get_safe_clip_duration(clip, note_start, note_end):
     """Calculate safe start and end times for a clip."""
-    if not clip or not hasattr(clip, 'duration'):
-        return 0, 0
+    try:
+        if not clip or not hasattr(clip, 'duration'):
+            return 0, 0
+            
+        clip_duration = float(clip.duration)
+        safe_end = min(note_end, clip_duration)
+        safe_start = max(0, min(note_start, safe_end))
+        return safe_start, safe_end
         
-    clip_duration = clip.duration
-    safe_end = min(note_end, clip_duration)
-    safe_start = min(note_start, safe_end)
-    return safe_start, safe_end
+    except Exception as e:
+        logging.error(f"Error calculating safe duration: {e}")
+        return 0, 0
 
 def stretch_video_to_duration(clip, target_duration):
     """
@@ -465,7 +470,7 @@ def stretch_video_to_duration(clip, target_duration):
             return None
             
         current_duration = clip.duration
-        if current_duration >= target_duration:
+        if (current_duration >= target_duration) or (current_duration <= 0):
             return clip
             
         # Calculate stretch factor
@@ -529,43 +534,64 @@ def process_video_segments(midi_data, video_files, output_path):
                         continue
 
                     clip = VideoFileClip(video_path, audio=True)
+                    original_duration = float(clip.duration)
                     pitch_ratio = get_pitch_ratio(note)
-                    note_start = note.get('start', 0)
-                    note_end = note.get('end', note_start + clip.duration)
+                    note_start = float(note.get('start', 0))
+                    note_end = float(note.get('end', note_start + original_duration))
                     note_duration = note_end - note_start
                     
-                    # Stretch video if it's too short
-                    if clip.duration < note_duration:
-                        logging.info(f"Stretching clip from {clip.duration}s to {note_duration}s")
-                        clip = stretch_video_to_duration(clip, note_duration)
+                    # Add a small safety margin to prevent frame reading issues
+                    SAFETY_MARGIN = 0.1  # 100ms safety margin
+                    
+                    if original_duration < note_duration + SAFETY_MARGIN:
+                        target_duration = note_duration + SAFETY_MARGIN
+                        logging.info(f"Stretching clip from {original_duration}s to {target_duration}s")
+                        clip = stretch_video_to_duration(clip, target_duration)
                         if clip is None:
                             continue
                     
-                    # Get safe duration for the clip
-                    safe_start, safe_end = get_safe_clip_duration(clip, note_start, note_end)
+                    # Get safe duration with margin
+                    safe_start = max(0, note_start)
+                    safe_end = min(note_end, clip.duration - SAFETY_MARGIN)
                     
                     if safe_end <= safe_start:
                         logging.warning(f"Invalid clip duration: start={safe_start}, end={safe_end}")
                         clip.close()
                         continue
-                    
-                    # Process clip with safe duration
-                    if clip.audio is not None:
-                        clip = clip.set_audio(adjust_audio_speed(clip.audio, pitch_ratio))
-                    clip = clip.set_position((0, 0))
-                    clip = clip.subclip(0, safe_end - safe_start)  # First trim to needed duration
-                    clip = clip.set_start(safe_start)  # Then set the start time
-                    
-                    batch_clips.append(clip)
-                    clips_to_close.append(clip)
-                    valid_clips_in_batch = True
-                    
+
+                    try:
+                        # Process the clip with margin
+                        processed_clip = clip.subclip(0, safe_end - safe_start)
+                        
+                        # Ensure minimum viable duration
+                        if processed_clip.duration < 0.2:  # Increased minimum duration threshold
+                            logging.warning(f"Clip too short: {processed_clip.duration}s")
+                            clip.close()
+                            continue
+                            
+                        # Adjust audio pitch if needed
+                        if processed_clip.audio is not None:
+                            processed_clip = processed_clip.set_audio(
+                                adjust_audio_speed(processed_clip.audio, pitch_ratio)
+                            )
+                            
+                        # Position the clip
+                        positioned_clip = processed_clip.set_position((0, 0)).set_start(safe_start)
+                        batch_clips.append(positioned_clip)
+                        clips_to_close.append(positioned_clip)
+                        valid_clips_in_batch = True
+                        
+                    except Exception as e:
+                        logging.error(f"Error processing clip: {e}")
+                        clip.close()
+                        continue
+                        
                 except Exception as e:
-                    logging.error(f"Error processing note: {e}")
+                    logging.error(f"Error loading video: {e}")
                     continue
 
-            # Only process batch if it contains valid clips
-            if valid_clips_in_batch:
+            # Process batch only if it contains valid clips
+            if valid_clips_in_batch and batch_clips:
                 try:
                     batch_composite = CompositeVideoClip(batch_clips, size=(960, 720))
                     temp_file = os.path.join(TEMP_DIR, f'batch_{i}.mp4')
@@ -581,7 +607,6 @@ def process_video_segments(midi_data, video_files, output_path):
                 except Exception as e:
                     logging.error(f"Error saving batch {i}: {e}")
                 finally:
-                    # Cleanup batch resources
                     try:
                         batch_composite.close()
                     except:
