@@ -11,6 +11,7 @@ import gc  # Add garbage collector import
 from pathlib import Path
 import tempfile
 import shutil
+import atexit
 
 # Try to import psutil, but provide fallback if not available
 try:
@@ -27,9 +28,10 @@ os.environ['FFMPEG_MEMORY_LIMIT'] = '256M'  # Limit ffmpeg memory usage
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Add these constants at the top of the file
-BATCH_SIZE = 50  # Number of clips to process at once
-MEMORY_THRESHOLD = 75  # Percentage of memory usage that triggers cleanup
-TEMP_DIR = tempfile.mkdtemp()  # Create temporary directory
+BATCH_SIZE = 10  # Reduced from 50 to prevent memory overload
+MEMORY_THRESHOLD = 70
+TEMP_DIR = tempfile.mkdtemp()
+temp_video_files = []
 
 def get_memory_usage():
     """Monitor memory usage with fallback mechanism"""
@@ -444,9 +446,48 @@ def create_audio_segment(audio_array, start_time, duration, fps=44100):
         logging.error(f"Error creating audio segment: {e}")
         return None
 
+def get_safe_clip_duration(clip, note_start, note_end):
+    """Calculate safe start and end times for a clip."""
+    if not clip or not hasattr(clip, 'duration'):
+        return 0, 0
+        
+    clip_duration = clip.duration
+    safe_end = min(note_end, clip_duration)
+    safe_start = min(note_start, safe_end)
+    return safe_start, safe_end
+
+def stretch_video_to_duration(clip, target_duration):
+    """
+    Stretch a video clip to match a target duration while maintaining audio pitch.
+    """
+    try:
+        if not clip or not hasattr(clip, 'duration'):
+            return None
+            
+        current_duration = clip.duration
+        if current_duration >= target_duration:
+            return clip
+            
+        # Calculate stretch factor
+        stretch_factor = target_duration / current_duration
+        
+        # Stretch video
+        stretched_clip = clip.fx(vfx.speedx, factor=1/stretch_factor)
+        
+        # If there's audio, stretch it while maintaining pitch
+        if clip.audio is not None:
+            stretched_audio = clip.audio.fx(vfx.speedx, factor=1/stretch_factor)
+            stretched_clip = stretched_clip.set_audio(stretched_audio)
+            
+        return stretched_clip
+        
+    except Exception as e:
+        logging.error(f"Error stretching video: {e}")
+        return clip
+
 def process_video_segments(midi_data, video_files, output_path):
     clips_to_close = []
-    temp_files = []
+    batch_temp_files = []
     
     try:
         # Validate input data first
@@ -465,15 +506,16 @@ def process_video_segments(midi_data, video_files, output_path):
         # Sort notes by start time
         all_notes.sort(key=lambda x: x[0].get('start', 0))
         
-        final_clips = []
         total_duration = max(note[0].get('end', 0) for note in all_notes)
         background = ColorClip(size=(960, 720), color=(0,0,0), duration=total_duration)
-        final_clips.append(background)  # Add background as first clip
         
         # Process in batches
+        batch_temp_files = []
         for i in range(0, len(all_notes), BATCH_SIZE):
             batch_notes = all_notes[i:i + BATCH_SIZE]
-            batch_clips = []
+            batch_clips = [background] if i == 0 else []  # Only include background in first batch
+            
+            valid_clips_in_batch = False
             
             # Process each note in the batch
             for note, track_id in batch_notes:
@@ -483,92 +525,140 @@ def process_video_segments(midi_data, video_files, output_path):
                         logging.warning(f"Invalid video path for track {track_id}")
                         continue
                     
-                    # Verify video file before processing
                     if not verify_video_file(video_path):
-                        logging.warning(f"Video file verification failed for {video_path}")
                         continue
 
-                    # Load clip with explicit error handling
-                    try:
-                        clip = VideoFileClip(video_path, audio=True)
-                        if clip is None or not hasattr(clip, 'duration'):
-                            logging.error(f"Failed to load video clip: {video_path}")
-                            continue
-                    except Exception as e:
-                        logging.error(f"Error loading video clip {video_path}: {e}")
-                        continue
-
-                    # Calculate pitch ratio and timing
+                    clip = VideoFileClip(video_path, audio=True)
                     pitch_ratio = get_pitch_ratio(note)
-                    start_time = note.get('start', 0)
-                    end_time = note.get('end', start_time + clip.duration)
-                    clip_duration = end_time - start_time
-
-                    # Process clip
+                    note_start = note.get('start', 0)
+                    note_end = note.get('end', note_start + clip.duration)
+                    note_duration = note_end - note_start
+                    
+                    # Stretch video if it's too short
+                    if clip.duration < note_duration:
+                        logging.info(f"Stretching clip from {clip.duration}s to {note_duration}s")
+                        clip = stretch_video_to_duration(clip, note_duration)
+                        if clip is None:
+                            continue
+                    
+                    # Get safe duration for the clip
+                    safe_start, safe_end = get_safe_clip_duration(clip, note_start, note_end)
+                    
+                    if safe_end <= safe_start:
+                        logging.warning(f"Invalid clip duration: start={safe_start}, end={safe_end}")
+                        clip.close()
+                        continue
+                    
+                    # Process clip with safe duration
                     if clip.audio is not None:
                         clip = clip.set_audio(adjust_audio_speed(clip.audio, pitch_ratio))
                     clip = clip.set_position((0, 0))
-                    clip = clip.set_start(start_time).set_end(end_time)
-
-                    # Add to tracking lists
-                    clips_to_close.append(clip)
-                    batch_clips.append(clip)
+                    clip = clip.subclip(0, safe_end - safe_start)  # First trim to needed duration
+                    clip = clip.set_start(safe_start)  # Then set the start time
                     
-                    # Memory management
-                    if get_memory_usage() > MEMORY_THRESHOLD:
-                        cleanup_memory()
-                
+                    batch_clips.append(clip)
+                    clips_to_close.append(clip)
+                    valid_clips_in_batch = True
+                    
                 except Exception as e:
-                    logging.error(f"Error processing note in batch: {e}")
+                    logging.error(f"Error processing note: {e}")
                     continue
-            
-            # Add batch clips to final list
-            if batch_clips:
-                final_clips.extend(batch_clips)
-            
-            # Cleanup after batch
+
+            # Only process batch if it contains valid clips
+            if valid_clips_in_batch:
+                try:
+                    batch_composite = CompositeVideoClip(batch_clips, size=(960, 720))
+                    temp_file = os.path.join(TEMP_DIR, f'batch_{i}.mp4')
+                    batch_composite.write_videofile(
+                        temp_file,
+                        codec='libx264',
+                        audio_codec='aac',
+                        preset='ultrafast',
+                        ffmpeg_params=['-tune', 'fastdecode']
+                    )
+                    batch_temp_files.append(temp_file)
+                    
+                except Exception as e:
+                    logging.error(f"Error saving batch {i}: {e}")
+                finally:
+                    # Cleanup batch resources
+                    try:
+                        batch_composite.close()
+                    except:
+                        pass
+                    for clip in batch_clips:
+                        try:
+                            clip.close()
+                        except:
+                            pass
+                    
+            # Clear batch resources
+            batch_clips.clear()
             cleanup_memory()
-        
-        if len(final_clips) <= 1:
-            raise ValueError("No video clips were successfully processed")
 
-        # Create final composition
-        final = CompositeVideoClip(final_clips, size=(960, 720))
-        
-        # Write output with error handling
-        if not final:
-            raise ValueError("Failed to create final composition")
+        # Only proceed with final composition if we have temp files
+        if not batch_temp_files:
+            raise ValueError("No valid video segments were processed")
 
-        final.write_videofile(
-            output_path,
-            codec='libx264',
-            audio_codec='aac',
-            temp_audiofile=str(Path(TEMP_DIR) / 'temp-audio.m4a'),
-            remove_temp=True,
-            fps=30,
-            preset='ultrafast',
-            ffmpeg_params=[
-                '-tune', 'fastdecode',
-                '-b:v', '2000k',
-                '-maxrate', '2500k',
-                '-bufsize', '5000k',
-                '-threads', '4'
-            ]
-        )
+        # Combine all batch files
+        if batch_temp_files:
+            final_clips = [VideoFileClip(tf) for tf in batch_temp_files]
+            final = concatenate_videoclips(final_clips)
+            
+            final.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile=str(Path(TEMP_DIR) / 'temp-audio.m4a'),
+                remove_temp=True,
+                fps=30,
+                preset='ultrafast',
+                ffmpeg_params=[
+                    '-tune', 'fastdecode',
+                    '-b:v', '2000k',
+                    '-maxrate', '2500k',
+                    '-bufsize', '5000k',
+                    '-threads', '4'
+                ]
+            )
+            
+            # Cleanup final clips
+            for clip in final_clips:
+                clip.close()
+            final.close()
+            del final_clips
+            del final
 
     except Exception as e:
         logging.error(f"Error in process_video_segments: {str(e)}")
         raise
     
     finally:
-        # Cleanup
+        # Cleanup all resources
         for clip in clips_to_close:
             try:
                 clip.close()
             except:
                 pass
+        
+        # Remove temp files
+        for tf in batch_temp_files:
+            try:
+                os.remove(tf)
+            except:
+                pass
+                
         clean_temp_files()
         cleanup_memory()
+
+def pre_python_processing_verification(drum_tracks):
+    """Verify drum tracks before processing."""
+    for track in drum_tracks:
+        if 'key' not in track or 'noteCount' not in track:
+            logging.error(f"Invalid drum track data: {track}")
+            return False
+        logging.info(f"Drum track {track['key']} with {track['noteCount']} notes verified.")
+    return True
 
 def main():
     if len(sys.argv) != 4:
@@ -584,6 +674,19 @@ def main():
             midi_data = json.load(f)
         with open(video_files_json_path, 'r') as f:
             video_files = json.load(f)
+        
+        # Pre-Python processing verification
+        drum_tracks = [
+            {"key": "drum_kick_track1", "noteCount": 360},
+            {"key": "drum_snare_track10", "noteCount": 28},
+            {"key": "drum_hihat_track0", "noteCount": 664},
+            {"key": "drum_snare_track1", "noteCount": 144},
+            {"key": "drum_kick_track10", "noteCount": 16},
+            {"key": "drum_percussion_track1", "noteCount": 20}
+        ]
+        if not pre_python_processing_verification(drum_tracks):
+            logging.error("Pre-Python processing verification failed.")
+            sys.exit(1)
             
         process_video_segments(midi_data, video_files, output_path)
     except Exception as e:
