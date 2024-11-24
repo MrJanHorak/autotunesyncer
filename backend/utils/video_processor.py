@@ -16,6 +16,7 @@ import tempfile
 import shutil
 import atexit
 import hashlib
+import traceback
 
 # Try to import psutil, but provide fallback if not available
 try:
@@ -56,6 +57,9 @@ FFMPEG_OPTS = {
         '-b:a', '128k'
     ]
 }
+
+CACHE_FILE_VERIFY_RETRIES = 3
+CACHE_VERIFY_DELAY = 1
 
 def get_memory_usage():
     """Monitor memory usage with fallback mechanism"""
@@ -553,9 +557,58 @@ def is_cached(track_id, midi_note):
     cache_path = get_cache_path(track_id, midi_note)
     return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
 
+def verify_cache_directory():
+    """Verify cache directory exists and is writable."""
+    try:
+        if not os.path.exists(CACHE_DIR):
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            logging.info(f"Created cache directory: {CACHE_DIR}")
+            
+        # Test write permissions
+        test_file = os.path.join(CACHE_DIR, 'test_write.tmp')
+        try:
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.unlink(test_file)
+            return True
+        except Exception as e:
+            logging.error(f"Cache directory not writable: {e}")
+            return False
+    except Exception as e:
+        logging.error(f"Error verifying cache directory: {e}")
+        return False
+
+def verify_cache_file(cache_path, retries=CACHE_FILE_VERIFY_RETRIES):
+    """Verify cached file exists and is valid."""
+    for attempt in range(retries):
+        try:
+            if not os.path.exists(cache_path):
+                logging.debug(f"Cache file does not exist: {cache_path}")
+                return False
+                
+            if os.path.getsize(cache_path) == 0:
+                logging.debug(f"Cache file is empty: {cache_path}")
+                return False
+                
+            # Verify file is readable
+            with open(cache_path, 'rb') as f:
+                f.read(1024)  # Try reading first 1KB
+                
+            return True
+            
+        except Exception as e:
+            logging.warning(f"Cache verification attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(CACHE_VERIFY_DELAY)
+                
+    return False
+
 def create_note_cache(track_id, track_data, video_path):
     """Create cached video clips for each unique note in the track."""
     try:
+        if not verify_cache_directory():
+            raise RuntimeError("Cache directory verification failed")
+            
         if not verify_video_file(video_path):
             raise ValueError(f"Invalid video file: {video_path}")
             
@@ -564,20 +617,20 @@ def create_note_cache(track_id, track_data, video_path):
         total_notes = len(unique_notes)
         
         logging.info(f"Creating cache for track {track_id} with {total_notes} unique notes")
+        logging.debug(f"Cache directory: {CACHE_DIR}")
         
         for idx, midi_note in enumerate(unique_notes, 1):
-            if get_memory_usage() > MAX_MEMORY_PERCENT:
-                logging.warning("Memory threshold exceeded, forcing cleanup")
-                cleanup_memory()
-                gc.collect(2)
-                
-            cache_path = get_cache_path(track_id, midi_note)
-            if is_cached(track_id, midi_note):
-                cache_paths[midi_note] = cache_path
-                continue
-                
             try:
+                cache_path = get_cache_path(track_id, midi_note)
+                logging.debug(f"Cache path for note {midi_note}: {cache_path}")
+                
+                if verify_cache_file(cache_path):
+                    logging.debug(f"Using existing cache for note {midi_note}")
+                    cache_paths[midi_note] = cache_path
+                    continue
+                    
                 logging.info(f"Processing note {idx}/{total_notes} (MIDI: {midi_note})")
+                
                 with VideoFileClip(video_path, audio=True) as clip:
                     # Resize clip first to reduce memory usage
                     clip = clip.resize(width=VIDEO_CACHE_SIZE[0])
@@ -589,27 +642,40 @@ def create_note_cache(track_id, track_data, video_path):
                         clip = clip.set_audio(modified_audio)
                         
                     # Write to cache with compatible parameters
+                    temp_cache = cache_path + '.tmp'
                     clip.write_videofile(
-                        cache_path,
+                        temp_cache,
                         codec=FFMPEG_OPTS['codec'],
                         audio_codec=FFMPEG_OPTS['audio_codec'],
                         preset=FFMPEG_OPTS['preset'],
                         ffmpeg_params=FFMPEG_OPTS['ffmpeg_params'],
                         logger=None
                     )
-                    cache_paths[midi_note] = cache_path
                     
-                # Force cleanup after each note
+                    # Verify temp file before moving to final location
+                    if verify_cache_file(temp_cache):
+                        shutil.move(temp_cache, cache_path)
+                        cache_paths[midi_note] = cache_path
+                        logging.debug(f"Successfully cached note {midi_note}")
+                    else:
+                        raise RuntimeError(f"Cache file verification failed: {temp_cache}")
+                        
                 cleanup_memory()
                 
             except Exception as e:
-                logging.error(f"Error caching note {midi_note}: {str(e)}")
+                logging.error(f"Error caching note {midi_note}: {str(e)}\n{traceback.format_exc()}")
+                # Try to clean up failed temp file
+                try:
+                    if os.path.exists(temp_cache):
+                        os.unlink(temp_cache)
+                except:
+                    pass
                 continue
                 
         return cache_paths
         
     except Exception as e:
-        logging.error(f"Error creating note cache for track {track_id}: {str(e)}")
+        logging.error(f"Error creating note cache for track {track_id}: {str(e)}\n{traceback.format_exc()}")
         return {}
 
 def calculate_grid_layout(num_tracks):
