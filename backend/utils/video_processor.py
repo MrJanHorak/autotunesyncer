@@ -1,6 +1,9 @@
 import json
 import sys
-from moviepy.editor import VideoFileClip, CompositeVideoClip, ColorClip, vfx, CompositeAudioClip, AudioClip
+from moviepy.editor import (
+    VideoFileClip, CompositeVideoClip, ColorClip, 
+    vfx, CompositeAudioClip, AudioClip, concatenate_videoclips
+)
 import numpy as np
 from PIL import Image
 import logging
@@ -12,6 +15,7 @@ from pathlib import Path
 import tempfile
 import shutil
 import atexit
+import hashlib
 
 # Try to import psutil, but provide fallback if not available
 try:
@@ -32,6 +36,26 @@ BATCH_SIZE = 10  # Reduced from 50 to prevent memory overload
 MEMORY_THRESHOLD = 70
 TEMP_DIR = tempfile.mkdtemp()
 temp_video_files = []
+CACHE_DIR = os.path.join(TEMP_DIR, 'note_cache')
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Add new constants for time-based batching
+TIME_WINDOW = 10.0  # Process 10 seconds at a time
+WINDOW_OVERLAP = 0.5  # Half second overlap to ensure smooth transitions
+
+# Add these constants at the top
+MAX_MEMORY_PERCENT = 85
+VIDEO_CACHE_SIZE = (320, 240)  # Smaller cache video size
+# Update the FFMPEG options to be compatible with MoviePy
+FFMPEG_OPTS = {
+    'codec': 'libx264',
+    'audio_codec': 'aac',
+    'preset': 'ultrafast',
+    'ffmpeg_params': [
+        '-crf', '30',
+        '-b:a', '128k'
+    ]
+}
 
 def get_memory_usage():
     """Monitor memory usage with fallback mechanism"""
@@ -64,12 +88,38 @@ def cleanup_memory():
         logging.error(f"Error during memory cleanup: {e}")
 
 def clean_temp_files():
-    """Clean temporary files"""
-    try:
-        shutil.rmtree(TEMP_DIR)
-        os.makedirs(TEMP_DIR, exist_ok=True)
-    except Exception as e:
-        logging.error(f"Error cleaning temp files: {e}")
+    """Clean temporary files with retry mechanism"""
+    max_retries = 3
+    retry_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            # Force close any open file handles
+            gc.collect()
+            
+            if os.path.exists(TEMP_DIR):
+                for file in os.listdir(TEMP_DIR):
+                    file_path = os.path.join(TEMP_DIR, file)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.unlink(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        logging.warning(f"Failed to remove {file_path}: {e}")
+                        continue
+                
+                shutil.rmtree(TEMP_DIR, ignore_errors=True)
+            
+            os.makedirs(TEMP_DIR, exist_ok=True)
+            return
+            
+        except Exception as e:
+            logging.error(f"Error cleaning temp files (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                
+    logging.error("Failed to clean temp files after all retries")
 
 def test_codecs():
     cmd = ['ffmpeg', '-codecs']
@@ -490,191 +540,462 @@ def stretch_video_to_duration(clip, target_duration):
         logging.error(f"Error stretching video: {e}")
         return clip
 
-def process_video_segments(midi_data, video_files, output_path):
-    clips_to_close = []
-    batch_temp_files = []
-    
+def get_cache_key(track_id, midi_note):
+    """Generate unique cache key for a track's note."""
+    return hashlib.md5(f"{track_id}_{midi_note}".encode()).hexdigest()
+
+def get_cache_path(track_id, midi_note):
+    """Get full path for cached note clip."""
+    return os.path.join(CACHE_DIR, f"{get_cache_key(track_id, midi_note)}.mp4")
+
+def is_cached(track_id, midi_note):
+    """Check if note clip is already cached."""
+    cache_path = get_cache_path(track_id, midi_note)
+    return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
+
+def create_note_cache(track_id, track_data, video_path):
+    """Create cached video clips for each unique note in the track."""
     try:
-        # Validate input data first
-        if not midi_data or not video_files:
-            raise ValueError("Invalid midi_data or video_files")
-
-        # Create batches of notes across all tracks
-        all_notes = []
-        for track_id, track_data in video_files.items():
-            if track_data.get('notes'):
-                all_notes.extend((note, track_id) for note in track_data['notes'])
+        if not verify_video_file(video_path):
+            raise ValueError(f"Invalid video file: {video_path}")
+            
+        cache_paths = {}
+        unique_notes = {note['midi'] for note in track_data.get('notes', [])}
+        total_notes = len(unique_notes)
         
-        if not all_notes:
-            raise ValueError("No valid notes found in tracks")
-
-        # Sort notes by start time
-        all_notes.sort(key=lambda x: x[0].get('start', 0))
+        logging.info(f"Creating cache for track {track_id} with {total_notes} unique notes")
         
-        total_duration = max(note[0].get('end', 0) for note in all_notes)
-        background = ColorClip(size=(960, 720), color=(0,0,0), duration=total_duration)
-        
-        # Process in batches
-        batch_temp_files = []
-        for i in range(0, len(all_notes), BATCH_SIZE):
-            batch_notes = all_notes[i:i + BATCH_SIZE]
-            batch_clips = [background] if i == 0 else []  # Only include background in first batch
-            
-            valid_clips_in_batch = False
-            
-            # Process each note in the batch
-            for note, track_id in batch_notes:
-                try:
-                    video_path = video_files[track_id].get('path')
-                    if not video_path or not os.path.exists(video_path):
-                        logging.warning(f"Invalid video path for track {track_id}")
-                        continue
-                    
-                    if not verify_video_file(video_path):
-                        continue
-
-                    clip = VideoFileClip(video_path, audio=True)
-                    original_duration = float(clip.duration)
-                    pitch_ratio = get_pitch_ratio(note)
-                    note_start = float(note.get('start', 0))
-                    note_end = float(note.get('end', note_start + original_duration))
-                    note_duration = note_end - note_start
-                    
-                    # Add a small safety margin to prevent frame reading issues
-                    SAFETY_MARGIN = 0.1  # 100ms safety margin
-                    
-                    if original_duration < note_duration + SAFETY_MARGIN:
-                        target_duration = note_duration + SAFETY_MARGIN
-                        logging.info(f"Stretching clip from {original_duration}s to {target_duration}s")
-                        clip = stretch_video_to_duration(clip, target_duration)
-                        if clip is None:
-                            continue
-                    
-                    # Get safe duration with margin
-                    safe_start = max(0, note_start)
-                    safe_end = min(note_end, clip.duration - SAFETY_MARGIN)
-                    
-                    if safe_end <= safe_start:
-                        logging.warning(f"Invalid clip duration: start={safe_start}, end={safe_end}")
-                        clip.close()
-                        continue
-
-                    try:
-                        # Process the clip with margin
-                        processed_clip = clip.subclip(0, safe_end - safe_start)
-                        
-                        # Ensure minimum viable duration
-                        if processed_clip.duration < 0.2:  # Increased minimum duration threshold
-                            logging.warning(f"Clip too short: {processed_clip.duration}s")
-                            clip.close()
-                            continue
-                            
-                        # Adjust audio pitch if needed
-                        if processed_clip.audio is not None:
-                            processed_clip = processed_clip.set_audio(
-                                adjust_audio_speed(processed_clip.audio, pitch_ratio)
-                            )
-                            
-                        # Position the clip
-                        positioned_clip = processed_clip.set_position((0, 0)).set_start(safe_start)
-                        batch_clips.append(positioned_clip)
-                        clips_to_close.append(positioned_clip)
-                        valid_clips_in_batch = True
-                        
-                    except Exception as e:
-                        logging.error(f"Error processing clip: {e}")
-                        clip.close()
-                        continue
-                        
-                except Exception as e:
-                    logging.error(f"Error loading video: {e}")
-                    continue
-
-            # Process batch only if it contains valid clips
-            if valid_clips_in_batch and batch_clips:
-                try:
-                    batch_composite = CompositeVideoClip(batch_clips, size=(960, 720))
-                    temp_file = os.path.join(TEMP_DIR, f'batch_{i}.mp4')
-                    batch_composite.write_videofile(
-                        temp_file,
-                        codec='libx264',
-                        audio_codec='aac',
-                        preset='ultrafast',
-                        ffmpeg_params=['-tune', 'fastdecode']
-                    )
-                    batch_temp_files.append(temp_file)
-                    
-                except Exception as e:
-                    logging.error(f"Error saving batch {i}: {e}")
-                finally:
-                    try:
-                        batch_composite.close()
-                    except:
-                        pass
-                    for clip in batch_clips:
-                        try:
-                            clip.close()
-                        except:
-                            pass
-                    
-            # Clear batch resources
-            batch_clips.clear()
-            cleanup_memory()
-
-        # Only proceed with final composition if we have temp files
-        if not batch_temp_files:
-            raise ValueError("No valid video segments were processed")
-
-        # Combine all batch files
-        if batch_temp_files:
-            final_clips = [VideoFileClip(tf) for tf in batch_temp_files]
-            final = concatenate_videoclips(final_clips)
-            
-            final.write_videofile(
-                output_path,
-                codec='libx264',
-                audio_codec='aac',
-                temp_audiofile=str(Path(TEMP_DIR) / 'temp-audio.m4a'),
-                remove_temp=True,
-                fps=30,
-                preset='ultrafast',
-                ffmpeg_params=[
-                    '-tune', 'fastdecode',
-                    '-b:v', '2000k',
-                    '-maxrate', '2500k',
-                    '-bufsize', '5000k',
-                    '-threads', '4'
-                ]
-            )
-            
-            # Cleanup final clips
-            for clip in final_clips:
-                clip.close()
-            final.close()
-            del final_clips
-            del final
-
-    except Exception as e:
-        logging.error(f"Error in process_video_segments: {str(e)}")
-        raise
-    
-    finally:
-        # Cleanup all resources
-        for clip in clips_to_close:
+        for idx, midi_note in enumerate(unique_notes, 1):
+            if get_memory_usage() > MAX_MEMORY_PERCENT:
+                logging.warning("Memory threshold exceeded, forcing cleanup")
+                cleanup_memory()
+                gc.collect(2)
+                
+            cache_path = get_cache_path(track_id, midi_note)
+            if is_cached(track_id, midi_note):
+                cache_paths[midi_note] = cache_path
+                continue
+                
             try:
-                clip.close()
+                logging.info(f"Processing note {idx}/{total_notes} (MIDI: {midi_note})")
+                with VideoFileClip(video_path, audio=True) as clip:
+                    # Resize clip first to reduce memory usage
+                    clip = clip.resize(width=VIDEO_CACHE_SIZE[0])
+                    
+                    # Process audio with pitch ratio
+                    pitch_ratio = get_pitch_ratio({'midi': midi_note})
+                    if clip.audio is not None:
+                        modified_audio = adjust_audio_speed(clip.audio, pitch_ratio)
+                        clip = clip.set_audio(modified_audio)
+                        
+                    # Write to cache with compatible parameters
+                    clip.write_videofile(
+                        cache_path,
+                        codec=FFMPEG_OPTS['codec'],
+                        audio_codec=FFMPEG_OPTS['audio_codec'],
+                        preset=FFMPEG_OPTS['preset'],
+                        ffmpeg_params=FFMPEG_OPTS['ffmpeg_params'],
+                        logger=None
+                    )
+                    cache_paths[midi_note] = cache_path
+                    
+                # Force cleanup after each note
+                cleanup_memory()
+                
+            except Exception as e:
+                logging.error(f"Error caching note {midi_note}: {str(e)}")
+                continue
+                
+        return cache_paths
+        
+    except Exception as e:
+        logging.error(f"Error creating note cache for track {track_id}: {str(e)}")
+        return {}
+
+def calculate_grid_layout(num_tracks):
+    """Calculate grid dimensions for track layout."""
+    cols = int(np.ceil(np.sqrt(num_tracks)))
+    rows = int(np.ceil(num_tracks / cols))
+    return rows, cols
+
+def get_grid_position(track_index, grid_layout, video_size=(320, 240)):
+    """Calculate position for a track in the grid."""
+    rows, cols = grid_layout
+    row = track_index // cols
+    col = track_index % cols
+    return (col * video_size[0], row * video_size[1])
+
+def get_time_windows(total_duration, window_size=TIME_WINDOW, overlap=WINDOW_OVERLAP):
+    """Split total duration into overlapping time windows."""
+    windows = []
+    start_time = 0
+    
+    while start_time < total_duration:
+        end_time = min(start_time + window_size, total_duration)
+        windows.append((start_time, end_time))
+        start_time = end_time - overlap
+        
+    return windows
+
+def process_time_window(window_start, window_end, track_caches, video_files, grid_layout, canvas_size):
+    """Process all track notes within a time window."""
+    current_clips = []
+    try:
+        window_clips = []
+        
+        # Create background for this window
+        background = ColorClip(
+            size=canvas_size,
+            color=(0, 0, 0),
+            duration=window_end - window_start
+        )
+        window_clips.append(background)
+        
+        # Process each track's notes that fall within this window
+        for track_idx, (track_id, track_data) in enumerate(video_files.items()):
+            if not track_data.get('notes'):
+                continue
+                
+            grid_pos = get_grid_position(track_idx, grid_layout)
+            track_cache = track_caches.get(track_id, {})
+            
+            if not track_cache:
+                continue
+            
+            # Filter notes that overlap with this window
+            window_notes = [
+                note for note in track_data['notes']
+                if (float(note.get('time', 0)) < window_end and 
+                    float(note.get('time', 0)) + float(note.get('duration', 0)) > window_start)
+            ]
+            
+            for note in window_notes:
+                try:
+                    midi_note = note['midi']
+                    cache_path = track_cache.get(midi_note)
+                    if not cache_path or not os.path.exists(cache_path):
+                        continue
+                        
+                    note_start = float(note.get('time', 0)) - window_start
+                    note_duration = float(note.get('duration', 0))
+                    
+                    # Load clip from cache
+                    clip = VideoFileClip(cache_path, audio=True)
+                    current_clips.append(clip)  # Track for cleanup
+                    
+                    # Position and time the clip
+                    positioned_clip = (clip
+                        .resize(width=320)
+                        .set_position(grid_pos)
+                        .set_start(note_start)
+                        .set_duration(note_duration))
+                    
+                    window_clips.append(positioned_clip)
+                    
+                except Exception as e:
+                    logging.error(f"Error processing note {midi_note}: {e}")
+                    continue
+                    
+        # Create composite for this window
+        if len(window_clips) > 1:
+            try:
+                composite = CompositeVideoClip(
+                    window_clips,
+                    size=canvas_size,
+                    bg_color=(0,0,0)
+                )
+                return composite
+            except Exception as e:
+                logging.error(f"Error creating composite: {e}")
+                return None
+        return None
+        
+    finally:
+        # Clean up all clips
+        for clip in current_clips:
+            try:
+                if clip and hasattr(clip, 'close'):
+                    clip.close()
             except:
                 pass
+        cleanup_memory()
+
+# Modify process_video_segments to add early termination and better cleanup
+def process_video_segments(midi_data, video_files, output_path):
+    """Process video segments using time-based batching with improved memory management."""
+    temp_files = []
+    current_window_clips = []
+    final_clips = []
+    track_caches = {}  # Initialize track_caches as empty dict
+    
+    # Add termination flag
+    processing_complete = False
+    
+    try:
+        logging.info("Starting video processing...")
         
-        # Remove temp files
-        for tf in batch_temp_files:
+        # Calculate grid layout first
+        grid_layout = calculate_grid_layout(len(video_files))
+        canvas_width = grid_layout[1] * VIDEO_CACHE_SIZE[0]
+        canvas_height = grid_layout[0] * VIDEO_CACHE_SIZE[1]
+        canvas_size = (canvas_width, canvas_height)
+        
+        logging.info(f"Grid layout: {grid_layout}, Canvas size: {canvas_size}")
+
+        # Initialize empty batches list
+        batches = []
+
+        # Create note caches for all tracks first
+        total_tracks = len(video_files)
+        for track_idx, (track_id, track_data) in enumerate(video_files.items(), 1):
+            logging.info(f"Caching track {track_idx}/{total_tracks}: {track_id}")
+            if track_data.get('notes'):
+                cache_result = create_note_cache(
+                    track_id,
+                    track_data,
+                    track_data.get('path')
+                )
+                if cache_result:  # Only add if cache creation was successful
+                    track_caches[track_id] = cache_result
+                cleanup_memory()
+                
+        # Calculate total duration from MIDI notes with validation
+        total_duration = 0
+        try:
+            for track_data in video_files.values():
+                if not track_data.get('notes'):
+                    continue
+                for note in track_data['notes']:
+                    try:
+                        note_end = float(note.get('time', 0)) + float(note.get('duration', 0))
+                        total_duration = max(total_duration, note_end)
+                    except (TypeError, ValueError) as e:
+                        logging.warning(f"Invalid note data: {note}, Error: {e}")
+                        continue
+        except Exception as e:
+            logging.error(f"Error calculating duration: {e}")
+            raise
+            
+        if total_duration <= 0:
+            raise ValueError("No valid duration calculated from notes")
+            
+        logging.info(f"Total duration: {total_duration} seconds")
+        
+        # Process in very small time windows
+        window_size = 2.0  # Even smaller window size
+        overlap = 0.1     # Minimal overlap
+        batch_size = 5    # Process windows in batches
+        
+        time_windows = []
+        current_time = 0
+        while current_time < total_duration:
+            end_time = min(current_time + window_size, total_duration)
+            time_windows.append((current_time, end_time))
+            current_time = end_time - overlap
+            
+        total_windows = len(time_windows)
+        logging.info(f"Total windows to process: {total_windows}")
+        
+        # Add a timeout mechanism
+        start_time = time.time()
+        max_processing_time = 3600  # 1 hour timeout
+        
+        for batch_idx in range(0, len(time_windows), batch_size):
+            # Check processing time
+            if time.time() - start_time > max_processing_time:
+                raise TimeoutError("Video processing exceeded maximum allowed time")
+                
+            # Check memory usage before each batch
+            if get_memory_usage() > MAX_MEMORY_PERCENT:
+                logging.error("Memory usage exceeded threshold, terminating processing")
+                raise MemoryError("Memory usage too high")
+                
+            batch_windows = time_windows[batch_idx:batch_idx + batch_size]
+            current_window_clips = []
+            
+            logging.info(f"Processing batch {batch_idx//batch_size + 1}/{(len(time_windows) + batch_size - 1)//batch_size}")
+            
             try:
-                os.remove(tf)
+                for window_idx, (start_time, end_time) in enumerate(batch_windows):
+                    logging.info(f"Processing window {batch_idx + window_idx + 1}/{total_windows} ({start_time:.2f}s - {end_time:.2f}s)")
+                    
+                    try:
+                        window_clip = process_time_window(
+                            start_time,
+                            end_time,
+                            track_caches,
+                            video_files,
+                            grid_layout,
+                            canvas_size
+                        )
+                        
+                        if window_clip:
+                            # Save window clip with unique identifier
+                            temp_path = os.path.join(
+                                TEMP_DIR,
+                                f'window_{batch_idx + window_idx:04d}_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}.mp4'
+                            )
+                            
+                            window_clip.write_videofile(
+                                temp_path,
+                                codec='libx264',
+                                audio_codec='aac',
+                                preset='ultrafast',
+                                fps=30,
+                                logger=None,
+                                threads=2
+                            )
+                            
+                            current_window_clips.append(temp_path)
+                            temp_files.append(temp_path)
+                            window_clip.close()
+                            
+                            # Force cleanup after each window
+                            cleanup_memory()
+                            
+                    except Exception as e:
+                        logging.error(f"Error processing window {batch_idx + window_idx}: {str(e)}")
+                        continue
+                        
+                # Combine batch windows
+                if current_window_clips:
+                    batch_output = os.path.join(TEMP_DIR, f'batch_{batch_idx//batch_size:04d}.mp4')
+                    
+                    # Use ffmpeg to concatenate batch clips
+                    list_file = os.path.join(TEMP_DIR, f"batch_{batch_idx//batch_size:04d}_files.txt")
+                    with open(list_file, 'w') as f:
+                        for clip_path in current_window_clips:
+                            f.write(f"file '{clip_path}'\n")
+                            
+                    cmd = [
+                        'ffmpeg', '-y',
+                        '-f', 'concat',
+                        '-safe', '0',
+                        '-i', list_file,
+                        '-c', 'copy',
+                        batch_output
+                    ]
+                    
+                    subprocess.run(cmd, check=True, capture_output=True)
+                    
+                    final_clips.append(batch_output)
+                    temp_files.extend([list_file, batch_output])
+                    
+                    # Clean up window clips
+                    for clip_path in current_window_clips:
+                        try:
+                            os.unlink(clip_path)
+                        except:
+                            pass
+                            
+                    current_window_clips = []
+                    cleanup_memory()
+                    gc.collect(2)
+                    
+            except Exception as e:
+                logging.error(f"Error processing batch {batch_idx//batch_size}: {str(e)}")
+                continue
+                
+        # Final concatenation of batch clips
+        if final_clips:
+            try:
+                final_list = os.path.join(TEMP_DIR, "final_files.txt")
+                with open(final_list, 'w') as f:
+                    for clip_path in final_clips:
+                        if os.path.exists(clip_path):
+                            f.write(f"file '{clip_path}'\n")
+                            
+                temp_files.append(final_list)
+                
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', final_list,
+                    '-c', 'copy',
+                    output_path
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    error_msg = f"FFmpeg error during final concatenation: {result.stderr}"
+                    logging.error(error_msg)
+                    raise RuntimeError(error_msg)
+                    
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    raise RuntimeError("Output file was not created or is empty")
+                    
+                logging.info(f"Successfully created output video: {output_path}")
+                
+            except Exception as e:
+                logging.error(f"Error in final concatenation: {str(e)}")
+                raise
+                
+        processing_complete = True
+        
+    except Exception as e:
+        error_msg = f"Error in video processing: {str(e)}"
+        logging.error(error_msg)
+        raise RuntimeError(error_msg)
+        
+    finally:
+        try:
+            # Clean up all clips and temporary files
+            for clip in current_window_clips:
+                try:
+                    if isinstance(clip, VideoFileClip) and hasattr(clip, 'close'):
+                        clip.close()
+                except:
+                    pass
+                    
+            # Remove temporary files
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.unlink(temp_file)
+                except:
+                    pass
+                    
+            # Force garbage collection
+            cleanup_memory()
+            clean_temp_files()
+            
+            # If processing didn't complete successfully, remove output file
+            if not processing_complete and os.path.exists(output_path):
+                try:
+                    os.unlink(output_path)
+                except:
+                    pass
+                    
+        except Exception as cleanup_error:
+            logging.error(f"Error during cleanup: {cleanup_error}")
+
+# Add memory error class
+class MemoryError(Exception):
+    pass
+
+# Modify cleanup_memory to be more aggressive
+def cleanup_memory():
+    """Force garbage collection and clear memory"""
+    try:
+        # Run garbage collection multiple times
+        for _ in range(5):
+            gc.collect()
+            
+        # Clear MoviePy's cache if it exists
+        if hasattr(VideoFileClip, 'close_all'):
+            VideoFileClip.close_all()
+            
+        # Clear any cached attributes
+        if 'CACHE_DIR' in globals():
+            try:
+                shutil.rmtree(CACHE_DIR, ignore_errors=True)
+                os.makedirs(CACHE_DIR, exist_ok=True)
             except:
                 pass
                 
-        clean_temp_files()
-        cleanup_memory()
+    except Exception as e:
+        logging.error(f"Error during memory cleanup: {e}")
 
 def pre_python_processing_verification(drum_tracks):
     """Verify drum tracks before processing."""
@@ -685,6 +1006,7 @@ def pre_python_processing_verification(drum_tracks):
         logging.info(f"Drum track {track['key']} with {track['noteCount']} notes verified.")
     return True
 
+# Modify main function to handle termination
 def main():
     if len(sys.argv) != 4:
         print("Usage: python video_processor.py midi_data.json video_files.json output_path")
@@ -714,12 +1036,26 @@ def main():
             sys.exit(1)
             
         process_video_segments(midi_data, video_files, output_path)
+        
     except Exception as e:
         print(f"Error in video processing: {str(e)}")
+        # Ensure cleanup happens even on error
+        cleanup_memory()
+        clean_temp_files()
+        # Remove output file if it exists but is incomplete
+        if os.path.exists(output_path):
+            try:
+                os.unlink(output_path)
+            except:
+                pass
         sys.exit(1)
     finally:
-        clean_temp_files()
         cleanup_memory()
+        clean_temp_files()
+
+# Ensure cleanup happens on script exit
+atexit.register(cleanup_memory)
+atexit.register(clean_temp_files)
 
 if __name__ == "__main__":
     main()
