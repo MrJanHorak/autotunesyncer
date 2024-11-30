@@ -3,6 +3,7 @@
 
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import { composeVideos } from '../../services/videoServices.js';
 
 const VideoComposer = ({ videoFiles, midiData }) => {
   const [isProcessing, setIsProcessing] = useState(false);
@@ -53,20 +54,33 @@ const VideoComposer = ({ videoFiles, midiData }) => {
         }
       }
 
-      const response = await axios.post('http://localhost:3000/api/compose', formData, {
-        responseType: 'blob',
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-        timeout: 900000, // 15 minutes
-        timeoutErrorMessage: 'Video composition took too long. Please try again.',
+      // const response = await axios.post('http://localhost:3000/api/compose', formData, {
+      //   responseType: 'blob',
+      //   headers: {
+      //     'Content-Type': 'multipart/form-data',
+      //   },
+      //   maxContentLength: Infinity,
+      //   maxBodyLength: Infinity,
+      //   timeout: 900000, // 15 minutes
+      //   timeoutErrorMessage: 'Video composition took too long. Please try again.',
+      //   onUploadProgress: (progressEvent) => {
+      //     const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+      //     setProgress(percentCompleted);
+      //   },
+      //   // Add download progress handling
+      //   onDownloadProgress: (progressEvent) => {
+      //     if (progressEvent.total) {
+      //       const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+      //       setProgress(percent);
+      //     }
+      //   },
+      // });
+
+      const response = await composeVideos(formData, {
         onUploadProgress: (progressEvent) => {
           const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           setProgress(percentCompleted);
         },
-        // Add download progress handling
         onDownloadProgress: (progressEvent) => {
           if (progressEvent.total) {
             const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);

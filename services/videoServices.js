@@ -69,37 +69,54 @@ export const videoService = {
       throw error;
     }
   },
+}
 
-  async composeVideos(videoFiles, midiData, onProgress) {
-    try {
-      const formData = new FormData();
+  // async composeVideos(videoFiles, midiData, onProgress) {
+  //   try {
+  //     const formData = new FormData();
 
-      // Add MIDI data
-      const midiBlob = new Blob([JSON.stringify(midiData)], {
-        type: 'application/json',
-      });
-      formData.append('midiData', midiBlob);
+  //     // Add MIDI data
+  //     const midiBlob = new Blob([JSON.stringify(midiData)], {
+  //       type: 'application/json',
+  //     });
+  //     formData.append('midiData', midiBlob);
 
-      // Add video files
-      Object.entries(videoFiles).forEach(([instrument, blob]) => {
-        if (!(blob instanceof Blob || blob instanceof File)) {
-          throw new VideoProcessingError(
-            'Invalid video format',
-            `Invalid file for instrument: ${instrument}`
-          );
-        }
-        formData.append(`videos[${instrument}]`, blob);
-      });
+  //     // Add video files
+  //     Object.entries(videoFiles).forEach(([instrument, blob]) => {
+  //       if (!(blob instanceof Blob || blob instanceof File)) {
+  //         throw new VideoProcessingError(
+  //           'Invalid video format',
+  //           `Invalid file for instrument: ${instrument}`
+  //         );
+  //       }
+  //       formData.append(`videos[${instrument}]`, blob);
+  //     });
 
-      const response = await fetch(`${API_BASE_URL}/compose`, {
-        method: 'POST',
-        body: formData,
-      });
+  //     const response = await fetch(`${API_BASE_URL}/compose`, {
+  //       method: 'POST',
+  //       body: formData,
+  //     });
 
-      const result = await handleApiResponse(response);
-      return await result.blob();
-    } catch (error) {
-      throw new VideoProcessingError('Composition failed', error.message);
-    }
-  },
-};
+  //     const result = await handleApiResponse(response);
+  //     return await result.blob();
+  //   } catch (error) {
+  //     throw new VideoProcessingError('Composition failed', error.message);
+  //   }
+  // },
+
+  // Frontend API call
+export const composeVideos= async (midiTracks, videoFile) => {
+  const response = await fetch(`${API_BASE_URL}/process-videos`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      midiTracks,
+      videos: videoFile
+    })
+  });
+  console.log('response:', response);  
+  return response.json();
+}
+
