@@ -105,18 +105,19 @@ export const videoService = {
   // },
 
   // Frontend API call
-export const composeVideos= async (midiTracks, videoFile) => {
+export const composeVideos = async (formData, progressCallbacks = {}) => {
   const response = await fetch(`${API_BASE_URL}/process-videos`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      midiTracks,
-      videos: videoFile
-    })
+    body: formData, // Send FormData directly
   });
-  console.log('response:', response);  
-  return response.json();
-}
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.error || 'Failed to process videos');
+  }
+
+  return {
+    data: await response.blob()
+  };
+};
 
