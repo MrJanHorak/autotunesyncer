@@ -26,55 +26,38 @@ const VideoComposer = ({ videoFiles, midiData }) => {
       // Add MIDI data
       const midiJsonString = JSON.stringify(midiData);
       const midiBlob = new Blob([midiJsonString], { type: 'application/json' });
-      formData.append('midiData', midiBlob, 'midi.json');
+      formData.append('midiData', midiBlob);
 
       // Process and append videos
-      for (const [instrumentName, videoUrl] of Object.entries(videoFiles)) {
-        try {
-          let videoBlob;
-          
-          // Handle both Blob and URL string cases
-          if (videoUrl instanceof Blob) {
-            videoBlob = videoUrl;
-          } else if (typeof videoUrl === 'string') {
-            // Handle URLs (could be object URLs or regular URLs)
-            const response = await fetch(videoUrl);
+      for (const [instrumentName, videoData] of Object.entries(videoFiles)) {
+        console.log(`Processing ${instrumentName} video:`, videoData);
+        
+        if (!videoData) {
+          console.error(`No video data for ${instrumentName}`);
+          continue;
+        }
+
+        // Convert video URL to Blob if needed
+        let videoBlob = videoData;
+        if (!(videoData instanceof Blob)) {
+          try {
+            const response = await fetch(videoData);
             if (!response.ok) throw new Error(`Failed to fetch video for ${instrumentName}`);
             videoBlob = await response.blob();
-          } else {
-            console.error(`Invalid video data for ${instrumentName}:`, videoUrl);
+          } catch (error) {
+            console.error(`Error processing video for ${instrumentName}:`, error);
             continue;
           }
-
-          formData.append(`videos[${instrumentName}]`, videoBlob, `${instrumentName}.mp4`);
-          console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}`);
-        } catch (error) {
-          console.error(`Error processing ${instrumentName}:`, error);
-          throw error;
         }
+
+        formData.append('videos', videoBlob, `${instrumentName}.mp4`);
+        console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}`);
       }
 
-      // const response = await axios.post('http://localhost:3000/api/compose', formData, {
-      //   responseType: 'blob',
-      //   headers: {
-      //     'Content-Type': 'multipart/form-data',
-      //   },
-      //   maxContentLength: Infinity,
-      //   maxBodyLength: Infinity,
-      //   timeout: 900000, // 15 minutes
-      //   timeoutErrorMessage: 'Video composition took too long. Please try again.',
-      //   onUploadProgress: (progressEvent) => {
-      //     const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-      //     setProgress(percentCompleted);
-      //   },
-      //   // Add download progress handling
-      //   onDownloadProgress: (progressEvent) => {
-      //     if (progressEvent.total) {
-      //       const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-      //       setProgress(percent);
-      //     }
-      //   },
-      // });
+      // Log FormData contents for debugging
+      for (const pair of formData.entries()) {
+        console.log('FormData entry:', pair[0], pair[1]);
+      }
 
       const response = await composeVideos(formData, {
         onUploadProgress: (progressEvent) => {
