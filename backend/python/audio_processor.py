@@ -21,6 +21,27 @@ logging.basicConfig(
     ]
 )
 
+def normalize_instrument_name(name):
+    """Match frontend's normalizeInstrumentName"""
+    return name.lower().replace(' ', '_')
+
+def get_drum_groups(track):
+    """Match frontend's DRUM_GROUPS logic"""
+    drum_groups = {
+        'kick': [35, 36],
+        'snare': [38, 40],
+        'hihat': [42, 44, 46],
+        'cymbal': [49, 51, 52, 55, 57],
+        'tom': [41, 43, 45, 47, 48, 50]
+    }
+    # Extract unique drum groups from track notes
+    groups = set()
+    for note in track.get('notes', []):
+        for group, midi_numbers in drum_groups.items():
+            if note['midi'] in midi_numbers:
+                groups.add(group)
+    return groups
+
 def is_drum_kit(instrument):
     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
     drum_keywords = ['standard kit', 'drum kit', 'drums', 'percussion']
@@ -178,54 +199,72 @@ def process_track_videos(tracks, videos):
             raise ValueError("Invalid tracks format in config")
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        logging.info(f"Available videos: {list(videos.keys())}")
         
         for track_idx, track in enumerate(tracks['tracks']):
             instrument = track.get('instrument', {})
-            instrument_name = instrument.get('name', 'default')
-            
-            if instrument_name not in videos:
-                continue
-                
-            video_path = os.path.join(base_dir, videos[instrument_name])
-            if not os.path.exists(video_path):
-                raise ValueError(f"Video file not found: {video_path}")
-            
-            logging.info(f"Processing track {track_idx}: {instrument_name}")
             
             if is_drum_kit(instrument):
-                logging.info(f"Skipping drum kit: {instrument_name}")
-                continue
-            
-            # Get unique notes only
-            unique_notes = {note['midi'] for note in track.get('notes', [])}
-            processed_videos[instrument_name] = []
-            
-            for midi_note in unique_notes:
-                try:
-                    output_path = os.path.join(
-                        processor.videos_dir,
-                        f"track_{track_idx}_{instrument_name}",
-                        f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                    )
-                    
-                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                    
-                    processed_path = processor.create_tuned_video(
-                        video_path,
-                        midi_note,
-                        output_path
-                    )
-                    
-                    processed_videos[instrument_name].append({
-                        'track': track_idx,
-                        'note': midi_note,
-                        'note_name': midi_to_note(midi_note),
-                        'path': processed_path
-                    })
-                    logging.info(f"Processed note {midi_note} for track {track_idx}")
-                except Exception as e:
-                    logging.error(f"Failed to process note {midi_note}: {str(e)}")
+                # Handle drum tracks
+                for group in get_drum_groups(track):
+                    instrument_key = f"drum_{group}"
+                    if instrument_key in videos:
+                        video_path = os.path.join(base_dir, videos[instrument_key])
+                        if not os.path.exists(video_path):
+                            logging.error(f"Drum video not found: {video_path}")
+                            continue
+                            
+                        processed_videos[instrument_key] = [{
+                            'track': track_idx,
+                            'type': 'drum',
+                            'group': group,
+                            'path': video_path
+                        }]
+                        logging.info(f"Processed drum track {track_idx}: {group}")
+            else:
+                # Handle instrument tracks
+                instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
+                if instrument_name not in videos:
+                    logging.warning(f"No video found for instrument: {instrument_name}")
                     continue
+                    
+                video_path = os.path.join(base_dir, videos[instrument_name])
+                if not os.path.exists(video_path):
+                    logging.error(f"Video not found: {video_path}")
+                    continue
+                
+                logging.info(f"Processing track {track_idx}: {instrument_name}")
+                
+                # Rest of your existing instrument processing code
+                unique_notes = {int(float(note['midi'])) for note in track.get('notes', [])}
+                processed_videos[instrument_name] = []
+                
+                for midi_note in unique_notes:
+                    try:
+                        output_path = os.path.join(
+                            processor.videos_dir,
+                            f"track_{track_idx}_{instrument_name}",
+                            f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                        )
+                        
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        
+                        processed_path = processor.create_tuned_video(
+                            video_path,
+                            midi_note,
+                            output_path
+                        )
+                        
+                        processed_videos[instrument_name].append({
+                            'track': track_idx,
+                            'note': midi_note,
+                            'note_name': midi_to_note(midi_note),
+                            'path': processed_path
+                        })
+                        logging.info(f"Processed note {midi_note} for track {track_idx}")
+                    except Exception as e:
+                        logging.error(f"Failed to process note {midi_note}: {str(e)}")
+                        continue
 
         return processed_videos
                     
