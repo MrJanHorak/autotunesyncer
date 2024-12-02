@@ -153,7 +153,7 @@ export async function runPythonProcessor(configPath) {
 
     const process = spawn('python', [
       pythonScript,
-      `--config=${configPath}` // Pass as named argument
+      configPath 
     ]);
 
     let output = '';
