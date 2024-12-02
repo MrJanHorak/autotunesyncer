@@ -213,6 +213,18 @@ def process_track_videos(tracks, videos):
                         if not os.path.exists(video_path):
                             logging.error(f"Drum video not found: {video_path}")
                             continue
+
+                         # Create drum output directory
+                        output_dir = os.path.join(
+                            processor.videos_dir,
+                            f"track_{track_idx}_drums",
+                            group
+                        )
+                        os.makedirs(output_dir, exist_ok=True)
+                        
+                        # Copy drum video to processed folder
+                        output_path = os.path.join(output_dir, f"{instrument_key}.mp4")
+                        shutil.copy2(video_path, output_path)
                             
                         processed_videos[instrument_key] = [{
                             'track': track_idx,
