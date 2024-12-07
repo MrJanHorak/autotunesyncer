@@ -2,7 +2,6 @@
 /* eslint-disable react/prop-types */
 
 import { useState, useEffect } from 'react';
-import axios from 'axios';
 import { composeVideos } from '../../services/videoServices.js';
 
 const VideoComposer = ({ videoFiles, midiData }) => {
