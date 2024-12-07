@@ -125,66 +125,66 @@
 // }
 
 
-import { spawn } from 'child_process';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs';
+// import { spawn } from 'child_process';
+// import path from 'path';
+// import { fileURLToPath } from 'url';
+// import fs from 'fs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// const __filename = fileURLToPath(import.meta.url);
+// const __dirname = path.dirname(__filename);
 
-export async function runPythonProcessor(configPath) {
-  return new Promise((resolve, reject) => {
-    const pythonScript = path.join(__dirname, '..', 'python', 'audio_processor.py');
+// export async function runPythonProcessor(configPath) {
+//   return new Promise((resolve, reject) => {
+//     const pythonScript = path.join(__dirname, '..', 'python', 'audio_processor.py');
     
-    // Read and verify config content
-    const configContent = fs.readFileSync(configPath, 'utf8');
-    console.log('Config file path:', configPath);
-    console.log('Config content:', configContent);
+//     // Read and verify config content
+//     const configContent = fs.readFileSync(configPath, 'utf8');
+//     console.log('Config file path:', configPath);
+//     console.log('Config content:', configContent);
     
-    try {
-      // Verify JSON is valid
-      JSON.parse(configContent);
-    } catch (e) {
-      console.error('Invalid JSON in config:', e);
-      reject(e);
-      return;
-    }
+//     try {
+//       // Verify JSON is valid
+//       JSON.parse(configContent);
+//     } catch (e) {
+//       console.error('Invalid JSON in config:', e);
+//       reject(e);
+//       return;
+//     }
 
-    const process = spawn('python', [
-      pythonScript,
-      configPath 
-    ]);
+//     const process = spawn('python', [
+//       pythonScript,
+//       configPath 
+//     ]);
 
-    let output = '';
-    let errorOutput = '';
+//     let output = '';
+//     let errorOutput = '';
 
-    process.stdout.on('data', (data) => {
-      const message = data.toString();
-      console.log(`Python output: ${message}`);
-      output += message;
-    });
+//     process.stdout.on('data', (data) => {
+//       const message = data.toString();
+//       console.log(`Python output: ${message}`);
+//       output += message;
+//     });
 
-    process.stderr.on('data', (data) => {
-      const message = data.toString();
-      console.error(`Python error: ${message}`);
-      errorOutput += message;
-    });
+//     process.stderr.on('data', (data) => {
+//       const message = data.toString();
+//       console.error(`Python error: ${message}`);
+//       errorOutput += message;
+//     });
 
-    process.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`Python process failed with code ${code}\nError: ${errorOutput}`));
-      } else {
-        try {
-          const result = JSON.parse(output);
-          resolve(result);
-        } catch (e) {
-          reject(new Error(`Failed to parse Python output: ${e.message}\nOutput: ${output}`));
-        }
-      }
-    });
-  });
-}
+//     process.on('close', (code) => {
+//       if (code !== 0) {
+//         reject(new Error(`Python process failed with code ${code}\nError: ${errorOutput}`));
+//       } else {
+//         try {
+//           const result = JSON.parse(output);
+//           resolve(result);
+//         } catch (e) {
+//           reject(new Error(`Failed to parse Python output: ${e.message}\nOutput: ${output}`));
+//         }
+//       }
+//     });
+//   });
+// }
 
 // export async function runPythonProcessor(configPath) {
 //   return new Promise((resolve, reject) => {
@@ -231,3 +231,51 @@ export async function runPythonProcessor(configPath) {
 //     });
 //   });
 // }
+
+// pythonBridge.js
+import { spawn } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export const runPythonProcessor = async (configPath) => {
+  return new Promise((resolve, reject) => {
+    // Change script path to compose_videos.py
+    const pythonScript = path.join(__dirname, '../python/compose_videos.py');
+    
+    const process = spawn('python', [
+      pythonScript,
+      configPath  // Pass config path directly
+    ]);
+
+    let output = '';
+    let errorOutput = '';
+
+    process.stdout.on('data', (data) => {
+      const message = data.toString();
+      console.log(`Python output: ${message}`);
+      output += message;
+    });
+
+    process.stderr.on('data', (data) => {
+      const message = data.toString();
+      console.error(`Python error: ${message}`);
+      errorOutput += message;
+    });
+
+    process.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`Python process failed with code ${code}\nError: ${errorOutput}`));
+      } else {
+        try {
+          const result = JSON.parse(output);
+          resolve(result);
+        } catch (e) {
+          reject(new Error(`Failed to parse Python output: ${e.message}\nOutput: ${output}`));
+        }
+      }
+    });
+  });
+};
