@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.10",
     "@tonejs/midi": "^2.0.28",
     "axios": "^1.7.7",
     "lucide-react": "^0.454.0",

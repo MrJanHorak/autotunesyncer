@@ -1,4 +1,5 @@
 # video_composer.py
+import numpy as np
 from pathlib import Path
 import logging
 from moviepy.editor import VideoFileClip, clips_array, CompositeVideoClip, ColorClip
@@ -20,33 +21,59 @@ class VideoComposer:
         self.midi_data = midi_data
         self.output_path = output_path
         self.frame_rate = 30
+        self.max_concurrent_clips = 4
+
+    def validate_clip(self, clip):
+        """Validate that clip was loaded properly"""
+        try:
+            if clip is None:
+                return False
+            # Try to access first frame to verify clip is valid
+            clip.get_frame(0)
+            return True
+        except Exception as e:
+            logging.error(f"Invalid clip: {str(e)}")
+            return False
 
     def get_track_layout(self):
-        """Determine grid layout based on number of valid tracks"""
-        # Only count tracks that have videos
         valid_tracks = []
-
-            # Log directory contents
-        logging.info(f"Scanning directory: {self.processed_videos_dir}")
-        for path in self.processed_videos_dir.rglob('*.mp4'):
-            logging.info(f"Found video file: {path}")
-
+        
+        logging.info(f"Checking tracks in: {self.processed_videos_dir}")
+        
         for track_idx, track in enumerate(self.midi_data['tracks']):
             instrument = track.get('instrument', {})
             instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
-            track_dir = self.processed_videos_dir / f"track_{track_idx}_{instrument_name}"
             
-            if track_dir.exists() and any(track_dir.glob('*.mp4')):
+            # Check all possible video locations
+            video_locations = [
+                f"track_{track_idx}_{instrument_name}",
+                f"{instrument_name}_notes",
+                f"track_{track_idx}_drums",
+            ]
+            
+            has_videos = False
+            for loc in video_locations:
+                dir_path = self.processed_videos_dir / loc
+                if dir_path.exists():
+                    video_files = list(dir_path.glob('*.mp4'))
+                    if video_files:
+                        has_videos = True
+                        logging.info(f"Found videos for track {track_idx} in {loc}: {len(video_files)} files")
+                        break
+            
+            if has_videos:
                 valid_tracks.append(track)
+                logging.info(f"Found valid track {track_idx}: {instrument_name}")
         
         track_count = len(valid_tracks)
-        logging.info(f"Found {track_count} valid tracks with videos")
+        logging.info(f"Total valid tracks: {track_count}")
         
+        # Calculate layout
         if track_count == 0:
-            raise ValueError("No valid tracks with videos found")
+            raise ValueError("No valid tracks found")
         elif track_count == 1:
             return (1, 1)
-        elif track_count <= 2:
+        elif track_count == 2:
             return (1, 2)
         elif track_count <= 4:
             return (2, 2)
@@ -59,67 +86,68 @@ class VideoComposer:
         try:
             instrument = track.get('instrument', {})
             instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
-            track_dir = self.processed_videos_dir / f"track_{track_idx}_{instrument_name}"
             
-            logging.info(f"Creating video for track {track_idx}: {instrument_name}")
+            # Check all possible video locations
+            video_locations = [
+                self.processed_videos_dir / f"track_{track_idx}_{instrument_name}",
+                self.processed_videos_dir / f"{instrument_name}_notes",
+                self.processed_videos_dir / f"track_{track_idx}_drums"
+            ]
             
-            if not track_dir.exists():
-                logging.warning(f"No video directory found for track {track_idx}")
-                return None
-                
             clips = []
-            
-            # Handle drum tracks differently
-            if is_drum_kit(instrument):
-                for group_file in track_dir.glob('*.mp4'):
-                    try:
-                        clip = VideoFileClip(str(group_file), audio=True)
-                        clip = clip.set_duration(duration)
-                        clips.append(clip)
-                    except Exception as e:
-                        logging.error(f"Error loading drum clip {group_file}: {e}")
-                        continue
-                if clips:
-                    return clips[0]  # Return first valid drum clip
-                return None
-                
-            # Handle instrument tracks
             background = None
-            for note in track.get('notes', []):
-                try:
-                    midi_note = int(float(note['midi']))
-                    note_file = track_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                    
-                    if note_file.exists():
-                        clip = VideoFileClip(str(note_file), audio=True)
-                        clip = clip.set_start(note['time'])
-                        clip = clip.set_duration(note['duration'])
-                        clips.append(clip)
-                        
-                        if background is None:
-                            background = ColorClip(
-                                size=(clip.w, clip.h),
-                                color=(0, 0, 0),
-                                duration=duration
-                            )
-                except Exception as e:
-                    logging.error(f"Error loading note clip {midi_note}: {e}")
-                    continue
-                    
-            if not clips:
-                return None
+            
+            # Handle drum tracks
+            if is_drum_kit(instrument):
+                drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+                if drum_dir.exists():
+                    for drum_file in drum_dir.glob('*.mp4'):
+                        try:
+                            clip = VideoFileClip(str(drum_file))
+                            # Loop drum clips to match duration
+                            num_loops = int(np.ceil(duration / clip.duration))
+                            extended_clip = clip.loop(n=num_loops)
+                            final_clip = extended_clip.subclip(0, duration)
+                            clips.append(final_clip)
+                            logging.info(f"Added drum clip: {drum_file}")
+                        except Exception as e:
+                            logging.error(f"Error loading drum clip {drum_file}: {e}")
                 
-            try:
-                # Handle memory more efficiently
-                final_clip = CompositeVideoClip(
-                    [background] + clips,
-                    size=background.size
-                ).set_duration(duration)
-                return final_clip
-            except Exception as e:
-                logging.error(f"Error compositing clips: {e}")
-                return None
-                
+                if clips:
+                    return CompositeVideoClip(clips).set_duration(duration)
+                    
+            # Handle instrument tracks
+            else:
+                for video_loc in video_locations:
+                    if video_loc.exists():
+                        for note in track.get('notes', []):
+                            try:
+                                midi_note = int(float(note['midi']))
+                                note_file = video_loc / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                                
+                                if note_file.exists():
+                                    clip = VideoFileClip(str(note_file))
+                                    start_time = float(note['time'])
+                                    clip = clip.set_start(start_time)
+                                    clip = clip.set_duration(float(note['duration']))
+                                    clips.append(clip)
+                                    
+                                    if background is None:
+                                        background = ColorClip(
+                                            size=(clip.w, clip.h),
+                                            color=(0, 0, 0),
+                                            duration=duration
+                                        )
+                            except Exception as e:
+                                logging.error(f"Error loading note clip {midi_note}: {e}")
+                                
+                if clips:
+                    if background:
+                        return CompositeVideoClip([background] + clips).set_duration(duration)
+                    return clips[0].set_duration(duration)
+                    
+            return None
+            
         except Exception as e:
             logging.error(f"Error creating track video: {str(e)}")
             return None
@@ -129,46 +157,77 @@ class VideoComposer:
             rows, cols = self.get_track_layout()
             valid_clips = []
             
+            # Calculate total duration
             max_time = max(
-                note['time'] + note['duration']
+                float(note['time']) + float(note['duration'])
                 for track in self.midi_data['tracks']
                 for note in track.get('notes', [])
-            )
+            ) + 1  # Add 1 second buffer
             
+            logging.info(f"Total composition duration: {max_time} seconds")
+            
+            # Process each track
             for track_idx, track in enumerate(self.midi_data['tracks']):
                 try:
                     clip = self.create_track_video(track, track_idx, max_time)
-                    if clip is not None:
+                    if clip is not None and self.validate_clip(clip):
+                        base_size = valid_clips[0].size if valid_clips else clip.size
+                        clip = clip.resize(base_size) if clip.size != base_size else clip
                         valid_clips.append(clip)
+                        logging.info(f"Added track {track_idx} to composition")
+                    else:
+                        logging.warning(f"Skipping invalid track {track_idx}")
                 except Exception as e:
                     logging.error(f"Error processing track {track_idx}: {e}")
                     continue
-                    
+            
             if not valid_clips:
                 raise ValueError("No valid clips created")
-                
-            # Process in smaller batches if needed
+            
+            # Create grid layout
             grid = []
-            for i in range(0, len(valid_clips), cols):
-                row = valid_clips[i:i + cols]
-                if row:
-                    grid.append(row)
-                    
+            for i in range(rows):
+                row = []
+                for j in range(cols):
+                    idx = i * cols + j
+                    if idx < len(valid_clips):
+                        row.append(valid_clips[idx])
+                    else:
+                        # Add black clip for empty spaces
+                        black_clip = ColorClip(
+                            valid_clips[0].size,
+                            color=(0, 0, 0),
+                            duration=max_time
+                        )
+                        row.append(black_clip)
+                grid.append(row)
+            
+            # Create final composition
             final_clip = clips_array(grid)
+            
+            # Write with progress reporting
             final_clip.write_videofile(
                 self.output_path,
                 fps=self.frame_rate,
                 codec='libx264',
                 audio=True,
                 audio_codec='aac',
+                preset='medium',
                 threads=4,
-                preset='medium'  # Balance between speed and quality
+                logger='bar'
             )
+            
+            # Clean up
+            for clip in valid_clips:
+                clip.close()
+            final_clip.close()
+            
+            return self.output_path
             
         except Exception as e:
             logging.error(f"Error in composition: {e}")
             raise
-
+        
 def compose_from_processor_output(processor_result, output_path):
     """Bridge function to be called from audio_processor.py"""
     try:
