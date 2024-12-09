@@ -28,3 +28,7 @@ venv
 /venv
 venv/
 venv_py31010/
+
+backend/python/processed_videos/
+backend/processed_videos/
+backend/uploads/
