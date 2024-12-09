@@ -6,6 +6,7 @@ import path from 'path';
 import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 
+
 const router = express.Router();
 
 // Ensure uploads directory exists
@@ -69,9 +70,16 @@ router.post('/', upload.any(), async (req, res) => {
       throw new Error('No video files found in upload');
     }
 
+    // videoFiles.forEach(file => {
+    //   const instrumentName = path.parse(file.originalname).name;
+    //   videos[instrumentName] = file.path;
+    //   console.log(`Processed video for ${instrumentName}: ${file.path}`);
+    // });
+
     videoFiles.forEach(file => {
       const instrumentName = path.parse(file.originalname).name;
-      videos[instrumentName] = file.path;
+      // Store absolute path
+      videos[instrumentName] = path.resolve(file.path);
       console.log(`Processed video for ${instrumentName}: ${file.path}`);
     });
 

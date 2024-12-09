@@ -35,19 +35,19 @@ const useRecordingState = (currentVideo) => {
     }
   }, []);
 
-  const handleDataAvailable = (event) => {
-    if (event.data && event.data.size > 0) {
-      const recordedBlob = new Blob([event.data], {
-        type: 'video/webm;codecs=vp8,opus', // Explicit codec specification
-      });
-      console.log('Recording format:', recordedBlob.type); // Debug log
-      setRecordingState((prev) => ({
-        ...prev,
-        recordedBlob,
-        recordedURL: URL.createObjectURL(recordedBlob),
-      }));
-    }
-  };
+  // const handleDataAvailable = (event) => {
+  //   if (event.data && event.data.size > 0) {
+  //     const recordedBlob = new Blob([event.data], {
+  //       type: 'video/webm;codecs=vp8,opus', // Explicit codec specification
+  //     });
+  //     console.log('Recording format:', recordedBlob.type); // Debug log
+  //     setRecordingState((prev) => ({
+  //       ...prev,
+  //       recordedBlob,
+  //       recordedURL: URL.createObjectURL(recordedBlob),
+  //     }));
+  //   }
+  // };
 
   useEffect(() => {
     return () => {
@@ -235,22 +235,22 @@ const VideoRecorder = ({
         showCountdown: true,
         isCountingDown: true,
       }));
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 30 }
-        }
-      });
+      // const stream = await navigator.mediaDevices.getUserMedia({
+      //   audio: true,
+      //   video: {
+      //     width: { ideal: 640 },
+      //     height: { ideal: 480 },
+      //     frameRate: { ideal: 30 }
+      //   }
+      // });
   
-      const options = {
-        mimeType: 'video/webm;codecs=vp8,opus',
-        videoBitsPerSecond: 2500000, // 2.5 Mbps
-        audioBitsPerSecond: 128000   // 128 kbps
-      };
+      // const options = {
+      //   mimeType: 'video/webm;codecs=vp8,opus',
+      //   videoBitsPerSecond: 2500000, // 2.5 Mbps
+      //   audioBitsPerSecond: 128000   // 128 kbps
+      // };
       
-      const mediaRecorder = new MediaRecorder(stream, options);
+      // const mediaRecorder = new MediaRecorder(stream, options);
     } catch (error) {
       console.error('Recording failed:', error);
       alert('Failed to start recording. Please check your camera permissions.');
