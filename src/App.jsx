@@ -239,7 +239,7 @@ const App = () => {
       // First, initialize audio context if not started
       if (!audioContextStarted) {
         // Create a temporary user interaction to start audio context
-        const tempContext = new (window.AudioContext || window.webkitAudioContext)();
+        const tempContext = new window.AudioContext();
         await tempContext.resume();
         await Tone.start();
         setAudioContextStarted(true);
