@@ -137,7 +137,10 @@ class AudioVideoProcessor:
         self.session_id = str(uuid.uuid4())
         self.videos_dir = None
         # Add base directory for all processed videos
-        self.base_videos_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'processed_videos')
+        self.base_videos_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            "processed_videos"
+        )
     
     def setup_temp_directory(self):
         """Create temporary directories for processing files"""

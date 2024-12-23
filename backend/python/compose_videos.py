@@ -27,14 +27,35 @@ if __name__ == "__main__":
         
         output_path = Path(processor.videos_dir).parent / f"final_composition_{processor.session_id}.mp4"
         
-        composition_result = compose_from_processor_output(
-            {
-                'processed_videos_dir': processor.videos_dir,
-                'tracks': config['tracks'],
-                'processed_files': result
-            },
-            str(output_path)
-        )
+        # composition_result = compose_from_processor_output(
+        #     {
+        #         'processed_videos_dir': processor.videos_dir,
+        #         'tracks': config['tracks'],
+        #         'processed_files': result
+        #     },
+        #     str(output_path)
+        # )
+
+        try:
+            composition_result = compose_from_processor_output(
+                {
+                    'processed_videos_dir': processor.videos_dir,
+                    'tracks': config['tracks'],
+                    'processed_files': result
+                },
+                str(output_path)
+            )
+            
+            if not composition_result:
+                raise Exception("Composition failed - no result returned")
+                
+            # Verify final output exists
+            if not os.path.exists(output_path):
+                raise Exception(f"Final composition file not found at {output_path}")
+                
+        except Exception as e:
+            logging.error(f"Composition error: {str(e)}")
+            raise
         
         print(json.dumps({
             'success': True,
