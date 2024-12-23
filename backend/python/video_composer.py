@@ -2,6 +2,7 @@
 import numpy as np
 from pathlib import Path
 import logging
+import cv2
 from moviepy.editor import VideoFileClip, clips_array, CompositeVideoClip, ColorClip, concatenate_videoclips
 from utils import normalize_instrument_name, midi_to_note
 from drum_utils import is_drum_kit
@@ -17,33 +18,133 @@ logging.basicConfig(
     ]
 )
 
-
-
 class VideoComposer:
     def __init__(self, processed_videos_dir, midi_data, output_path):
-        self.processed_videos_dir = Path(processed_videos_dir)
-        self.midi_data = midi_data
-        self.output_path = output_path
-        self.frame_rate = 30
-        self.chunk_duration = 10  # Process 10 seconds at a time
-        self.temp_dir = Path(self.processed_videos_dir) / "temp_composition"
-        self.temp_dir.mkdir(exist_ok=True)
-
-    def validate_clip(self, clip):
-        """Validate that clip was loaded properly"""
+        """Initialize VideoComposer with proper path handling"""
         try:
-            if clip is None:
-                return False
+            # Debug logging
+            logging.info(f"Input type: {type(processed_videos_dir)}")
+            logging.info(f"Input value: {processed_videos_dir}")
+            
+            # Extract path from input
+            if isinstance(processed_videos_dir, dict):
+                logging.info("Processing dict input")
+                if 'processed_videos_dir' in processed_videos_dir:
+                    dir_path = str(processed_videos_dir['processed_videos_dir'])
+                elif 'base_path' in processed_videos_dir:
+                    dir_path = str(processed_videos_dir['base_path'])
+                else:
+                    logging.error(f"Invalid dict structure: {processed_videos_dir}")
+                    raise ValueError("Missing path in dictionary")
+            else:
+                dir_path = str(processed_videos_dir)
                 
-            # Try to access first frame
-            test_frame = clip.get_frame(0)
-            if test_frame is None or len(test_frame.shape) < 2:
-                return False
+            # Convert and validate path
+            self.processed_videos_dir = Path(dir_path).resolve()
+            if not isinstance(self.processed_videos_dir, Path):
+                raise TypeError(f"Failed to convert to Path: {dir_path}")
                 
-            return True
+            logging.info(f"Resolved path: {self.processed_videos_dir}")
+            
+            # Setup remaining attributes
+            self.midi_data = midi_data
+            self.frame_rate = 30
+            self.chunk_duration = 10
+            self.temp_dir = self.processed_videos_dir / "temp_composition"
+            self.temp_dir.mkdir(exist_ok=True, parents=True)
+            
+            # Validate path exists
+            if not self.processed_videos_dir.exists():
+                raise ValueError(f"Directory not found: {self.processed_videos_dir}")
+                
+        except Exception as e:
+            logging.error(f"VideoComposer init error: {str(e)}")
+            raise
+
+    def get_track_path(self, track_idx, instrument_name):
+        """Get validated path for track directory"""
+        try:
+            track_dir = self.processed_videos_dir / f"track_{track_idx}_{instrument_name}"
+            track_dir = Path(str(track_dir))  # Ensure Path object
+            
+            if not track_dir.is_dir():
+                logging.error(f"Track directory not found: {track_dir}")
+                return None
+                
+            return track_dir
             
         except Exception as e:
-            logging.error(f"Invalid clip: {str(e)}")
+            logging.error(f"Error validating track path: {e}")
+            return None
+
+
+    def create_track_chunk(self, track, track_idx, start_time, end_time, chunk_notes):
+        try:
+            if not track or not chunk_notes:
+                return None
+
+            instrument = track.get('instrument', {})
+            instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
+            
+            # Get validated track directory
+            track_dir = self.get_track_path(track_idx, instrument_name)
+            if not track_dir:
+                return None
+
+            # Get grid dimensions for resizing
+            grid_size = self.get_track_layout()
+            target_width, target_height = self.get_target_dimensions(grid_size)
+                
+            clips = []
+            for note in chunk_notes:
+                midi_note = int(float(note['midi']))
+                note_file = track_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                
+                if note_file.exists():
+                    try:
+                        with VideoFileClip(str(note_file)) as clip:
+                            if self.validate_clip(clip):
+                                clip_copy = clip.copy()
+                                clip_copy = clip_copy.resize(width=target_width, height=target_height)
+                                clips.append(clip_copy)
+                            else:
+                                logging.error(f"Invalid clip: {note_file}")
+                    except Exception as e:
+                        logging.error(f"Error loading clip {note_file}: {e}")
+                        continue
+                        
+            if not clips:
+                logging.error(f"No valid clips found for track {track_idx}")
+                return None
+                
+            return clips[0]
+            
+        except Exception as e:
+            logging.error(f"Error in create_track_chunk: {e}")
+            return None
+    
+    def get_target_dimensions(self, grid_size):
+        """Calculate target dimensions for each clip in grid"""
+        rows, cols = grid_size
+        target_width = 1920 // cols  # Assuming 1920x1080 output
+        target_height = 1080 // rows
+        return (target_width, target_height)
+
+    def validate_clip(self, clip):
+        try:
+            if not clip:
+                logging.error("Clip is None")
+                return False
+            if not hasattr(clip, 'get_frame'):
+                logging.error("Clip missing get_frame")
+                return False
+            frame = clip.get_frame(0)
+            if frame is None:
+                logging.error("Frame is None")
+                return False
+            return True
+        except Exception as e:
+            logging.error(f"Clip validation failed: {str(e)}")
             return False
 
     def get_track_layout(self):
@@ -93,85 +194,144 @@ class VideoComposer:
             rows = (track_count + cols - 1) // cols
             return (rows, cols)
     
+    # def create_track_chunk(self, track, track_idx, start_time, end_time, chunk_notes):
+    #     """Process a specific time chunk of a track"""
+    #     try:
+    #         instrument = track.get('instrument', {})
+    #         instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
+            
+    #         # Handle drum tracks
+    #         if is_drum_kit(instrument):
+    #             drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+    #             if drum_dir.exists():
+    #                 drum_clips = []
+    #                 for drum_file in drum_dir.glob('*.mp4'):
+    #                     try:
+    #                         with VideoFileClip(str(drum_file)) as base_clip:
+    #                             if not self.validate_clip(base_clip):
+    #                                 logging.error(f"Invalid drum clip: {drum_file}")
+    #                                 continue
+                                    
+    #                             # Calculate how many times to loop in this chunk
+    #                             chunk_duration = end_time - start_time
+    #                             num_loops = int(np.ceil(chunk_duration / base_clip.duration))
+                                
+    #                             # Create looped clip for this chunk
+    #                             looped_clip = base_clip.loop(n=num_loops)
+    #                             chunk_clip = looped_clip.subclip(0, chunk_duration)
+    #                             drum_clips.append(chunk_clip)
+                                
+    #                     except Exception as e:
+    #                         logging.error(f"Error processing drum clip {drum_file}: {e}")
+    #                         continue
+                    
+    #                 if drum_clips:
+    #                     return CompositeVideoClip(drum_clips).set_duration(end_time - start_time)
+    #                 return None
+                    
+    #         # Handle instrument tracks
+    #         else:
+
+    #             grid_size = self.get_track_layout()
+    #             target_width, target_height = self.get_target_dimensions(grid_size)
+    #             clips = []
+    #             background = None
+    #             notes_dir = self.processed_videos_dir / f"{instrument_name}_notes"
+                
+    #             if notes_dir.exists():
+    #                 for note in chunk_notes:
+    #                     try:
+    #                         midi_note = int(float(note['midi']))
+    #                         note_file = notes_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                            
+    #                         if note_file.exists():
+    #                             clip = VideoFileClip(str(note_file))
+    #                             if self.validate_clip(clip):
+    #                                 # Resize clip to fit grid cell
+    #                                 clip_copy = clip.resize(width=target_width, height=target_height)
+    #                                 clips.append(clip_copy)
+    #                             with VideoFileClip(str(note_file)) as clip:
+    #                                 if not self.validate_clip(clip):
+    #                                     logging.error(f"Invalid note clip: {note_file}")
+    #                                     continue
+                                        
+    #                                 # Adjust note timing relative to chunk
+    #                                 relative_start = float(note['time']) - start_time
+    #                                 clip = clip.set_start(relative_start)
+    #                                 clip = clip.set_duration(float(note['duration']))
+    #                                 clips.append(clip)
+                                    
+    #                                 if background is None:
+    #                                     background = ColorClip(
+    #                                         clip.size,
+    #                                         color=(0, 0, 0),
+    #                                         duration=end_time - start_time
+    #                                     )
+                                        
+    #                     except Exception as e:
+    #                         logging.error(f"Error processing note {midi_note}: {e}")
+    #                         continue
+                
+    #             if clips:
+    #                 if background:
+    #                     return CompositeVideoClip([background] + clips)
+    #                 return clips[0]
+                
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating track chunk: {str(e)}")
+    #         return None
+
     def create_track_chunk(self, track, track_idx, start_time, end_time, chunk_notes):
-        """Process a specific time chunk of a track"""
         try:
+            if not track or not chunk_notes:
+                return None
+
+            # Get grid dimensions for resizing
+            grid_size = self.get_track_layout()
+            target_width, target_height = self.get_target_dimensions(grid_size)
+                
+            # Convert paths to proper types
+            base_dir = Path(str(self.processed_videos_dir))
             instrument = track.get('instrument', {})
             instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
             
-            # Handle drum tracks
-            if is_drum_kit(instrument):
-                drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
-                if drum_dir.exists():
-                    drum_clips = []
-                    for drum_file in drum_dir.glob('*.mp4'):
-                        try:
-                            with VideoFileClip(str(drum_file)) as base_clip:
-                                if not self.validate_clip(base_clip):
-                                    logging.error(f"Invalid drum clip: {drum_file}")
-                                    continue
-                                    
-                                # Calculate how many times to loop in this chunk
-                                chunk_duration = end_time - start_time
-                                num_loops = int(np.ceil(chunk_duration / base_clip.duration))
-                                
-                                # Create looped clip for this chunk
-                                looped_clip = base_clip.loop(n=num_loops)
-                                chunk_clip = looped_clip.subclip(0, chunk_duration)
-                                drum_clips.append(chunk_clip)
-                                
-                        except Exception as e:
-                            logging.error(f"Error processing drum clip {drum_file}: {e}")
-                            continue
-                    
-                    if drum_clips:
-                        return CompositeVideoClip(drum_clips).set_duration(end_time - start_time)
-                    return None
-                    
-            # Handle instrument tracks
-            else:
-                clips = []
-                background = None
-                notes_dir = self.processed_videos_dir / f"{instrument_name}_notes"
-                
-                if notes_dir.exists():
-                    for note in chunk_notes:
-                        try:
-                            midi_note = int(float(note['midi']))
-                            note_file = notes_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                            
-                            if note_file.exists():
-                                with VideoFileClip(str(note_file)) as clip:
-                                    if not self.validate_clip(clip):
-                                        logging.error(f"Invalid note clip: {note_file}")
-                                        continue
-                                        
-                                    # Adjust note timing relative to chunk
-                                    relative_start = float(note['time']) - start_time
-                                    clip = clip.set_start(relative_start)
-                                    clip = clip.set_duration(float(note['duration']))
-                                    clips.append(clip)
-                                    
-                                    if background is None:
-                                        background = ColorClip(
-                                            clip.size,
-                                            color=(0, 0, 0),
-                                            duration=end_time - start_time
-                                        )
-                                        
-                        except Exception as e:
-                            logging.error(f"Error processing note {midi_note}: {e}")
-                            continue
-                
-                if clips:
-                    if background:
-                        return CompositeVideoClip([background] + clips)
-                    return clips[0]
-                
+            # Use correct directory structure
+            notes_dir = base_dir / f"track_{track_idx}_{instrument_name}"
+            logging.info(f"Looking for notes in: {notes_dir}")
+            
+            if not notes_dir.exists():
+                logging.error(f"Notes directory not found: {notes_dir}")
                 return None
                 
+            clips = []
+            for note in chunk_notes:
+                midi_note = int(float(note['midi']))
+                note_file = notes_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                
+                if note_file.exists():
+                    try:
+                        with VideoFileClip(str(note_file)) as clip:
+                            if self.validate_clip(clip):
+                                clip_copy = clip.copy()
+                                # Resize to fit grid
+                                clip_copy = clip_copy.resize(width=target_width, height=target_height)
+                                clips.append(clip_copy)
+                            else:
+                                logging.error(f"Invalid clip: {note_file}")
+                    except Exception as e:
+                        logging.error(f"Error loading clip {note_file}: {e}")
+                        continue
+                        
+            if not clips:
+                logging.error(f"No valid clips found for track {track_idx}")
+                return None
+                
+            return clips[0]
+            
         except Exception as e:
-            logging.error(f"Error creating track chunk: {str(e)}")
+            logging.error(f"Error in create_track_chunk: {e}")
             return None
         
     def create_track_video(self, track, track_idx, duration):
@@ -363,33 +523,37 @@ def compose_from_processor_output(processor_result, output_path):
         base_dir = processor_result['processed_videos_dir']
         logging.info(f"Using base directory: {base_dir}")
         
-        # Log available tracks and paths
+        # Store validated tracks
+        validated_tracks = {}
+        
+        # Validate tracks once
         if 'tracks' in processor_result['processed_files']:
             for instrument, data in processor_result['processed_files']['tracks'].items():
-                logging.info(f"Found instrument track: {instrument}")
-                logging.info(f"Base path: {data['base_path']}")
-                logging.info(f"Available notes: {list(data['notes'].keys())}")
-                
-        if 'drum_tracks' in processor_result['processed_files']:
-            for drum, data in processor_result['processed_files']['drum_tracks'].items():
-                logging.info(f"Found drum track: {drum}")
-                logging.info(f"Path: {data['path']}")
-        
-        composer = VideoComposer(
-            processed_videos_dir=base_dir,
-            midi_data=processor_result['tracks'],
-            output_path=output_path
-        )
-        
-        track_count = len(processor_result['processed_files']['tracks']) + len(processor_result['processed_files']['drum_tracks'])
-        logging.info(f"Starting video composition with {track_count} tracks")
-        
-        composer.create_composition()
-        
-        return {
-            'output_path': output_path,
-            'track_count': track_count
-        }
+                track_path = data['base_path']
+                if os.path.exists(track_path):
+                    note_files = {
+                        note: path for note, path in data['notes'].items()
+                        if os.path.exists(path)
+                    }
+                    if note_files:
+                        validated_tracks[instrument] = {
+                            'base_path': track_path,
+                            'notes': note_files
+                        }
+                        logging.info(f"Validated {instrument} track with {len(note_files)} notes")
+                    else:
+                        logging.error(f"No valid note files for {instrument}")
+                else:
+                    logging.error(f"Track path not found: {track_path}")
+
+        if not validated_tracks:
+            raise Exception("No valid tracks found for composition")
+
+        # Create composition with validated tracks
+        composer = VideoComposer(base_dir, processor_result['tracks'], output_path)
+        composer.tracks = validated_tracks
+        return composer.create_composition()
+
     except Exception as e:
         logging.error(f"Error in video composition: {str(e)}")
         raise
