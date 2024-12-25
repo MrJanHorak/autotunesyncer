@@ -1,13 +1,21 @@
-# video_composer.py
-import numpy as np
-from pathlib import Path
+import os
+import gc
 import logging
+from pathlib import Path
+
+# Third-party imports
+import numpy as np
 import cv2
-from moviepy.editor import VideoFileClip, clips_array, CompositeVideoClip, ColorClip, concatenate_videoclips
+from moviepy.editor import (
+    VideoFileClip,
+    clips_array,
+    CompositeVideoClip,
+    ColorClip,
+    concatenate_videoclips
+)
+
 from utils import normalize_instrument_name, midi_to_note
 from drum_utils import is_drum_kit
-import gc
-import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,47 +88,70 @@ class VideoComposer:
 
     def create_track_chunk(self, track, track_idx, start_time, end_time, chunk_notes):
         try:
-            if not track or not chunk_notes:
-                return None
-
-            instrument = track.get('instrument', {})
-            instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
-            
-            # Get validated track directory
-            track_dir = self.get_track_path(track_idx, instrument_name)
-            if not track_dir:
-                return None
-
-            # Get grid dimensions for resizing
-            grid_size = self.get_track_layout()
-            target_width, target_height = self.get_target_dimensions(grid_size)
-                
             clips = []
-            for note in chunk_notes:
-                midi_note = int(float(note['midi']))
-                note_file = track_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                
-                if note_file.exists():
-                    try:
-                        with VideoFileClip(str(note_file)) as clip:
-                            if self.validate_clip(clip):
-                                clip_copy = clip.copy()
-                                clip_copy = clip_copy.resize(width=target_width, height=target_height)
-                                clips.append(clip_copy)
-                            else:
-                                logging.error(f"Invalid clip: {note_file}")
-                    except Exception as e:
-                        logging.error(f"Error loading clip {note_file}: {e}")
-                        continue
-                        
-            if not clips:
-                logging.error(f"No valid clips found for track {track_idx}")
-                return None
-                
-            return clips[0]
+            logging.info(f"Processing chunk from {start_time} to {end_time}")
+            logging.info(f"Number of notes to process: {len(chunk_notes)}")
             
+            for note in chunk_notes:
+                try:
+                    midi_note = int(float(note['midi']))
+                    note_file = self.get_track_path(track_idx, f"note_{midi_note}_{midi_to_note(midi_note)}.mp4")
+                    
+                    # Log note details
+                    logging.info(f"\nProcessing note:")
+                    logging.info(f"MIDI Note: {midi_note}")
+                    logging.info(f"Note Path: {note_file}")
+                    logging.info(f"Start Time: {note.get('start', 0)}")
+                    logging.info(f"End Time: {note.get('end', 'Not specified')}")
+                    
+                    if note_file.exists():
+                        logging.info(f"Loading video file: {note_file}")
+                        clip = VideoFileClip(str(note_file))
+                        
+                        # Log clip details
+                        logging.info(f"Clip loaded: {clip is not None}")
+                        if clip:
+                            logging.info(f"Clip duration: {clip.duration}")
+                            logging.info(f"Clip size: {clip.size if hasattr(clip, 'size') else 'Unknown'}")
+                        
+                        if clip and hasattr(clip, 'get_frame'):
+                            test_frame = clip.get_frame(0)
+                            if test_frame is not None:
+                                start = float(note.get('start', 0))
+                                end = float(note.get('end', start + clip.duration))
+                                clip = clip.set_duration(end - start)
+                                clips.append(clip)
+                                logging.info(f"Successfully added clip for note {midi_note}")
+                            else:
+                                logging.error(f"No frame data for note {midi_note}")
+                        else:
+                            if clip:
+                                clip.close()
+                            logging.error(f"Invalid clip structure for note {midi_note}")
+                    else:
+                        logging.error(f"Note file does not exist: {note_file}")
+                        
+                except Exception as e:
+                    logging.error(f"Error processing note {midi_note}: {str(e)}")
+                    continue
+
+                if not clips:
+                    logging.error("No valid clips to compose")
+                    return None
+
+            # Create composite with explicit size
+            try:
+                chunk = CompositeVideoClip(clips, size=(1920, 1080))
+                if not hasattr(chunk, 'get_frame'):
+                    logging.error("Invalid composite chunk")
+                    return None
+                return chunk.set_duration(end_time - start_time)
+            except Exception as e:
+                logging.error(f"Composite creation error: {str(e)}")
+                return None
+
         except Exception as e:
-            logging.error(f"Error in create_track_chunk: {e}")
+            logging.error(f"Chunk creation error: {str(e)}")
             return None
     
     def get_target_dimensions(self, grid_size):
@@ -307,32 +338,63 @@ class VideoComposer:
                 
             clips = []
             for note in chunk_notes:
-                midi_note = int(float(note['midi']))
-                note_file = notes_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                
-                if note_file.exists():
-                    try:
-                        with VideoFileClip(str(note_file)) as clip:
-                            if self.validate_clip(clip):
-                                clip_copy = clip.copy()
-                                # Resize to fit grid
-                                clip_copy = clip_copy.resize(width=target_width, height=target_height)
-                                clips.append(clip_copy)
-                            else:
-                                logging.error(f"Invalid clip: {note_file}")
-                    except Exception as e:
-                        logging.error(f"Error loading clip {note_file}: {e}")
-                        continue
+                try:
+                    midi_note = int(float(note['midi']))
+                    # Log note information
+                    logging.info(f"\n=== Note Processing Details ===")
+                    logging.info(f"Processing MIDI note: {midi_note}")
+                    logging.info(f"Note data: {note}")
+                    
+                    # Log directory structure
+                    logging.info(f"Notes directory: {notes_dir}")
+                    logging.info(f"Directory exists: {notes_dir.exists()}")
+                    
+                    # Construct and log file path
+                    note_filename = f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                    note_file = notes_dir / note_filename
+                    
+                    logging.info(f"Constructed filename: {note_filename}")
+                    logging.info(f"Full path: {note_file}")
+
+                    if note_file.exists():
+                        clip = VideoFileClip(str(note_file))
+                        if self.validate_clip(clip):
+                            clip = clip.set_start(float(note['time']) - start_time)
+                            clip = clip.set_duration(float(note['duration']))
+                            clips.append(clip)
+                        else:
+                            logging.error(f"Invalid clip: {note_file}")
+                    else:
+                        logging.warning(f"Note file not found: {note_file}")
                         
-            if not clips:
-                logging.error(f"No valid clips found for track {track_idx}")
-                return None
+                except ValueError as e:
+                    logging.error(f"Error processing note {note}: {e}")
+                    continue
+                    
+            if clips:
+                return CompositeVideoClip(clips).set_duration(end_time - start_time)
+            return None
+        
+        # except Exception as e:
+        #     logging.error(f"Error loading clip {note_file}: {e}")
+        #     return None
+            
+        #     if not clips:
+        #         logging.error(f"No valid clips found for track {track_idx}")
+        #         return None
                 
-            return clips[0]
+        #     return clips[0]
             
         except Exception as e:
-            logging.error(f"Error in create_track_chunk: {e}")
-            return None
+                logging.error(f"Error in create_track_chunk: {e}")
+                return None
+        finally:
+            # Clean up any open clips
+            for clip in clips:
+                try:
+                    clip.close()
+                except:
+                    pass
         
     def create_track_video(self, track, track_idx, duration):
         try:
@@ -526,28 +588,38 @@ def compose_from_processor_output(processor_result, output_path):
         # Store validated tracks
         validated_tracks = {}
         
+
         # Validate tracks once
         if 'tracks' in processor_result['processed_files']:
             for instrument, data in processor_result['processed_files']['tracks'].items():
-                track_path = data['base_path']
-                if os.path.exists(track_path):
-                    note_files = {
-                        note: path for note, path in data['notes'].items()
-                        if os.path.exists(path)
-                    }
-                    if note_files:
-                        validated_tracks[instrument] = {
-                            'base_path': track_path,
-                            'notes': note_files
-                        }
-                        logging.info(f"Validated {instrument} track with {len(note_files)} notes")
+                try:
+                    # Construct track path from track data
+                    track_idx = data.get('track_idx', 0)
+                    track_path = os.path.join(base_dir, f"track_{track_idx}_acoustic_grand_piano")
+                    
+                    logging.info(f"Checking track for instrument: {instrument}")
+                    logging.info(f"Track path to check: {track_path}")
+                    
+                    if os.path.exists(track_path):
+                        note_files = {}
+                        # Process each note using the correct path structure
+                        for note_num, note_data in data.get('notes', {}).items():
+                            note_path = note_data.get('path')
+                            if note_path and os.path.exists(note_path):
+                                note_files[note_num] = note_path
+                        
+                        if note_files:
+                            validated_tracks[instrument] = {
+                                'base_path': track_path,
+                                'notes': note_files
+                            }
+                            logging.info(f"Validated {len(note_files)} notes for {instrument}")
                     else:
-                        logging.error(f"No valid note files for {instrument}")
-                else:
-                    logging.error(f"Track path not found: {track_path}")
-
-        if not validated_tracks:
-            raise Exception("No valid tracks found for composition")
+                        logging.error(f"Track directory not found: {track_path}")
+                        
+                except Exception as e:
+                    logging.error(f"Error processing track {instrument}: {str(e)}")
+                    continue
 
         # Create composition with validated tracks
         composer = VideoComposer(base_dir, processor_result['tracks'], output_path)
