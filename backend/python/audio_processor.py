@@ -84,7 +84,7 @@ def convert_video_format(input_path, output_path):
             'ffmpeg',
             '-y',
             '-i', input_path,
-            '-c:v', 'libx264',
+            '-c:v', 'h264_nvenc',
             '-preset', 'medium',
             '-crf', '23',
             '-c:a', 'aac',
@@ -189,7 +189,7 @@ class AudioVideoProcessor:
                 'ffmpeg',
                 '-y',
                 '-i', video_path,
-                '-c:v', 'libx264',
+                '-c:v', 'h264_nvenc',
                 '-preset', 'medium',
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
@@ -251,7 +251,7 @@ class AudioVideoProcessor:
                 '-y',
                 '-i', temp_video,
                 '-i', tuned_audio,
-                '-c:v', 'libx264',  # Re-encode instead of copy
+                '-c:v', 'h264_nvenc',  # Re-encode instead of copy
                 '-preset', 'medium',
                 '-crf', '23',
                 '-c:a', 'aac',

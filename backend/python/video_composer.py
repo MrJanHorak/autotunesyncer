@@ -97,14 +97,32 @@ class VideoComposer:
         """Helper to generate consistent drum position keys"""
         return f"drum_{midi_note}_{drum_name.lower()}"
 
-    def get_chunk_notes(self, track, start_time, end_time):
-        """Get notes within chunk timeframe"""
+    def get_chunk_notes(self, track, start_time, end_time, include_overlap=True):
+        """Get notes within chunk timeframe including overlaps"""
         try:
-            return [
-                note for note in track.get('notes', [])
-                if (float(note['time']) >= start_time and 
-                    float(note['time']) < end_time)
-            ]
+            notes = []
+            for note in track.get('notes', []):
+                note_start = float(note['time'])
+                note_end = note_start + float(note.get('duration', 0))
+                
+                # Include notes that:
+                # 1. Start within chunk
+                # 2. End within chunk
+                # 3. Span across chunk boundary
+                if (note_start >= start_time and note_start < end_time) or \
+                (note_end > start_time and note_end <= end_time) or \
+                (note_start <= start_time and note_end >= end_time):
+                    
+                    # Calculate adjusted start time relative to chunk
+                    if note_start < start_time:
+                        note = note.copy()
+                        time_diff = start_time - note_start
+                        note['time'] = start_time
+                        note['duration'] = float(note['duration']) - time_diff
+                    
+                    notes.append(note)
+                    
+            return notes
         except Exception as e:
             logging.error(f"Error getting chunk notes: {e}")
             return []
@@ -274,16 +292,26 @@ class VideoComposer:
     #         logging.error(f"Layout error: {str(e)}")
     #         return (1, 1)
 
+    def has_valid_notes(self, track):
+        """Check if track has any valid notes"""
+        notes = track.get('notes', [])
+        return len(notes) > 0
+
     def get_track_layout(self):
         try:
             total_slots = 0
             self.grid_positions = {}
+
+            # Filter tracks with notes first
+            valid_tracks = [(idx, track) for idx, track in enumerate(self.midi_data['tracks'])
+                            if self.has_valid_notes(track)]
             
             # Log grid layout header
             logging.info("\nGrid Layout Planning:")
+            logging.info(f"\nFound {len(valid_tracks)} tracks with notes:")
             
             # First pass - Count all tracks including drums
-            for track_idx, track in enumerate(self.midi_data['tracks']):
+            for track_idx, track in valid_tracks:
                 if is_drum_kit(track.get('instrument', {})):
                     # For drum tracks, count each drum group separately
                     drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
@@ -321,32 +349,175 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Layout error: {str(e)}")
             return (1, 1)
+        
+    def process_chunk(self, tracks, start_time, end_time, chunk_idx):
+        """Process chunk with overlapping notes"""
+        try:
+             # Add overlap buffer at chunk boundaries
+            OVERLAP_DURATION = 0.1  # 100ms overlap
+            
+            # Extend chunk time range to include overlap
+            actual_start = start_time - (OVERLAP_DURATION if chunk_idx > 0 else 0)
+            actual_end = end_time + OVERLAP_DURATION
+            
+            # Get grid dimensions
+            rows, cols = self.get_track_layout()
+            grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+                            color=(0,0,0), 
+                            duration=actual_end - actual_start) 
+                    for _ in range(cols)] 
+                    for _ in range(rows)]
+
+            # Get notes including overlap periods
+            for track_idx, track in enumerate(self.midi_data['tracks']):
+                chunk_notes = self.get_chunk_notes(
+                    track, 
+                    actual_start, 
+                    actual_end, 
+                    include_overlap=True
+                )
+                
+                # Process notes with adjusted timing
+                for note in chunk_notes:
+                    # Adjust note timing relative to chunk start
+                    note_time = float(note['time']) - actual_start
+                    note_duration = float(note.get('duration', 0))
+
+            # Get grid dimensions
+            rows = math.ceil(len(tracks) / 2)
+            cols = 2
+            grid = [[None for _ in range(cols)] for _ in range(rows)]
+            
+            for track_idx, track in enumerate(tracks):
+                row = track_idx // 2
+                col = track_idx % 2
+                
+                # Get notes including overlaps
+                notes = self.get_chunk_notes(track, start_time, end_time, include_overlap=True)
+                clips_for_instrument = []
+                
+                for note in notes:
+                    # Adjust timing relative to chunk start
+                    note_start = float(note['time']) - start_time
+                    note_duration = float(note.get('duration', 0))
+                    
+                    # Load and position clip
+                    note_clip = self.get_note_clip(track, note)
+                    if note_clip:
+                        positioned_clip = note_clip.set_start(note_start)
+                        positioned_clip = positioned_clip.set_duration(note_duration)
+                        clips_for_instrument.append(positioned_clip)
+                
+                if clips_for_instrument:
+                    composite = CompositeVideoClip(clips_for_instrument)
+                    grid[row][col] = composite.set_duration(end_time - start_time)
+                    
+            # Create chunk with crossfade
+            chunk = clips_array(grid)
+            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            
+            # Add small crossfade buffer
+            if chunk_idx > 0:
+                crossfade_duration = 0.1  # 100ms crossfade
+                chunk = chunk.crossfadein(crossfade_duration)
+                
+            chunk.write_videofile(
+                str(chunk_path),
+                fps=30,
+                codec='h264_nvenc',
+                audio_codec='aac',
+                preset='medium',
+                ffmpeg_params=[
+                    "-vsync", "1",
+                    "-async", "1", 
+                    "-b:v", "5M"
+                ]
+            )
+            
+            return str(chunk_path)
+            
+        except Exception as e:
+            logging.error(f"Error processing chunk: {e}")
+            return None
 
     def _combine_chunks(self, chunk_files):
-        """Separate method for final video assembly with cleanup"""
+        """Combine video chunks with proper overlapping and consistent properties"""
+        clips = []
+        OVERLAP_DURATION = 0.1  # Match process_chunk overlap
+        
         try:
-            clips = []
-            for f in chunk_files:
-                clip = VideoFileClip(f)
+            # Load first clip to get target properties
+            if not chunk_files:
+                return None
+                
+            first_clip = VideoFileClip(chunk_files[0])
+            target_fps = first_clip.fps
+            target_size = first_clip.size
+            
+            # Process all chunks
+            for i, chunk_file in enumerate(chunk_files):
+                clip = VideoFileClip(chunk_file)
+                
+                # Ensure consistent properties
+                if clip.fps != target_fps:
+                    clip = clip.set_fps(target_fps)
+                if clip.size != target_size:
+                    clip = clip.resize(target_size)
+                    
+                # Handle chunk transitions
+                if i > 0:
+                    # Trim start overlap from all but first chunk
+                    clip = clip.subclip(OVERLAP_DURATION)
+                if i < len(chunk_files) - 1:
+                    # Trim end overlap from all but last chunk
+                    clip = clip.subclip(0, -OVERLAP_DURATION)
+                    
                 clips.append(clip)
             
-            final = concatenate_videoclips(clips)
-            final.write_videofile(str(self.output_path), fps=30)
+            # Concatenate with composition
+            final = concatenate_videoclips(
+                clips,
+                method="compose",
+                padding=-OVERLAP_DURATION  # Negative padding creates overlap
+            )
             
-            # Cleanup
-            for clip in clips:
-                clip.close()
-            final.close()
+            # Write with sync parameters
+            final.write_videofile(
+                str(self.output_path),
+                fps=target_fps,
+                codec='h264_nvenc',
+                audio_codec='aac', 
+                preset='medium',
+                ffmpeg_params=[
+                    "-vsync", "1",
+                    "-async", "1",
+                    "-b:v", "5M",
+                    "-maxrate", "10M",
+                    "-bufsize", "10M",
+                    "-rc", "vbr",
+                    "-tune", "hq"
+                ]
+            )
             
-            # Remove temp files
-            for f in chunk_files:
-                os.unlink(f)
-                
             return self.output_path
             
         except Exception as e:
             logging.error(f"Concatenation error: {e}")
             return None
+            
+        finally:
+            # Cleanup
+            for clip in clips:
+                try:
+                    clip.close()
+                except:
+                    pass
+            # Remove temp files
+            for f in chunk_files:
+                try:
+                    os.unlink(f)
+                except:
+                    pass
         
 
     def create_composition(self):
@@ -453,7 +624,22 @@ class VideoComposer:
                 # Create chunk
                 chunk = clips_array(grid)
                 chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-                chunk.write_videofile(str(chunk_path), fps=30)
+                chunk.write_videofile(
+                    str(chunk_path),
+                    fps=30,
+                    codec='h264_nvenc',  # NVIDIA GPU encoder
+                    audio_codec='aac',
+                    preset='medium',
+                    ffmpeg_params=[
+                        "-vsync", "1",
+                        "-async", "1",
+                        "-b:v", "5M",
+                        "-maxrate", "10M",
+                        "-bufsize", "10M",
+                        "-rc", "vbr",
+                        "-tune", "hq"
+                    ]
+                )
                 chunk_files.append(str(chunk_path))
                 
                 # Aggressive cleanup after each chunk
