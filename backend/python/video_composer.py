@@ -102,6 +102,8 @@ class VideoComposer:
         try:
             notes = []
             for note in track.get('notes', []):
+                if not self.validate_midi_note(note, track.get('index', -1)):
+                    continue
                 note_start = float(note['time'])
                 note_end = note_start + float(note.get('duration', 0))
                 
@@ -349,6 +351,33 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Layout error: {str(e)}")
             return (1, 1)
+        
+    def validate_midi_note(self, note, track_idx):
+        """Validate MIDI note timing and duration"""
+        try:
+            midi_note = note.get('midi')
+            start_time = float(note.get('time', 0))
+            duration = float(note.get('duration', 0))
+            
+            logging.info(f"Validating MIDI note - Track: {track_idx}, Note: {midi_note}")
+            logging.info(f"  Start Time: {start_time}")
+            logging.info(f"  Duration: {duration}")
+            logging.info(f"  Raw note data: {note}")
+            
+            if duration <= 0:
+                logging.error(f"Invalid note duration for track {track_idx}, note {midi_note}: {duration}")
+                return False
+                
+            if start_time < 0:
+                logging.error(f"Invalid note start time for track {track_idx}, note {midi_note}: {start_time}")
+                return False
+                
+            return True
+                    
+        except Exception as e:
+            logging.error(f"Note validation error for track {track_idx}: {str(e)}")
+            logging.error(f"Note data: {note}")
+            return False
         
     def process_chunk(self, tracks, start_time, end_time, chunk_idx):
         """Process chunk with overlapping notes"""
