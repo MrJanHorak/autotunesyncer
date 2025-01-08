@@ -170,6 +170,22 @@ class AudioVideoProcessor:
         pitch_mean = np.mean(pitches[magnitudes > np.max(magnitudes)*0.1])
         return librosa.hz_to_midi(pitch_mean)
     
+    def validate_output_video(self, video_path):
+        """Validate video file integrity"""
+        try:
+            probe_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(video_path)
+            ]
+            duration = float(subprocess.check_output(probe_cmd).decode().strip())
+            return duration > 0
+        except:
+            return False
+    
     def create_tuned_video(self, video_path, target_note, output_path):
         try:
             logging.info(f"Processing video: {video_path} for note: {target_note}")
@@ -227,7 +243,25 @@ class AudioVideoProcessor:
             
             if abs(pitch_shift) < 0.1:
                 logging.info("Pitch shift too small, copying original video")
-                shutil.copy2(video_path, output_path)
+                ffmpeg_transcode = [
+                    'ffmpeg', '-y',
+                    '-i', video_path,
+                    '-c:v', 'h264_nvenc',
+                    '-preset', 'medium',
+                    '-crf', '23',
+                    '-c:a', 'aac',
+                    '-strict', 'experimental',
+                    '-b:a', '320k',
+                    '-pix_fmt', 'yuv420p',
+                    '-movflags', '+faststart',
+                    output_path
+                ]
+                subprocess.run(ffmpeg_transcode, check=True)
+                
+                # Validate output
+                if not self.validate_output_video(output_path):
+                    raise Exception("Output validation failed")
+                    
                 return output_path
             
             rubberband_cmd = [
