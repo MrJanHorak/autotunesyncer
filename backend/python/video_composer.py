@@ -84,7 +84,8 @@ class VideoComposer:
                 'tom': [41, 43, 45, 47, 48, 50],  # Low Floor Tom, etc
                 'percussion': [39, 54, 56, 58, 60, 61, 62, 63, 64]  # Clap, etc
             }
-            
+            self.OVERLAP_DURATION = 0.3  # 300ms overlap
+            self.CROSSFADE_DURATION = 0.25  # 250ms crossfade
             # Validate path exists
             if not self.processed_videos_dir.exists():
                 raise ValueError(f"Directory not found: {self.processed_videos_dir}")
@@ -382,12 +383,10 @@ class VideoComposer:
     def process_chunk(self, tracks, start_time, end_time, chunk_idx):
         """Process chunk with overlapping notes"""
         try:
-             # Add overlap buffer at chunk boundaries
-            OVERLAP_DURATION = 0.1  # 100ms overlap
             
             # Extend chunk time range to include overlap
-            actual_start = start_time - (OVERLAP_DURATION if chunk_idx > 0 else 0)
-            actual_end = end_time + OVERLAP_DURATION
+            actual_start = start_time - (self.OVERLAP_DURATION if chunk_idx > 0 else 0)
+            actual_end = end_time + self.OVERLAP_DURATION
             
             # Get grid dimensions
             rows, cols = self.get_track_layout()
@@ -411,6 +410,9 @@ class VideoComposer:
                     # Adjust note timing relative to chunk start
                     note_time = float(note['time']) - actual_start
                     note_duration = float(note.get('duration', 0))
+                    # Ensure notes at chunk boundaries aren't cut off
+                    if chunk_idx > 0 and note_time < self.OVERLAP_DURATION:
+                        note_time = max(0, note_time)
 
             # Get grid dimensions
             rows = math.ceil(len(tracks) / 2)
@@ -462,6 +464,10 @@ class VideoComposer:
                     "-b:v", "5M"
                 ]
             )
+
+             # Add crossfade
+            if chunk_idx > 0:
+                chunk = chunk.crossfadein(self.CROSSFADE_DURATION)
             
             return str(chunk_path)
             
@@ -495,20 +501,20 @@ class VideoComposer:
                     
                 # Handle chunk transitions
                 if i > 0:
-                    # Trim start overlap from all but first chunk
-                    clip = clip.subclip(OVERLAP_DURATION)
+                    # Trim start overlap but keep crossfade region
+                    clip = clip.subclip(self.OVERLAP_DURATION - self.CROSSFADE_DURATION)
                 if i < len(chunk_files) - 1:
-                    # Trim end overlap from all but last chunk
-                    clip = clip.subclip(0, -OVERLAP_DURATION)
-                    
+                    # Trim end overlap but keep crossfade region
+                    clip = clip.subclip(0, -(self.OVERLAP_DURATION - self.CROSSFADE_DURATION))
+                
                 clips.append(clip)
-            
-            # Concatenate with composition
+
             final = concatenate_videoclips(
                 clips,
                 method="compose",
-                padding=-OVERLAP_DURATION  # Negative padding creates overlap
-            )
+                padding=-(self.CROSSFADE_DURATION)  # Overlap just the crossfade portion
+            )# Negative padding creates overlap
+            
             
             # Write with sync parameters
             final.write_videofile(
