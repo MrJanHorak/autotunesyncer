@@ -175,126 +175,6 @@ class VideoComposer:
             logging.info(f"No drum group found for MIDI note {midi_note}")
             return None
 
-        
-    # def create_track_video(self, track, track_idx, duration):
-    #     try:
-    #         instrument = track.get('instrument', {})
-    #         instrument_name = normalize_instrument_name(instrument.get('name', 'default'))
-            
-    #         # Check all possible video locations
-    #         video_locations = [
-    #             self.processed_videos_dir / f"track_{track_idx}_{instrument_name}",
-    #             self.processed_videos_dir / f"{instrument_name}_notes",
-    #             self.processed_videos_dir / f"track_{track_idx}_drums"
-    #         ]
-            
-    #         clips = []
-    #         background = None
-            
-    #         # Handle drum tracks
-    #         if is_drum_kit(instrument):
-    #             drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
-    #             if drum_dir.exists():
-    #                 for drum_file in drum_dir.glob('*.mp4'):
-    #                     try:
-    #                         clip = VideoFileClip(str(drum_file))
-    #                         # Loop drum clips to match duration
-    #                         num_loops = int(np.ceil(duration / clip.duration))
-    #                         extended_clip = clip.loop(n=num_loops)
-    #                         final_clip = extended_clip.subclip(0, duration)
-    #                         clips.append(final_clip)
-    #                         logging.info(f"Added drum clip: {drum_file}")
-    #                     except Exception as e:
-    #                         logging.error(f"Error loading drum clip {drum_file}: {e}")
-                
-    #             if clips:
-    #                 return CompositeVideoClip(clips).set_duration(duration)
-                    
-    #         # Handle instrument tracks
-    #         else:
-    #             for video_loc in video_locations:
-    #                 if video_loc.exists():
-    #                     for note in track.get('notes', []):
-    #                         try:
-    #                             midi_note = int(float(note['midi']))
-    #                             note_file = video_loc / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                                
-    #                             if note_file.exists():
-    #                                 clip = VideoFileClip(str(note_file))
-    #                                 start_time = float(note['time'])
-    #                                 clip = clip.set_start(start_time)
-    #                                 clip = clip.set_duration(float(note['duration']))
-    #                                 clips.append(clip)
-                                    
-    #                                 if background is None:
-    #                                     background = ColorClip(
-    #                                         size=(clip.w, clip.h),
-    #                                         color=(0, 0, 0),
-    #                                         duration=duration
-    #                                     )
-    #                         except Exception as e:
-    #                             logging.error(f"Error loading note clip {midi_note}: {e}")
-                                
-    #             if clips:
-    #                 if background:
-    #                     return CompositeVideoClip([background] + clips).set_duration(duration)
-    #                 return clips[0].set_duration(duration)
-                    
-    #         return None
-            
-    #     except Exception as e:
-    #         logging.error(f"Error creating track video: {str(e)}")
-    #         return None
-
-
-    # def get_track_layout(self):
-    #     try:
-    #         total_slots = 0
-    #         self.grid_positions = {}
-            
-    #         # Log grid layout header
-    #         logging.info("\nGrid Layout Planning:")
-            
-    #         # Regular tracks
-    #         for track_idx, track in enumerate(self.midi_data['tracks']):
-    #             if not is_drum_kit(track.get('instrument', {})):
-    #                 self.grid_positions[f"track_{track_idx}"] = total_slots
-    #                 instrument_name = normalize_instrument_name(track['instrument']['name'])
-    #                 logging.info(f"Position {total_slots}: {instrument_name} (track_{track_idx})")
-    #                 total_slots += 1
-                
-    #         # Handle drums
-    #         for track_idx, track in enumerate(self.midi_data['tracks']):
-    #             if is_drum_kit(track.get('instrument', {})):
-    #                 drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
-    #                 if drum_dir.exists():
-    #                     for drum_file in drum_dir.glob('*.mp4'):
-    #                         drum_name = drum_file.stem
-    #                         position_key = f"drum_{track_idx}_{drum_name}"
-    #                         self.grid_positions[position_key] = total_slots
-    #                         logging.info(f"Position {total_slots}: {drum_name} (track_{track_idx}_drums)")
-    #                         total_slots += 1
-            
-    #         cols = min(4, math.ceil(math.sqrt(total_slots)))
-    #         rows = math.ceil(total_slots / cols)
-            
-    #         # Visual grid representation
-    #         logging.info("\nGrid Visual Layout:")
-    #         for row in range(rows):
-    #             row_str = ""
-    #             for col in range(cols):
-    #                 pos = row * cols + col
-    #                 instrument = next((k for k, v in self.grid_positions.items() if v == pos), "empty")
-    #                 row_str += f"[{instrument:^20}] "
-    #             logging.info(row_str)
-                
-    #         logging.info(f"\nGrid dimensions: {rows}x{cols} ({total_slots} slots)")
-    #         return (rows, cols)
-                
-    #     except Exception as e:
-    #         logging.error(f"Layout error: {str(e)}")
-    #         return (1, 1)
-
     def has_valid_notes(self, track):
         """Check if track has any valid notes"""
         notes = track.get('notes', [])
@@ -476,61 +356,46 @@ class VideoComposer:
             return None
 
     def _combine_chunks(self, chunk_files):
-        """Combine video chunks with proper overlapping and consistent properties"""
-        clips = []
-        OVERLAP_DURATION = 0.1  # Match process_chunk overlap
-        
+        """Combine chunks with precise timing"""
         try:
-            # Load first clip to get target properties
-            if not chunk_files:
-                return None
-                
+            clips = []
             first_clip = VideoFileClip(chunk_files[0])
             target_fps = first_clip.fps
-            target_size = first_clip.size
+            frame_duration = 1.0 / target_fps
             
-            # Process all chunks
             for i, chunk_file in enumerate(chunk_files):
                 clip = VideoFileClip(chunk_file)
                 
-                # Ensure consistent properties
-                if clip.fps != target_fps:
-                    clip = clip.set_fps(target_fps)
-                if clip.size != target_size:
-                    clip = clip.resize(target_size)
-                    
-                # Handle chunk transitions
+                # Ensure exact frame boundary alignment
                 if i > 0:
-                    # Trim start overlap but keep crossfade region
-                    clip = clip.subclip(self.OVERLAP_DURATION - self.CROSSFADE_DURATION)
-                if i < len(chunk_files) - 1:
-                    # Trim end overlap but keep crossfade region
-                    clip = clip.subclip(0, -(self.OVERLAP_DURATION - self.CROSSFADE_DURATION))
+                    trim_start = self.OVERLAP_DURATION
+                    frame_count = int(round(trim_start * target_fps))
+                    precise_trim = frame_count * frame_duration
+                    clip = clip.subclip(precise_trim)
+                    
+                    # Ensure audio sync
+                    clip = clip.set_start(i * 10.0 - self.CROSSFADE_DURATION)
                 
                 clips.append(clip)
-
+                
+            # Use precise frame-based concatenation
             final = concatenate_videoclips(
                 clips,
                 method="compose",
-                padding=-(self.CROSSFADE_DURATION)  # Overlap just the crossfade portion
-            )# Negative padding creates overlap
+                padding=-self.CROSSFADE_DURATION
+            )
             
-            
-            # Write with sync parameters
+            # Write with strict timing parameters
             final.write_videofile(
                 str(self.output_path),
                 fps=target_fps,
                 codec='h264_nvenc',
-                audio_codec='aac', 
+                audio_codec='aac',
                 preset='medium',
                 ffmpeg_params=[
-                    "-vsync", "1",
-                    "-async", "1",
-                    "-b:v", "5M",
-                    "-maxrate", "10M",
-                    "-bufsize", "10M",
-                    "-rc", "vbr",
-                    "-tune", "hq"
+                    "-vsync", "cfr",     # Constant frame rate
+                    "-b:v", "5M",        # Video bitrate
+                    "-movflags", "+faststart"  # Web playback optimization
                 ]
             )
             
@@ -615,6 +480,18 @@ class VideoComposer:
                                             try:
                                                 clip = VideoFileClip(str(drum_file))
                                                 active_clips.append(clip)
+                                                
+                                                # Extract and normalize velocity
+                                                velocity = float(note.get('velocity', 100)) / 127.0
+                                                # Scale drums down slightly to balance with instruments
+                                                volume = max(0.1, velocity * 0.7)  # 70% of original volume
+                                                
+                                                # Apply volume adjustment
+                                                clip = clip.volumex(volume)
+                                                
+                                                # Log for debugging
+                                                logging.info(f"Drum {drum_group} velocity={velocity:.2f}, volume={volume:.2f}")
+                                                
                                                 time = float(note['time']) - start_time
                                                 duration = min(float(note['duration']), clip.duration)
                                                 clip = clip.subclip(0, duration).set_start(time)
@@ -627,7 +504,8 @@ class VideoComposer:
                                                 
                                                 logging.info(f"Added drum {drum_group} at [{row}][{col}] t={time}")
                                             except Exception as e:
-                                                logging.error(f"Error adding drum clip: {e}")
+                                                logging.error(f"Error processing drum clip: {e}")
+                                                continue
                 
                     else:
                         position_key = f"track_{track_idx}"
@@ -646,6 +524,17 @@ class VideoComposer:
                                 if note_file.exists():
                                     clip = VideoFileClip(str(note_file))
                                     active_clips.append(clip)
+                                    
+                                    # Get and normalize MIDI velocity
+                                    velocity = float(note.get('velocity', 100)) / 127.0
+                                    volume = max(0.1, velocity)  # Ensure minimum audible volume
+                                    
+                                    # Apply volume to clip
+                                    clip = clip.volumex(volume)
+                                    
+                                    # Log volume level for debugging
+                                    logging.info(f"Note {note.get('midi')}: velocity={velocity:.2f}, volume={volume:.2f}")
+                                    
                                     time = float(note['time']) - start_time
                                     duration = min(float(note['duration']), clip.duration)
                                     clip = clip.subclip(0, duration).set_start(time)
