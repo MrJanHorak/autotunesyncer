@@ -86,6 +86,10 @@ class VideoComposer:
             }
             self.OVERLAP_DURATION = 0.3  # 300ms overlap
             self.CROSSFADE_DURATION = 0.25  # 250ms crossfade
+            self.VOLUME_MULTIPLIERS = {
+            'drums': 0.2,  # Reduce drums to 40%
+            'instruments': 1.5  # Keep instruments at full volume
+        }
             # Validate path exists
             if not self.processed_videos_dir.exists():
                 raise ValueError(f"Directory not found: {self.processed_videos_dir}")
@@ -259,101 +263,202 @@ class VideoComposer:
             logging.error(f"Note validation error for track {track_idx}: {str(e)}")
             logging.error(f"Note data: {note}")
             return False
+    
+    def get_note_volume(self, velocity, is_drum=False):
+        """Calculate volume from MIDI velocity with better scaling"""
+        # Normalize velocity (0-1)
+        normalized_velocity = float(velocity) / 127.0
         
+        # Set base multipliers
+        multipliers = {
+            'drums': 0.4,      # Drums at 40% 
+            'instruments': 1.0  # Instruments at full volume
+        }
+        
+        # Calculate volume with better minimum
+        base_volume = normalized_velocity * 1.5  # Boost overall volume
+        volume = max(0.3, base_volume * multipliers['drums' if is_drum else 'instruments'])
+        
+        logging.info(f"Volume calculation: velocity={velocity}, normalized={normalized_velocity:.2f}, final={volume:.2f}")
+        return volume
+        
+    # def process_chunk(self, tracks, start_time, end_time, chunk_idx):
+    #     """Process chunk with overlapping notes"""
+    #     try:
+            
+    #         # Extend chunk time range to include overlap
+    #         actual_start = start_time - (self.OVERLAP_DURATION if chunk_idx > 0 else 0)
+    #         actual_end = end_time + self.OVERLAP_DURATION
+            
+    #         # Get grid dimensions
+    #         rows, cols = self.get_track_layout()
+    #         grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                         color=(0,0,0), 
+    #                         duration=actual_end - actual_start) 
+    #                 for _ in range(cols)] 
+    #                 for _ in range(rows)]
+
+    #         # Get notes including overlap periods
+    #         for track_idx, track in enumerate(self.midi_data['tracks']):
+    #             chunk_notes = self.get_chunk_notes(
+    #                 track, 
+    #                 actual_start, 
+    #                 actual_end, 
+    #                 include_overlap=True
+    #             )
+                
+    #             # Process notes with adjusted timing
+    #             for note in chunk_notes:
+    #                 # Adjust note timing relative to chunk start
+    #                 note_time = float(note['time']) - actual_start
+    #                 note_duration = float(note.get('duration', 0))
+    #                 # Ensure notes at chunk boundaries aren't cut off
+    #                 if chunk_idx > 0 and note_time < self.OVERLAP_DURATION:
+    #                     note_time = max(0, note_time)
+
+    #         # Get grid dimensions
+    #         rows = math.ceil(len(tracks) / 2)
+    #         cols = 2
+    #         grid = [[None for _ in range(cols)] for _ in range(rows)]
+            
+    #         for track_idx, track in enumerate(tracks):
+    #             row = track_idx // 2
+    #             col = track_idx % 2
+                
+    #             # Get notes including overlaps
+    #             notes = self.get_chunk_notes(track, start_time, end_time, include_overlap=True)
+    #             clips_for_instrument = []
+                
+    #             for note in notes:
+    #                 # Adjust timing relative to chunk start
+    #                 note_start = float(note['time']) - start_time
+    #                 note_duration = float(note.get('duration', 0))
+                    
+    #                 # Load and position clip
+    #                 note_clip = self.get_note_clip(track, note)
+    #                 if note_clip:
+    #                     positioned_clip = note_clip.set_start(note_start)
+    #                     positioned_clip = positioned_clip.set_duration(note_duration)
+    #                     clips_for_instrument.append(positioned_clip)
+                
+    #             if clips_for_instrument:
+    #                 composite = CompositeVideoClip(clips_for_instrument)
+    #                 grid[row][col] = composite.set_duration(end_time - start_time)
+                    
+    #         # Create chunk with crossfade
+    #         chunk = clips_array(grid)
+    #         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            
+    #         # Add small crossfade buffer
+    #         if chunk_idx > 0:
+    #             crossfade_duration = 0.1  # 100ms crossfade
+    #             chunk = chunk.crossfadein(crossfade_duration)
+                
+    #         chunk.write_videofile(
+    #             str(chunk_path),
+    #             fps=30,
+    #             codec='h264_nvenc',
+    #             audio_codec='aac',
+    #             preset='medium',
+    #             ffmpeg_params=[
+    #                 "-vsync", "1",
+    #                 "-async", "1", 
+    #                 "-b:v", "5M"
+    #             ]
+    #         )
+
+    #          # Add crossfade
+    #         if chunk_idx > 0:
+    #             chunk = chunk.crossfadein(self.CROSSFADE_DURATION)
+            
+    #         return str(chunk_path)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error processing chunk: {e}")
+    #         return None
+
     def process_chunk(self, tracks, start_time, end_time, chunk_idx):
-        """Process chunk with overlapping notes"""
+        """Process chunk with memory optimization"""
         try:
-            
-            # Extend chunk time range to include overlap
-            actual_start = start_time - (self.OVERLAP_DURATION if chunk_idx > 0 else 0)
-            actual_end = end_time + self.OVERLAP_DURATION
-            
-            # Get grid dimensions
+            active_clips = []  # Track active clips for cleanup
             rows, cols = self.get_track_layout()
+            
+            # Pre-allocate grid with empty clips
             grid = [[ColorClip(size=(1920//cols, 1080//rows), 
                             color=(0,0,0), 
-                            duration=actual_end - actual_start) 
+                            duration=end_time - start_time) 
                     for _ in range(cols)] 
                     for _ in range(rows)]
 
-            # Get notes including overlap periods
-            for track_idx, track in enumerate(self.midi_data['tracks']):
-                chunk_notes = self.get_chunk_notes(
-                    track, 
-                    actual_start, 
-                    actual_end, 
-                    include_overlap=True
-                )
-                
-                # Process notes with adjusted timing
-                for note in chunk_notes:
-                    # Adjust note timing relative to chunk start
-                    note_time = float(note['time']) - actual_start
-                    note_duration = float(note.get('duration', 0))
-                    # Ensure notes at chunk boundaries aren't cut off
-                    if chunk_idx > 0 and note_time < self.OVERLAP_DURATION:
-                        note_time = max(0, note_time)
-
-            # Get grid dimensions
-            rows = math.ceil(len(tracks) / 2)
-            cols = 2
-            grid = [[None for _ in range(cols)] for _ in range(rows)]
-            
             for track_idx, track in enumerate(tracks):
-                row = track_idx // 2
-                col = track_idx % 2
+                chunk_notes = self.get_chunk_notes(track, start_time, end_time)
                 
-                # Get notes including overlaps
-                notes = self.get_chunk_notes(track, start_time, end_time, include_overlap=True)
-                clips_for_instrument = []
-                
-                for note in notes:
-                    # Adjust timing relative to chunk start
-                    note_start = float(note['time']) - start_time
-                    note_duration = float(note.get('duration', 0))
+                # Process in smaller batches
+                BATCH_SIZE = 5
+                for i in range(0, len(chunk_notes), BATCH_SIZE):
+                    batch = chunk_notes[i:i + BATCH_SIZE]
                     
-                    # Load and position clip
-                    note_clip = self.get_note_clip(track, note)
-                    if note_clip:
-                        positioned_clip = note_clip.set_start(note_start)
-                        positioned_clip = positioned_clip.set_duration(note_duration)
-                        clips_for_instrument.append(positioned_clip)
-                
-                if clips_for_instrument:
-                    composite = CompositeVideoClip(clips_for_instrument)
-                    grid[row][col] = composite.set_duration(end_time - start_time)
-                    
-            # Create chunk with crossfade
+                    for note in batch:
+                        try:
+                            clip = self.get_note_clip(track, note)
+                            if clip:
+                                active_clips.append(clip)
+                                # Process immediately
+                                time = float(note['time']) - start_time
+                                clip = clip.set_start(time)
+                                row = track_idx // cols
+                                col = track_idx % cols
+                                
+                                if isinstance(grid[row][col], ColorClip):
+                                    grid[row][col] = clip
+                                else:
+                                    existing = grid[row][col]
+                                    grid[row][col] = CompositeVideoClip([existing, clip])
+                        
+                        finally:
+                            # Cleanup after each note
+                            for clip in active_clips:
+                                try:
+                                    clip.close()
+                                except:
+                                    pass
+                            active_clips.clear()
+                            gc.collect()
+
+            # Create chunk with optimized parameters
             chunk = clips_array(grid)
             chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
             
-            # Add small crossfade buffer
-            if chunk_idx > 0:
-                crossfade_duration = 0.1  # 100ms crossfade
-                chunk = chunk.crossfadein(crossfade_duration)
-                
             chunk.write_videofile(
                 str(chunk_path),
                 fps=30,
                 codec='h264_nvenc',
                 audio_codec='aac',
-                preset='medium',
+                preset='fast',  # Faster encoding
                 ffmpeg_params=[
                     "-vsync", "1",
-                    "-async", "1", 
-                    "-b:v", "5M"
+                    "-async", "1",
+                    "-b:v", "5M",
+                    "-tile-columns", "2",
+                    "-threads", "8",
+                    "-row-mt", "1"
                 ]
             )
-
-             # Add crossfade
-            if chunk_idx > 0:
-                chunk = chunk.crossfadein(self.CROSSFADE_DURATION)
             
             return str(chunk_path)
             
         except Exception as e:
             logging.error(f"Error processing chunk: {e}")
             return None
+            
+        finally:
+            # Final cleanup
+            for clip in active_clips:
+                try:
+                    clip.close()
+                except:
+                    pass
+            gc.collect()
 
     def _combine_chunks(self, chunk_files):
         """Combine chunks with precise timing"""
@@ -482,9 +587,8 @@ class VideoComposer:
                                                 active_clips.append(clip)
                                                 
                                                 # Extract and normalize velocity
-                                                velocity = float(note.get('velocity', 100)) / 127.0
-                                                # Scale drums down slightly to balance with instruments
-                                                volume = max(0.1, velocity * 0.7)  # 70% of original volume
+                                                velocity = float(note.get('velocity', 100))
+                                                volume = self.get_note_volume(velocity, is_drum=True)
                                                 
                                                 # Apply volume adjustment
                                                 clip = clip.volumex(volume)
@@ -526,8 +630,8 @@ class VideoComposer:
                                     active_clips.append(clip)
                                     
                                     # Get and normalize MIDI velocity
-                                    velocity = float(note.get('velocity', 100)) / 127.0
-                                    volume = max(0.1, velocity)  # Ensure minimum audible volume
+                                    velocity = float(note.get('velocity', 100))
+                                    volume = self.get_note_volume(velocity, is_drum=False)  # Ensure minimum audible volume
                                     
                                     # Apply volume to clip
                                     clip = clip.volumex(volume)
