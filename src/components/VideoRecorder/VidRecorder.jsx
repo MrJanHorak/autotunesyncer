@@ -1,12 +1,12 @@
 /* eslint-disable react/prop-types */
 import { useRef, useState, useEffect, useCallback } from 'react';
-import { handleUploadedVideoAutotune } from '../js/handleRecordVideo';
-import ControlButtons from './ControlButtons';
-import LoadingSpinner from './LoadingSpinner';
-import './styles.css';
-import { isDrumTrack } from '../js/drumUtils';
-import CountdownTimer from './CountdownTimer';
-import VideoTrimmer from './VideoTrimmer';
+import { handleUploadedVideoAutotune } from '../../js/handleRecordVideo';
+import ControlButtons from '../ControlButtons/ControlButtons';
+import LoadingSpinner from '../LoadingSpinner/LoadingSpinner';
+import '../styles.css';
+import { isDrumTrack } from '../../js/drumUtils';
+import CountdownTimer from '../CountdownTimer/CountdownTimer';
+import VideoTrimmer from '../VideoTrimmer/VideoTrimmer';
 
 const useRecordingState = (currentVideo) => {
   const videoRef = useRef(null);
