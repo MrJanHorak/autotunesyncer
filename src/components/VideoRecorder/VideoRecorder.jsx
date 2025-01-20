@@ -8,6 +8,8 @@ import { isDrumTrack } from '../../js/drumUtils';
 import CountdownTimer from '../CountdownTimer/CountdownTimer';
 import VideoTrimmer from '../VideoTrimmer/VideoTrimmer';
 
+import './VideoRecorder.css';
+
 const useRecordingState = (currentVideo) => {
   const videoRef = useRef(null);
   const mediaStreamRef = useRef(null);

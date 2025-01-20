@@ -1,5 +1,6 @@
 /* eslint-disable react/prop-types */
-import VideoRecorder from '../VideoRecorder/VidRecorder';
+import VideoRecorder from '../VideoRecorder/VideoRecorder';
+import './RecordingSection.css';
 
 const RecordingSection = ({
   instruments,
@@ -9,7 +10,7 @@ const RecordingSection = ({
   instrumentVideos,
 }) => {
   return (
-    <div>
+    <div className={'recording-section'}>
       {instruments.map((instrument, index) => {
         const instrumentName = instrument.isDrum
           ? `drum_${instrument.group}`

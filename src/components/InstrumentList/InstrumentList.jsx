@@ -1,12 +1,14 @@
 /* eslint-disable react/prop-types */
+import './InstrumentList.css';
+
 const InstrumentList = ({ instruments, onInstrumentSelect }) => {
   return (
-    <div>
-      <h2>Instruments</h2>
-      <ul>
+    <div className={'instrument-list-container'}>
+      <h3>Instruments found in Midi-File</h3>
+      <ul className="instrument-list">
         {instruments.map((instrument, index) => (
-          <li key={index} onClick={() => onInstrumentSelect(instrument)}>
-            {instrument.family} - {instrument.name} (Number: {instrument.number})
+          <li className={'instrument-list-item'}key={index} onClick={() => onInstrumentSelect(instrument)}>
+            {instrument.family} - {instrument.name} - Midi Channel: {instrument.number}
           </li>
         ))}
       </ul>
