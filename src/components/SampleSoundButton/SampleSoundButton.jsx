@@ -1,7 +1,7 @@
 /* eslint-disable react/prop-types */
 import { useRef, useState, useCallback, useEffect } from 'react';
 import * as Tone from 'tone';
-import './styles.css';
+import '../styles.css';
 
 const SampleSoundButton = ({ instrument, className }) => {
   const synthRef = useRef(null);
