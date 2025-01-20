@@ -13,6 +13,8 @@ import RecordingSection from './components/RecordingSection/RecordingSection';
 import AudioContextInitializer from './components/AudioContextInitializer/AudioContextInitializer';
 import CompositionSection from './components/CompositionSection/CompositionSection';
 
+import './App.css';
+
 
 // Add this helper function at the top
 const normalizeInstrumentName = (name) => {
@@ -119,7 +121,7 @@ function App() {
   }, [isAudioContextReady, startAudioContext]);
 
   return (
-    <div>
+    <div className='app-container'>
       <AudioContextInitializer
         audioContextStarted={audioContextStarted}
         onInitialize={startAudioContext}
