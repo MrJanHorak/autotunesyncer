@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types */
-import SampleSoundButton from './SampleSoundButton';
-import './styles.css';
+import SampleSoundButton from '../SampleSoundButton/SampleSoundButton';
+import '../styles.css';
 
 const ControlButtons = ({ 
   isRecording, 
