@@ -4,6 +4,24 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  /* height: 100%; */
   width: 100%;
+}
+
+.recording-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 0 10px;
+}
+
+.instrument-name {
+  font-size: 1.5rem;
+  font-weight: bold;
+  margin: 10px 0;
+}
+
+.recording-length {
+  font-size: 1rem;
+  margin: 5px 0;
 }
