@@ -33,15 +33,12 @@
 }
 
 .controls-container {
+  justify-content: center;
   width: 100%;
-  padding: 15px 20px; /* Increased horizontal padding */
   background: rgba(0, 0, 0, 0.05);
   border-radius: 8px;
   display: flex;
-  gap: 15px; /* Increased gap between buttons */
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: center; /* Center the buttons */
+  gap: 15px; 
 }
 
 .control-button {
