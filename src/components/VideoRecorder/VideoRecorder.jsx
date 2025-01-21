@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable react/prop-types */
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { handleUploadedVideoAutotune } from '../../js/handleRecordVideo';
@@ -7,6 +8,7 @@ import '../styles.css';
 import { isDrumTrack } from '../../js/drumUtils';
 import CountdownTimer from '../CountdownTimer/CountdownTimer';
 import VideoTrimmer from '../VideoTrimmer/VideoTrimmer';
+import ToggleSwitch from '../ToggleSwitch/ToggleSwitch';
 
 import './VideoRecorder.css';
 
@@ -168,6 +170,12 @@ const VideoRecorder = ({
     }
   };
 
+  const handleAutotuneToggle = useCallback((e) => {
+    console.log('Toggle clicked, previous state:', isAutotuneEnabled);
+    setIsAutotuneEnabled(e.target.checked);
+    console.log('New state:', e.target.checked);
+  }, [isAutotuneEnabled]);
+
   useEffect(() => {
     if (recordingState.autotunedURL && !recordingState.isProcessing) {
       onVideoReady?.(recordingState.autotunedURL, instrument);
@@ -245,13 +253,13 @@ const VideoRecorder = ({
       //     frameRate: { ideal: 30 }
       //   }
       // });
-  
+
       // const options = {
       //   mimeType: 'video/webm;codecs=vp8,opus',
       //   videoBitsPerSecond: 2500000, // 2.5 Mbps
       //   audioBitsPerSecond: 128000   // 128 kbps
       // };
-      
+
       // const mediaRecorder = new MediaRecorder(stream, options);
     } catch (error) {
       console.error('Recording failed:', error);
@@ -612,14 +620,15 @@ const VideoRecorder = ({
             {showTrimmer ? 'Hide Trimmer' : 'Trim Video'}
           </button>
         )}
-        <label>
-          <input
-            type='checkbox'
+        <div className='autotune-checkbox'>
+          <ToggleSwitch
             checked={isAutotuneEnabled}
-            onChange={(e) => setIsAutotuneEnabled(e.target.checked)}
+            onChange={handleAutotuneToggle}
+            onText='ON'
+            offText='OFF'
           />
-          <span>Enable Autotune</span> {/* Wrap text in span */}
-        </label>
+          <span className='autotune-checkbox-text'>Enable Autotune</span>
+        </div>
       </div>
     );
   };

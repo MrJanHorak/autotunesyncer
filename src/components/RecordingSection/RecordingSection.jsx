@@ -19,8 +19,8 @@ const RecordingSection = ({
         const recommendedDuration = Math.ceil(minDuration + 1);
 
         return (
-          <div key={index} style={{ marginBottom: '20px' }}>
-            <h3>
+          <div className='recording-container' key={index} style={{ marginBottom: '20px' }}>
+            <h3 className='instrument-name'>
               {instrument.isDrum
                 ? `Drum - ${
                     instrument.group.charAt(0).toUpperCase() +
@@ -28,12 +28,12 @@ const RecordingSection = ({
                   }`
                 : `${instrument.family} - ${instrument.name}`}
             </h3>
-            <p>Minimum recording duration: {recommendedDuration} seconds</p>
+            <p className='recording-length'>Minimum recording duration: {recommendedDuration} seconds</p>
             <VideoRecorder
               onRecordingComplete={(blob) =>
                 onRecordingComplete(blob, instrument)
               }
-              style={{ width: '300px', height: '200px' }}
+              // style={{ width: '300px', height: '200px' }}
               instrument={instrument}
               onVideoReady={onVideoReady}
               minDuration={recommendedDuration}
