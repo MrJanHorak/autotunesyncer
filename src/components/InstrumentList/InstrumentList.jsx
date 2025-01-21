@@ -7,8 +7,12 @@ const InstrumentList = ({ instruments, onInstrumentSelect }) => {
       <h3>Instruments found in Midi-File</h3>
       <ul className="instrument-list">
         {instruments.map((instrument, index) => (
-          <li className={'instrument-list-item'}key={index} onClick={() => onInstrumentSelect(instrument)}>
-            {instrument.family} - {instrument.name} - Midi Channel: {instrument.number}
+          <li className={'instrument-list-item'} key={index} onClick={() => onInstrumentSelect(instrument)}>
+            {instrument.isDrum ? (
+              `Drums - ${instrument.group} - Midi Channel: ${instrument.number}`
+            ) : (
+              `${instrument.family} - ${instrument.name} - Midi Channel: ${instrument.number}`
+            )}
           </li>
         ))}
       </ul>

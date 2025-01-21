@@ -1,20 +1,21 @@
 /* eslint-disable no-prototype-builtins */
 /* eslint-disable no-unused-vars */
-import { useEffect, useCallback } from 'react'; 
+import { useEffect, useCallback } from 'react';
 
 import { isDrumTrack, DRUM_GROUPS } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 
-import { useMidiProcessing } from './hooks/useMidiProcessing'; 
-import { useVideoRecording } from './hooks/useVideoRecording'; 
+import { useMidiProcessing } from './hooks/useMidiProcessing';
+import { useVideoRecording } from './hooks/useVideoRecording';
 
-import MidiUploader from './components/MidiUploader/'; 
+// Components
+import MidiUploader from './components/MidiUploader/';
+import MidiInfoDisplay from './components/MidiInfoDisplay/MidiInfoDisplay';
 import RecordingSection from './components/RecordingSection/RecordingSection';
 import AudioContextInitializer from './components/AudioContextInitializer/AudioContextInitializer';
 import CompositionSection from './components/CompositionSection/CompositionSection';
 
 import './App.css';
-
 
 // Add this helper function at the top
 const normalizeInstrumentName = (name) => {
@@ -55,7 +56,7 @@ function App() {
     instruments,
     instrumentTrackMap,
     longestNotes,
-    onMidiProcessed  
+    onMidiProcessed,
   } = useMidiProcessing();
   const {
     videoFiles,
@@ -127,9 +128,23 @@ function App() {
         onInitialize={startAudioContext}
       />
       <MidiUploader onMidiProcessed={onMidiProcessed} />
-  
+
+      {parsedMidiData && (
+        <MidiInfoDisplay
+          midiData={{
+            tracks: parsedMidiData.tracks,
+            duration: parsedMidiData.header?.duration,
+            header: {
+              format: parsedMidiData.header?.format,
+              timeSignature: parsedMidiData.header?.timeSignature,
+              tempo: parsedMidiData.header?.tempo,
+            },
+          }}
+        />
+      )}
+
       {instruments.length > 0 && <InstrumentList instruments={instruments} />}
-  
+
       <RecordingSection
         instruments={instruments}
         longestNotes={longestNotes}
@@ -137,13 +152,15 @@ function App() {
         onVideoReady={handleVideoReady}
         instrumentVideos={instrumentVideos}
       />
-  
+
       {!isReadyToCompose && instruments.length > 0 && (
-        <div className="mt-4 bg-yellow-100 p-4 rounded">
-          <p>Recording Progress: {recordedVideosCount} / {instruments.length}</p>
+        <div className='mt-4 bg-yellow-100 p-4 rounded'>
+          <p>
+            Recording Progress: {recordedVideosCount} / {instruments.length}
+          </p>
         </div>
       )}
-  
+
       {isReadyToCompose && instruments.length > 0 && (
         <CompositionSection
           videoFiles={videoFiles}
