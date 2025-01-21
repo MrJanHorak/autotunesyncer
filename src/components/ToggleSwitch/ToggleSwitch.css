@@ -1,0 +1,103 @@
+.toggle-switch {
+  position: absolute;
+  opacity: 0;
+  width: 4em; /* Match toggle-btn width */
+  height: 2em; /* Match toggle-btn height */
+  cursor: pointer;
+  z-index: 2; /* Ensure it's above the visible button */
+  margin: 0;
+  padding: 0;
+}
+
+.toggle-btn {
+  position: relative;
+  display: block;
+  width: 4em;
+  height: 2em;
+  cursor: pointer;
+  user-select: none;
+  z-index: 1;
+}
+
+.checkbox-wrapper {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+  width: 4em;
+  height: 2em;
+}
+
+.toggle-switch.skewed + .toggle-btn {
+  overflow: hidden;
+  transform: skew(-10deg);
+  background: #888;
+  transition: all 0.2s ease;
+}
+
+.toggle-switch + .toggle-btn:after,
+.toggle-switch + .toggle-btn:before {
+  position: relative;
+  display: block;
+  content: '';
+  width: 50%;
+  height: 100%;
+}
+
+.toggle-switch + .toggle-btn:after {
+  left: 0;
+}
+
+.toggle-switch + .toggle-btn:before {
+  display: none;
+}
+
+.toggle-switch:checked + .toggle-btn:after {
+  left: 50%;
+}
+
+/* Skewed toggle variant */
+.toggle-switch.skewed + .toggle-btn {
+  overflow: hidden;
+  transform: skew(-10deg);
+  backface-visibility: hidden;
+  transition: all 0.2s ease;
+  font-family: sans-serif;
+  z-index: 1;
+  background: #888;
+}
+
+.toggle-switch.skewed + .toggle-btn:after,
+.toggle-switch.skewed + .toggle-btn:before {
+  display: inline-block;
+  content: attr(data-tg-on);
+  width: 100%;
+  text-align: center;
+  position: absolute;
+  line-height: 2em;
+  font-weight: bold;
+  color: #fff;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+  z-index: 2;
+}
+
+.toggle-switch.skewed + .toggle-btn:before {
+  content: attr(data-tg-off);
+  left: 0;
+}
+
+.toggle-switch.skewed + .toggle-btn:after {
+  content: attr(data-tg-on);
+  left: 100%;
+}
+
+.toggle-switch.skewed:checked + .toggle-btn {
+  background: #86d993;
+}
+
+.toggle-switch.skewed:checked + .toggle-btn:before {
+  left: -100%;
+}
+
+.toggle-switch.skewed:checked + .toggle-btn:after {
+  left: 0;
+}

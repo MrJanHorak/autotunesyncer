@@ -4,7 +4,7 @@ import {
   extractInstruments,
   createInstrumentTrackMap,
   calculateLongestNotes,
-  normalizeInstrumentName
+  normalizeInstrumentName,
 } from '../utils/midiUtils';
 import { isDrumTrack, getNoteGroup } from '../utils/midiUtils';
 
@@ -18,54 +18,58 @@ export const useMidiProcessing = (midiFile) => {
     try {
       setParsedMidiData(midiData);
 
-      // Extract all instruments including drum groups
-      const instrumentSet = new Set();
+      // Use Map to track unique instruments and their combined notes
+      const instrumentMap = new Map();
       const trackMapping = new Map();
       const noteDurations = {};
 
       midiData.tracks.forEach((track, index) => {
-        if (track.notes && track.notes.length > 0) {
-          if (isDrumTrack(track)) {
-            // Handle drum tracks
-            const drumGroups = new Set();
-            track.notes.forEach((note) => {
-              const group = getNoteGroup(note.midi);
-              drumGroups.add(group);
+        if (!track.notes || track.notes.length === 0) return;
 
-              // Track longest note duration for each drum group
-              const drumKey = `drum_${group}`;
-              const noteDuration = note.duration;
-              noteDurations[drumKey] = Math.max(
-                noteDurations[drumKey] || 0,
-                noteDuration
-              );
-            });
+        if (isDrumTrack(track)) {
+          // Handle drum tracks - group by drum type
+          const drumGroups = new Set();
+          track.notes.forEach((note) => {
+            const group = getNoteGroup(note.midi);
+            drumGroups.add(group);
 
-            // Add individual drum instruments
-            drumGroups.forEach((group) => {
-              const drumInstrument = {
+            // Track longest note duration for each drum group
+            const drumKey = `drum_${group}`;
+            const noteDuration = note.duration;
+            noteDurations[drumKey] = Math.max(
+              noteDurations[drumKey] || 0,
+              noteDuration
+            );
+          });
+
+          // Add unique drum instruments
+          drumGroups.forEach((group) => {
+            const drumKey = `drum_${group}`;
+            if (!instrumentMap.has(drumKey)) {
+              instrumentMap.set(drumKey, {
                 isDrum: true,
                 group: group,
                 family: 'percussion',
                 number: track.channel,
-              };
-              instrumentSet.add(JSON.stringify(drumInstrument));
-              trackMapping.set(`drum_${group}`, index);
-            });
-          } else {
-            // Handle melodic instruments
-            const instrument = {
+              });
+            }
+            // Keep track of first occurrence for mapping
+            if (!trackMapping.has(drumKey)) {
+              trackMapping.set(drumKey, index);
+            }
+          });
+        } else {
+          // Handle melodic instruments
+          const normalizedName = normalizeInstrumentName(track.instrument.name);
+          if (!instrumentMap.has(normalizedName) && track.instrument.name) {
+            instrumentMap.set(normalizedName, {
               isDrum: false,
               name: track.instrument.name,
               family: track.instrument.family,
               number: track.channel,
-            };
-            instrumentSet.add(JSON.stringify(instrument));
+            });
 
-            // Track longest note duration for melodic instruments
-            const normalizedName = normalizeInstrumentName(
-              track.instrument.name
-            );
+            // Track longest note duration
             track.notes.forEach((note) => {
               noteDurations[normalizedName] = Math.max(
                 noteDurations[normalizedName] || 0,
@@ -73,18 +77,14 @@ export const useMidiProcessing = (midiFile) => {
               );
             });
 
-            trackMapping.set(
-              normalizeInstrumentName(track.instrument.name),
-              index
-            );
+            // Keep track of first occurrence for mapping
+            trackMapping.set(normalizedName, index);
           }
         }
       });
 
-      // Convert instrument set back to array
-      const instrumentArray = Array.from(instrumentSet).map((inst) =>
-        JSON.parse(inst)
-      );
+      // Convert Map to array of unique instruments
+      const instrumentArray = Array.from(instrumentMap.values());
 
       setInstruments(instrumentArray);
       setInstrumentTrackMap(trackMapping);
