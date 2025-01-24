@@ -1,5 +1,5 @@
 /* eslint-disable react/prop-types */
-import { useEffect } from 'react';
+import { useEffect, useCallback, useMemo } from 'react';
 import { parseMidiFile } from '../../utils/midiUtils';
 
 const KEY_SIGNATURES = {
@@ -21,94 +21,72 @@ const KEY_SIGNATURES = {
 };
 
 const MidiParser = ({ file, onParsed }) => {
-  useEffect(() => {
-    if (!file) return;
 
-    const parseMidi = async () => {
-      const midi = await parseMidiFile(file);
+  const lastProcessedFile = useMemo(() => ({
+    fingerprint: null
+  }), []);
 
-      const calculateDuration = () => {
-        console.log('calculating duration...');
-        let lastTime = 0;
+  const calculateDuration = useCallback((midi) => {
+    console.log('calculating duration...');
+    let lastTime = 0;
 
-        // Find last note end time across all tracks
-        midi.tracks.forEach((track) => {
-          if (!track.notes) return;
+    midi.tracks.forEach((track) => {
+      if (!track.notes) return;
+      track.notes.forEach((note) => {
+        const noteEndTime = note.time + note.duration;
+        lastTime = Math.max(lastTime, noteEndTime);
+      });
+    });
 
-          track.notes.forEach((note) => {
-            const noteEndTime = note.time + note.duration;
-            lastTime = Math.max(lastTime, noteEndTime);
-          });
-        });
+    const tempo = midi.header.tempos[0]?.bpm || 120;
+    const ppq = midi.header.ppq;
+    const secondsPerBeat = 60 / tempo;
+    return (lastTime / ppq) * secondsPerBeat;
+  }, []);
 
-        console.log('Last tick time:', lastTime);
+  const parseMidi = useCallback(async () => {
+    const midi = await parseMidiFile(file);
+    
+    const duration = calculateDuration(midi);
+    const keySignature = midi.header.keySignatures[0];
+    const key = keySignature ? {
+      note: KEY_SIGNATURES[keySignature.key] || 'Unknown',
+      scale: keySignature.scale === 0 ? 'major' : 'minor',
+      sharpsFlats: keySignature.key,
+    } : null;
 
-        // Get tempo (microseconds per quarter note)
-        const tempo = midi.header.tempos[0]?.bpm || 120;
-        const ppq = midi.header.ppq;
+    const totalNotes = midi.tracks.reduce(
+      (sum, track) => sum + (track.notes?.length || 0),
+      0
+    );
 
-        console.log('Tempo:', tempo, 'PPQ:', ppq);
-
-        // Convert ticks to seconds
-        const secondsPerBeat = 60 / tempo;
-        const seconds = (lastTime / ppq) * secondsPerBeat;
-
-        console.log('Calculated duration:', seconds);
-
-        return seconds;
-      };
-
-      const duration = calculateDuration();
-      console.log('Duration:', duration);
-      const keySignature = midi.header.keySignatures[0];
-      const key = keySignature
-        ? {
-            note: KEY_SIGNATURES[keySignature.key] || 'Unknown',
-            scale: keySignature.scale === 0 ? 'major' : 'minor',
-            sharpsFlats: keySignature.key,
-          }
-        : null;
-
-      // Get total note count across all tracks
-      const totalNotes = midi.tracks.reduce(
-        (sum, track) => sum + (track.notes?.length || 0),
-        0
-      );
-
-      const midiInfo = {
-        // Track info
-        tracks: midi.tracks.map((track, index) => ({
-          id: index,
-          name: track.name || `Track ${index + 1}`,
-          notes: track.notes,
-          duration: track.duration,
-          tempo: track.tempo,
-          instrument: track.instrument.number,
-        })),
-        // File metadata
-        header: {
-          format: midi.header.format,
-          ticksPerBeat: midi.header.ppq,
-          timeSignature: `${midi.header.timeSignatures[0]?.timeSignature[0]}/${midi.header.timeSignatures[0]?.timeSignature[1]}`,
-          keySignature: midi.header.keySignatures[0]?.key,
-          key: key ? `${key.note} ${key.scale}` : 'Unknown',
-          tempo: midi.header.tempos[0]?.bpm || 120,
-        },
-        // Summary data
-        summary: {
-          totalTracks: midi.tracks.length,
-          totalNotes: totalNotes,
-          duration: duration,
-          name: file.name,
-          size: file.size,
-        },
-      };
-
-      onParsed(midiInfo);
+    const midiInfo = {
+      tracks: midi.tracks,
+      duration,
+      header: {
+        format: midi.header.format,
+        timeSignature: `${midi.header.timeSignatures[0]?.timeSignature[0]}/${midi.header.timeSignatures[0]?.timeSignature[1]}`,
+        key: key ? `${key.note} ${key.scale}` : 'Unknown',
+        tempo: midi.header.tempos[0]?.bpm || 120
+      },
+      summary: {
+        name: file.name,
+        totalTracks: midi.tracks.length,
+        totalNotes
+      }
     };
+    onParsed(midiInfo);
+  }, [file, onParsed, calculateDuration]);
 
-    parseMidi().catch(console.error);
-  }, [file, onParsed]);
+   useEffect(() => {
+    if (!file) return;
+    const fileFingerprint = `${file.name}-${file.lastModified}`;
+
+    if (lastProcessedFile.fingerprint !== fileFingerprint) {
+      lastProcessedFile.fingerprint = fileFingerprint;
+      parseMidi().catch(console.error);
+    }
+  }, [file, parseMidi, lastProcessedFile]);
 
   return null;
 };

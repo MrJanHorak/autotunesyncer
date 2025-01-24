@@ -1,6 +1,6 @@
 /* eslint-disable no-prototype-builtins */
 /* eslint-disable no-unused-vars */
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 
 import { isDrumTrack, DRUM_GROUPS } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
@@ -14,6 +14,8 @@ import MidiInfoDisplay from './components/MidiInfoDisplay/MidiInfoDisplay';
 import RecordingSection from './components/RecordingSection/RecordingSection';
 import AudioContextInitializer from './components/AudioContextInitializer/AudioContextInitializer';
 import CompositionSection from './components/CompositionSection/CompositionSection';
+import MidiParser from './components/MidiParser/MidiParser';
+import ProgressBar from './components/ProgressBar/ProgressBar';
 
 import './App.css';
 
@@ -52,11 +54,11 @@ const extractDrumInstruments = (track) => {
 
 function App() {
   const {
-    parsedMidiData,
+    // parsedMidiData,
     instruments,
     instrumentTrackMap,
     longestNotes,
-    onMidiProcessed,
+    onMidiProcessed: processMidiData,
   } = useMidiProcessing();
   const {
     videoFiles,
@@ -72,6 +74,23 @@ function App() {
     error,
     startAudioContext,
   } = useVideoRecording(instruments);
+
+  const [parsedMidiData, setParsedMidiData] = useState(null);
+  const [midiFile, setMidiFile] = useState(null);
+
+  const handleMidiProcessed = (file) => {
+    setMidiFile(file);
+  };
+
+  const handleParsedMidi = useCallback(
+    (midiInfo) => {
+      console.log('Parsed MIDI info:', midiInfo);
+      setParsedMidiData(midiInfo);
+      // Call MIDI processing hook with parsed data
+      processMidiData(midiInfo);
+    },
+    [processMidiData]
+  );
 
   // Add handleRecordingComplete function
   const handleRecordingComplete = useCallback((blob, instrument) => {
@@ -127,38 +146,32 @@ function App() {
         audioContextStarted={audioContextStarted}
         onInitialize={startAudioContext}
       />
-      <MidiUploader onMidiProcessed={onMidiProcessed} />
+      <MidiUploader onMidiProcessed={handleMidiProcessed} />
+
+      {midiFile && <MidiParser file={midiFile} onParsed={handleParsedMidi} />}
 
       {parsedMidiData && (
-        <MidiInfoDisplay
-          midiData={{
-            tracks: parsedMidiData.tracks,
-            duration: parsedMidiData.header?.duration,
-            header: {
-              format: parsedMidiData.header?.format,
-              timeSignature: parsedMidiData.header?.timeSignature,
-              tempo: parsedMidiData.header?.tempo,
-            },
-          }}
-        />
-      )}
+        <>
+          <MidiInfoDisplay midiData={parsedMidiData} />
+          {instruments.length > 0 && (
+            <InstrumentList instruments={instruments} />
+          )}
 
-      {instruments.length > 0 && <InstrumentList instruments={instruments} />}
+          {!isReadyToCompose && instruments.length > 0 && (
+            <ProgressBar
+              current={recordedVideosCount}
+              total={instruments.length}
+            />
+          )}
 
-      <RecordingSection
-        instruments={instruments}
-        longestNotes={longestNotes}
-        onRecordingComplete={handleRecordingComplete}
-        onVideoReady={handleVideoReady}
-        instrumentVideos={instrumentVideos}
-      />
-
-      {!isReadyToCompose && instruments.length > 0 && (
-        <div className='mt-4 bg-yellow-100 p-4 rounded'>
-          <p>
-            Recording Progress: {recordedVideosCount} / {instruments.length}
-          </p>
-        </div>
+          <RecordingSection
+            instruments={instruments}
+            longestNotes={longestNotes}
+            onRecordingComplete={handleRecordingComplete}
+            onVideoReady={handleVideoReady}
+            instrumentVideos={instrumentVideos}
+          />
+        </>
       )}
 
       {isReadyToCompose && instruments.length > 0 && (

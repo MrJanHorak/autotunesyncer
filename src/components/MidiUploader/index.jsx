@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import PropTypes from 'prop-types';
 import Dropzone from 'react-dropzone';
-import { Midi } from '@tonejs/midi';
 
 const MidiUploader = ({ onMidiProcessed }) => {
   const [loading, setLoading] = useState(false);
@@ -13,27 +12,29 @@ const MidiUploader = ({ onMidiProcessed }) => {
 
     setLoading(true);
     setError(null);
+    onMidiProcessed(file);
+    setLoading(false);
+
+    // const reader = new FileReader();
     
-    const reader = new FileReader();
+    // reader.onload = async () => {
+    //   try {
+    //     const arrayBuffer = reader.result;
+    //     const midiData = new Midi(arrayBuffer);
+    //     if (typeof onMidiProcessed === 'function') {
+    //       onMidiProcessed(midiData);
+    //     } else {
+    //       throw new Error('onMidiProcessed must be a function');
+    //     }
+    //   } catch (error) {
+    //     console.error('Error parsing MIDI file:', error);
+    //     setError(error.message);
+    //   } finally {
+    //     setLoading(false);
+    //   }
+    // };
     
-    reader.onload = async () => {
-      try {
-        const arrayBuffer = reader.result;
-        const midiData = new Midi(arrayBuffer);
-        if (typeof onMidiProcessed === 'function') {
-          onMidiProcessed(midiData);
-        } else {
-          throw new Error('onMidiProcessed must be a function');
-        }
-      } catch (error) {
-        console.error('Error parsing MIDI file:', error);
-        setError(error.message);
-      } finally {
-        setLoading(false);
-      }
-    };
-    
-    reader.readAsArrayBuffer(file);
+    // reader.readAsArrayBuffer(file);
   };
 
   return (
