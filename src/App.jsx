@@ -2,7 +2,7 @@
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState } from 'react';
 
-import { isDrumTrack, DRUM_GROUPS } from './js/drumUtils';
+import { isDrumTrack, DRUM_NOTES } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 
 import { useMidiProcessing } from './hooks/useMidiProcessing';
@@ -32,19 +32,17 @@ const extractDrumInstruments = (track) => {
   const uniqueNotes = new Set(track.notes.map((note) => note.midi));
 
   // Map notes to their drum groups
-  const drumGroups = new Set();
+  const drumNames = new Set();
   uniqueNotes.forEach((note) => {
-    for (const [group, notes] of Object.entries(DRUM_GROUPS)) {
-      if (notes.includes(note)) {
-        drumGroups.add(group);
-        break;
-      }
+    const drumName = DRUM_NOTES[note];
+    if (drumName) {
+      drumNames.add(drumName);
     }
   });
 
   // Create instrument objects for each drum group
-  return Array.from(drumGroups).map((group) => ({
-    name: `drum_${group}`,
+  return Array.from(drumNames).map((name) => ({
+    name: `drum_${name}`,
     family: 'drums',
     number: -1, // Use -1 to identify as drum instrument
     isDrum: true,
