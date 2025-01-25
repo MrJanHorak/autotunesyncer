@@ -28,20 +28,25 @@ const MidiParser = ({ file, onParsed }) => {
 
   const calculateDuration = useCallback((midi) => {
     console.log('calculating duration...');
-    let lastTime = 0;
-
+    let maxEndTime = 0;
+  
     midi.tracks.forEach((track) => {
-      if (!track.notes) return;
+      if (!track.notes || !track.notes.length) return;
+      
       track.notes.forEach((note) => {
-        const noteEndTime = note.time + note.duration;
-        lastTime = Math.max(lastTime, noteEndTime);
+        // Use endOfTrackTicks if available, otherwise calculate from note
+        const noteEndTicks = note.ticks + note.durationTicks;
+        maxEndTime = Math.max(maxEndTime, noteEndTicks);
       });
     });
-
+  
     const tempo = midi.header.tempos[0]?.bpm || 120;
-    const ppq = midi.header.ppq;
+    const ppq = midi.header.ppq || 480; // Standard MIDI PPQ if not specified
     const secondsPerBeat = 60 / tempo;
-    return (lastTime / ppq) * secondsPerBeat;
+    const duration = (maxEndTime / ppq) * secondsPerBeat;
+    
+    console.log(`Max ticks: ${maxEndTime}, PPQ: ${ppq}, Tempo: ${tempo}`);
+    return duration;
   }, []);
 
   const parseMidi = useCallback(async () => {

@@ -4,15 +4,16 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  width: 100%;
+  width: 70vw;
 }
 
 .recording-container {
+  /* width: 300px; */
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  margin: 0 10px;
+  margin: 0 auto;
 }
 
 .instrument-name {
