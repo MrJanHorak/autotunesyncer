@@ -6,7 +6,8 @@ import {
   calculateLongestNotes,
   normalizeInstrumentName,
 } from '../utils/midiUtils';
-import { isDrumTrack, getNoteGroup } from '../utils/midiUtils';
+
+import { isDrumTrack, getNoteGroup } from '../js/drumUtils'; //
 
 export const useMidiProcessing = (midiFile) => {
   const [parsedMidiData, setParsedMidiData] = useState(null);
