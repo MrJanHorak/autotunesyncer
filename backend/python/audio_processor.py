@@ -25,22 +25,22 @@ logging.basicConfig(
     ]
 )
 
-def get_drum_groups(track):
-    """Match frontend's DRUM_GROUPS logic"""
-    drum_groups = {
-        'kick': [35, 36],
-        'snare': [38, 40],
-        'hihat': [42, 44, 46],
-        'cymbal': [49, 51, 52, 55, 57],
-        'tom': [41, 43, 45, 47, 48, 50]
-    }
-    # Extract unique drum groups from track notes
-    groups = set()
-    for note in track.get('notes', []):
-        for group, midi_numbers in drum_groups.items():
-            if note['midi'] in midi_numbers:
-                groups.add(group)
-    return groups
+# def get_drum_groups(track):
+#     """Match frontend's DRUM_GROUPS logic"""
+#     drum_groups = {
+#         'kick': [35, 36],
+#         'snare': [38, 40],
+#         'hihat': [42, 44, 46],
+#         'cymbal': [49, 51, 52, 55, 57],
+#         'tom': [41, 43, 45, 47, 48, 50]
+#     }
+#     # Extract unique drum groups from track notes
+#     groups = set()
+#     for note in track.get('notes', []):
+#         for group, midi_numbers in drum_groups.items():
+#             if note['midi'] in midi_numbers:
+#                 groups.add(group)
+#     return groups
 
 def is_drum_kit(instrument):
     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
@@ -402,6 +402,18 @@ def process_track_videos(tracks, videos, processor):
             'valid_track_count': 0
         }
     }
+
+    logging.info("Starting track processing...")
+    if isinstance(tracks, list):
+        # Convert list to dictionary if needed
+        tracks = {idx: track for idx, track in enumerate(tracks)}
+        
+    for track_idx, track in tracks.items():
+        logging.info(f"Processing track {track_idx}")
+        if not isinstance(track, dict):
+                track = {"notes": track} if hasattr(track, "notes") else {}
+        if is_drum_kit(track):
+            logging.info(f"Found drum track {track_idx}: {track.get('instrument', {}).get('name')}")
     
     try:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -432,7 +444,7 @@ def process_track_videos(tracks, videos, processor):
                 continue
             
             if is_drum_kit(instrument):
-                drum_processed = False
+
                 for group in get_drum_groups(track):
                     instrument_key = f"drum_{group}"
                     if instrument_key in videos:
