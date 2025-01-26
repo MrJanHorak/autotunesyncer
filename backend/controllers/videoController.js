@@ -3,8 +3,10 @@ import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 // import midiParser from 'midi-parser-js'; // Assuming midi-parser-js is the correct library
 // import tunePitch from 'tune-pitch'; // Assuming tune-pitch is the correct library
+import logger from '../utils/logger';
 
 const extractAudio = (videoPath, outputAudioPath) => {
+  logger.info('Extracting audio from video:', videoPath);
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
       .output(outputAudioPath)
@@ -30,11 +32,11 @@ const extractAudio = (videoPath, outputAudioPath) => {
 // };
 
 export const uploadVideo = async (req, res) => {
-  console.log('Uploading video:', req.file);
+  logger.info('Uploading video:', req.file);
 
   try {
     const videoPath = req.file.path;
-    console.log('Video uploaded:', videoPath);
+    logger.info('Video uploaded:', videoPath);
     const audioPath = path.join('uploads/videos', 'extracted-audio.wav');
     const tunedAudioPath = path.join('uploads/wav', 'tuned-audio.wav');
     // const midiPath = path.join('uploads/midi', 'melody.mid'); // Path to MIDI file
@@ -48,7 +50,7 @@ export const uploadVideo = async (req, res) => {
     // Send the tuned audio back to the client
     res.sendFile(tunedAudioPath);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).send({ error: 'Failed to process audio.' });
   }
 };

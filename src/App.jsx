@@ -24,31 +24,30 @@ const normalizeInstrumentName = (name) => {
   return name.toLowerCase().replace(/\s+/g, '_');
 };
 
-// Add this helper function to extract drum instruments
-const extractDrumInstruments = (track) => {
-  if (!isDrumTrack(track)) return [];
+// // Add this helper function to extract drum instruments
+// const extractDrumInstruments = (track) => {
+//   if (!isDrumTrack(track)) return [];
 
-  // Get unique MIDI notes from the track
-  const uniqueNotes = new Set(track.notes.map((note) => note.midi));
+//   // Get unique MIDI notes from the track
+//   const uniqueNotes = new Set(track.notes.map((note) => note.midi));
 
-  // Map notes to their drum groups
-  const drumNames = new Set();
-  uniqueNotes.forEach((note) => {
-    const drumName = DRUM_NOTES[note];
-    if (drumName) {
-      drumNames.add(drumName);
-    }
-  });
+//   // Map notes to their drum groups
+//   const drumNames = new Set();
+//   uniqueNotes.forEach((note) => {
+//     const drumName = DRUM_NOTES[note];
+//     if (drumName) {
+//       drumNames.add(drumName);
+//     }
+//   });
 
-  // Create instrument objects for each drum group
-  return Array.from(drumNames).map((name) => ({
-    name: `drum_${name}`,
-    family: 'drums',
-    number: -1, // Use -1 to identify as drum instrument
-    isDrum: true,
-    group: group,
-  }));
-};
+//   // Create instrument objects for each drum group
+//   return Array.from(drumNames).map((name) => ({
+//     name: name.toLowerCase().replace(/\s+/g, '_'), // Normalize the name
+//     family: 'drums',
+//     number: -1,
+//     isDrum: true,
+//   }));
+// };
 
 function App() {
   const {
@@ -80,6 +79,7 @@ function App() {
     setMidiFile(file);
   };
 
+
   const handleParsedMidi = useCallback(
     (midiInfo) => {
       console.log('Parsed MIDI info:', midiInfo);
@@ -96,9 +96,13 @@ function App() {
       console.error('Invalid blob:', blob);
       return;
     }
-
+    console.log('Instrument: ', instrument);
+    if (instrument.isDrum) {
+    instrument.name = instrument.group
+    }
+    console.log('Handle Recording is complete Instrument after adding drum name:', instrument);
     const key = instrument.isDrum
-      ? `drum_${instrument.group}`
+      ? `drum_${instrument.name.toLowerCase().replace(/\s+/g, '_')}`
       : normalizeInstrumentName(instrument.name);
 
     console.log(
@@ -116,8 +120,9 @@ function App() {
 
   // Add handleVideoReady function
   const handleVideoReady = useCallback((videoUrl, instrument) => {
+    instrument.isDrum ? instrument.name = instrument.group : instrument.name;
     const instrumentKey = instrument.isDrum
-      ? `drum_${instrument.group}`
+      ? `drum_${instrument.name}`
       : normalizeInstrumentName(instrument.name);
 
     setInstrumentVideos((prev) => ({
