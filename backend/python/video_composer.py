@@ -43,6 +43,15 @@ class VideoComposer:
     def __init__(self, processed_videos_dir, midi_data, output_path):
         """Initialize VideoComposer with proper path handling"""
         try:
+            self.processed_videos_dir = Path(processed_videos_dir)
+            # Fix uploads path - go up two levels to /backend/uploads
+            self.uploads_dir = Path(processed_videos_dir).parent.parent.parent / "uploads"
+            logging.info(f"Setting uploads directory: {self.uploads_dir}")
+            # Verify uploads directory exists
+            if not self.uploads_dir.exists():
+                raise ValueError(f"Uploads directory not found: {self.uploads_dir}")
+            self.output_path = output_path
+            self.midi_data = midi_data
             self._setup_paths(processed_videos_dir, output_path)
             self.midi_data = midi_data
             self._process_midi_data(midi_data)
@@ -80,6 +89,82 @@ class VideoComposer:
         if 'tracks' not in midi_data:
             raise ValueError("Missing 'tracks' in midi_data")
 
+        # tracks = midi_data['tracks']
+        # self.tracks = {}
+        # self.drum_tracks = []
+        # self.regular_tracks = []
+        
+        # # First, process and copy drum videos
+        # logging.info("\n=== Processing Drum Videos ===")
+        # for idx, track in enumerate(tracks if isinstance(tracks, list) else tracks.values()):
+        #     track_id = str(idx)
+        #     normalized_track = self._normalize_track(track)
+            
+        #     # Check if it's a drum track
+        #     is_drum = (
+        #         normalized_track.get('isDrum') or 
+        #         normalized_track.get('instrument', {}).get('isDrum') or
+        #         normalized_track.get('channel') == 9 or
+        #         any(name in normalized_track.get('instrument', {}).get('name', '').lower() 
+        #             for name in ['drum', 'percussion', 'kit'])
+        #     )
+            
+        #     if is_drum:
+        #         logging.info(f"\nProcessing drum track {track_id}: {normalized_track.get('instrument', {}).get('name')}")
+                
+        #         # Create drum directory
+        #         drum_dir = self.processed_videos_dir / f"track_{idx}_drums"
+        #         drum_dir.mkdir(exist_ok=True)
+        #         logging.info(f"Created drum directory: {drum_dir}")
+                
+        #         # Get unique drum types needed from notes
+        #         needed_drums = set()
+        #         for note in normalized_track.get('notes', []):
+        #             midi_note = note.get('midi')
+        #             drum_name = DRUM_NOTES.get(midi_note)
+        #             if drum_name:
+        #                 needed_drums.add((midi_note, drum_name))
+        #                 logging.info(f"Found drum note: {midi_note} -> {drum_name}")
+                
+        #         logging.info(f"\nUploads directory contents:")
+        #         for file in self.uploads_dir.glob('*.mp4'):
+        #             logging.info(f"Found file: {file}")
+        #         logging.info(f"Looking for drum files in uploads: {self.uploads_dir}")
+
+        #         # Search both directories for drum files
+        #         for midi_note, drum_name in needed_drums:
+        #             normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
+        #             source_file = None
+                    
+        #             # First check uploads directory
+        #             logging.info(f"Looking for drum file pattern in uploads: *{normalized_name}.mp4")
+        #             for file in self.uploads_dir.glob(f"*{normalized_name}.mp4"):
+        #                 source_file = file
+        #                 logging.info(f"Found drum file in uploads: {file}")
+        #                 break
+                        
+        #             # If not found, check processed directory
+        #             if not source_file:
+        #                 logging.info(f"Looking for drum file pattern in processed: *{normalized_name}.mp4")
+        #                 for file in self.processed_videos_dir.glob(f"*{normalized_name}.mp4"):
+        #                     source_file = file
+        #                     logging.info(f"Found drum file in processed: {file}")
+        #                     break
+
+        #             if source_file:
+        #                 dest_file = drum_dir / f"{normalized_name}.mp4"
+        #                 if not dest_file.exists():
+        #                     shutil.copy2(str(source_file), str(dest_file))
+        #                     logging.info(f"Copied drum file: {source_file} -> {dest_file}")
+        #             else:
+        #                 logging.error(f"Missing drum file for {drum_name} ({normalized_name})")
+                
+        #         self.drum_tracks.append(normalized_track)
+        #     else:
+        #         self.regular_tracks.append(normalized_track)
+        #         self.tracks[track_id] = normalized_track
+
+        # logging.info(f"\nProcessed {len(self.tracks)} regular tracks and {len(self.drum_tracks)} drum tracks")
         tracks = midi_data['tracks']
         self.tracks = {}
         self.drum_tracks = []
@@ -87,6 +172,13 @@ class VideoComposer:
         
         # First, process and copy drum videos
         logging.info("\n=== Processing Drum Videos ===")
+        
+        # List all upload files once
+        upload_files = list(self.uploads_dir.glob('*.mp4'))
+        logging.info(f"\nUploads directory ({self.uploads_dir}) contents:")
+        for file in upload_files:
+            logging.info(f"Found uploaded file: {file.name}")
+
         for idx, track in enumerate(tracks if isinstance(tracks, list) else tracks.values()):
             track_id = str(idx)
             normalized_track = self._normalize_track(track)
@@ -116,37 +208,27 @@ class VideoComposer:
                     if drum_name:
                         needed_drums.add((midi_note, drum_name))
                         logging.info(f"Found drum note: {midi_note} -> {drum_name}")
-                # Add uploads dir path
-                self.uploads_dir = Path(self.processed_videos_dir).parent / "uploads"
-                logging.info(f"Looking for drum files in uploads: {self.uploads_dir}")
 
-                # Search both directories for drum files
+                # Search for needed drum files
                 for midi_note, drum_name in needed_drums:
                     normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
                     source_file = None
                     
-                    # First check uploads directory
-                    logging.info(f"Looking for drum file pattern in uploads: *{normalized_name}.mp4")
-                    for file in self.uploads_dir.glob(f"*{normalized_name}.mp4"):
-                        source_file = file
-                        logging.info(f"Found drum file in uploads: {file}")
-                        break
-                        
-                    # If not found, check processed directory
-                    if not source_file:
-                        logging.info(f"Looking for drum file pattern in processed: *{normalized_name}.mp4")
-                        for file in self.processed_videos_dir.glob(f"*{normalized_name}.mp4"):
+                    # Search uploads for matching drum file
+                    for file in upload_files:
+                        if normalized_name in file.name.lower():
                             source_file = file
-                            logging.info(f"Found drum file in processed: {file}")
+                            logging.info(f"Found matching drum file: {file.name}")
                             break
 
                     if source_file:
                         dest_file = drum_dir / f"{normalized_name}.mp4"
                         if not dest_file.exists():
                             shutil.copy2(str(source_file), str(dest_file))
-                            logging.info(f"Copied drum file: {source_file} -> {dest_file}")
+                            logging.info(f"Copied drum file: {source_file.name} -> {dest_file.name}")
                     else:
-                        logging.error(f"Missing drum file for {drum_name} ({normalized_name})")
+                        logging.error(f"Missing drum file for {drum_name}")
+                        logging.error(f"Looked for pattern: {normalized_name} in files: {[f.name for f in upload_files]}")
                 
                 self.drum_tracks.append(normalized_track)
             else:
@@ -1177,55 +1259,59 @@ class VideoComposer:
 
     def _process_chunk_tracks(self, grid, start_time, end_time):
         """Process all tracks for current time chunk"""
-        # Process regular tracks first
-        for track_id, track_data in self.tracks.items():
-            try:
-                track_path = Path(track_data['base_path'])
-                if not track_path.exists():
-                    continue
+        try:
+            # Process regular tracks first
+            for track_id, track in self.tracks.items():
+                try:
+                    track_path = self.processed_videos_dir / f"{track.get('name', '')}_notes"
+                    if not track_path.exists():
+                        continue
+                        
+                    chunk_notes = [
+                        note for note in track.get('notes', [])
+                        if start_time <= float(note['time']) < end_time
+                    ]
                     
-                # Get notes for current time chunk
-                chunk_notes = [
-                    note for note in track_data.get('notes', [])
-                    if start_time <= float(note['time']) < end_time
-                ]
+                    if chunk_notes:
+                        position = self.grid_positions.get(str(track_id))
+                        if position is not None:
+                            row = position // self.cols
+                            col = position % self.cols
+                            clips = []
+                            
+                            for note in chunk_notes:
+                                midi_note = note['midi']
+                                note_name = midi_to_note(midi_note)
+                                note_file = track_path / f"note_{midi_note}_{note_name}.mp4"
+                                
+                                if note_file.exists():
+                                    clip = VideoFileClip(str(note_file))
+                                    time = float(note['time']) - start_time
+                                    clip = clip.set_start(time)
+                                    clips.append(clip)
+                            
+                            if clips:
+                                grid[row][col] = CompositeVideoClip(clips)
+                                
+                except Exception as e:
+                    logging.error(f"Error processing track {track_id}: {str(e)}")
+                    continue
+
+            # Then process drum tracks
+            for track_idx, track in enumerate(self.drum_tracks):
+                chunk_notes = [note for note in track.get('notes', [])
+                            if start_time <= float(note['time']) < end_time]
                 
                 if chunk_notes:
-                    position = self.grid_positions.get(str(track_id))
-                    if position is not None:
-                        row = position // self.cols
-                        col = position % self.cols
-                        clips = []
-                        
-                        for note in chunk_notes:
-                            midi_note = note['midi']
-                            note_file = track_path / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                            
-                            if note_file.exists():
-                                clip = VideoFileClip(str(note_file))
-                                time = float(note['time']) - start_time
-                                clip = clip.set_start(time)
-                                clips.append(clip)
-                        
-                        if clips:
-                            grid[row][col] = CompositeVideoClip(clips)
-                            
-            except Exception as e:
-                logging.error(f"Error processing track {track_id}: {str(e)}")
-                continue
-
-        # Then process drum tracks
-        for track_idx, track in enumerate(self.drum_tracks):
-            chunk_notes = [note for note in track.get('notes', [])
-                        if start_time <= float(note['time']) < end_time]
-            
-            if chunk_notes:
-                grid = self._process_drum_track(grid, track_idx, track, chunk_notes, start_time)
+                    grid = self._process_drum_track(grid, track_idx, track, chunk_notes, start_time)
+                    
+            return grid
                 
-        return grid
+        except Exception as e:
+            logging.error(f"Error in _process_chunk_tracks: {str(e)}")
+            return grid
 
     def _process_drum_track(self, grid, track_idx, track, chunk_notes, start_time):
-        """Process drum track clips"""
         try:
             logging.info(f"\n=== DRUM TRACK PROCESSING ===")
             logging.info(f"Track Index: {track_idx}")
@@ -1234,6 +1320,12 @@ class VideoComposer:
             drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
             drum_dir.mkdir(exist_ok=True)
             logging.info(f"Created drum directory: {drum_dir}")
+
+            # List ALL files in uploads directory first
+            upload_files = list(self.uploads_dir.glob('*.mp4'))
+            logging.info(f"\nUploads directory contents at {self.uploads_dir}:")
+            for file in upload_files:
+                logging.info(f"Found uploaded file: {file.name}")
 
             # Get unique drum types needed
             needed_drums = set()
@@ -1244,64 +1336,50 @@ class VideoComposer:
                     needed_drums.add((midi_note, drum_name))
                     logging.info(f"Need drum video for: {drum_name} (MIDI: {midi_note})")
 
-            # Find and copy drum videos from processed directory
+            # Process each needed drum
             for midi_note, drum_name in needed_drums:
                 normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
+                logging.info(f"\nLooking for drum: {normalized_name}")
                 
-                # Look for any file in processed directory that ends with the normalized name
+                # Look for matching file
                 source_file = None
-                for file in self.processed_videos_dir.glob(f"*{normalized_name}.mp4"):
-                    source_file = file
-                    break
-                    
+                for file in upload_files:
+                    # Just check if normalized name is in the filename
+                    if normalized_name in file.name.lower():
+                        source_file = file
+                        logging.info(f"Found matching drum file: {file.name}")
+                        break
+
                 if source_file:
                     dest_file = drum_dir / f"{normalized_name}.mp4"
                     if not dest_file.exists():
                         shutil.copy2(str(source_file), str(dest_file))
-                        logging.info(f"Copied drum file: {source_file} -> {dest_file}")
+                        logging.info(f"Copied drum file: {source_file.name} -> {dest_file.name}")
                 else:
                     logging.error(f"Missing drum file for {drum_name}")
+                    logging.error(f"Looked for pattern: {normalized_name} in files: {[f.name for f in upload_files]}")
 
-            # Process drum notes for composition
-            for note in chunk_notes:
-                try:
-                    midi_note = note['midi']
-                    drum_name = DRUM_NOTES.get(midi_note)
-                    
-                    if drum_name:
-                        normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
-                        position_key = normalized_name
-                        
-                        if position_key in self.grid_positions:
-                            position = self.grid_positions[position_key]
-                            row = position // self.cols
-                            col = position % self.cols
-                            
-                            video_file = drum_dir / f"{normalized_name}.mp4"
-                            if video_file.exists():
-                                clip = VideoFileClip(str(video_file))
-                                time = float(note['time']) - start_time
-                                clip = clip.set_start(time)
-                                
-                                if isinstance(grid[row][col], ColorClip):
-                                    grid[row][col] = clip
-                                else:
-                                    existing = grid[row][col]
-                                    grid[row][col] = CompositeVideoClip([existing, clip])
-                                    
-                                logging.info(f"Added {drum_name} clip at time {time}")
-                            else:
-                                logging.error(f"Required drum video not found: {video_file}")
-                                
-                except Exception as e:
-                    logging.error(f"Error processing drum note: {str(e)}")
-                    continue
+            # Verify copied files
+            logging.info("\nVerifying copied drum files:")
+            for file in drum_dir.glob('*.mp4'):
+                logging.info(f"Found copied file: {file}")
 
             return grid
                 
         except Exception as e:
             logging.error(f"Error in _process_drum_track: {str(e)}")
             return grid
+                        
+    def _verify_drum_files(self, drum_dir):
+        """Verify drum files were copied correctly"""
+        logging.info(f"\nVerifying drum files in: {drum_dir}")
+        if drum_dir.exists():
+            for file in drum_dir.glob('*.mp4'):
+                logging.info(f"Found drum file: {file}")
+                if file.stat().st_size == 0:
+                    logging.error(f"Empty drum file: {file}")
+        else:
+            logging.error(f"Drum directory not found: {drum_dir}")
 
     def _process_regular_track(self, grid, track_idx, track, chunk_notes, start_time):
         """Process regular instrument track clips"""
