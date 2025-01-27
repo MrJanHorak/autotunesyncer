@@ -17,13 +17,7 @@ import {
   getNoteGroup,
 } from '../utils/drumUtils.js';
 import { createReadStream, statSync } from 'fs';
-import logger from '../utils/logger.js';
 
-
-logger.info('CompositionController initialized', { timestamp: new Date() });
-logger.debug('Debug mode enabled');
-logger.error('Test error message');
-logger.info('Starting video composition service');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -31,7 +25,6 @@ const TEMP_DIR = join(__dirname, '../temp');
 const UPLOADS_DIR = join(__dirname, '../uploads');
 // const encodingSettings = await getOptimalEncodingSettings();
 const GPU_MEMORY_LIMIT = '2GB';
-
 
 // Ensure directories exist with proper error handling
 // function ensureDirectoryExists(dir) {
@@ -41,7 +34,7 @@ const GPU_MEMORY_LIMIT = '2GB';
 //     }
 //     return true;
 //   } catch (err) {
-//     logger.error(`Failed to create directory ${dir}:`, err);
+//     console.error(`Failed to create directory ${dir}:`, err);
 //     return false;
 //   }
 // }
@@ -54,33 +47,32 @@ const GPU_MEMORY_LIMIT = '2GB';
 
 // Add this helper function at the top
 const normalizeInstrumentName = (name) => {
-  logger.info('Normalizing instrument name:', name);
+  console.log('Normalizing instrument name:', name);
   return name.toLowerCase().replace(/\s+/g, '_');
 };
 
 const processDrumTrack = (track, index) => {
-  logger.info(`\nProcessing drum track ${index}:`, track.instrument.name);
+  console.log(`\nProcessing drum track ${index}:`, track.instrument.name);
   const drumNotes = {};
-  track.notes.forEach(note => {
-    logger.info(`\nProcessing drum note:`, note);
-      const drumName = DRUM_NOTE_MAP[note.midi];
-      logger.info('Drum name:', drumName);
-      if (drumName) {
-          const key = drumName.toLowerCase().replace(/\s+/g, '_');
-          if (!drumNotes[key]) {
-              drumNotes[key] = [];
-          }
-          drumNotes[key].push(note);
+  track.notes.forEach((note) => {
+    console.log(`\nProcessing drum note:`, note);
+    const drumName = DRUM_NOTE_MAP[note.midi];
+    console.log('Drum name:', drumName);
+    if (drumName) {
+      const key = drumName.toLowerCase().replace(/\s+/g, '_');
+      if (!drumNotes[key]) {
+        drumNotes[key] = [];
       }
-      logger.info('Drum notes:', drumNotes);
+      drumNotes[key].push(note);
+    }
+    console.log('Drum notes:', drumNotes);
   });
   return drumNotes;
 };
 
-
 // Add this new function
 async function processVideoWithPython(midiData, processedFiles, outputPath) {
-  logger.info('Processing video with Python:', {
+  console.log('Processing video with Python:', {
     outputPath,
     midiData,
     processedFiles,
@@ -90,8 +82,8 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
       const videoFilesForPython = {};
 
       processedFiles.forEach((value, key) => {
-        logger.info(`\nProcessing video file: ${key}`);
-        logger.info('File details:', value);
+        console.log(`\nProcessing video file: ${key}`);
+        console.log('File details:', value);
         if (existsSync(value.path)) {
           videoFilesForPython[key] = {
             path: value.path.replace(/\\/g, '/'),
@@ -110,17 +102,17 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
               height: 720,
             },
           };
-          logger.info('Added video file:', videoFilesForPython[key]);
+          console.log('Added video file:', videoFilesForPython[key]);
         } else {
-          logger.warn(`Video file not found: ${value.path}`);
+          console.log(`Video file not found: ${value.path}`);
         }
       });
 
       // Ensure all video files have audio streams before processing
       const midiJsonPath = join(TEMP_DIR, 'midi_data.json');
       const videoFilesJsonPath = join(TEMP_DIR, 'video_files.json');
-      logger.info('MIDI data:', midiData);
-      logger.info('Writing JSON files:', { midiJsonPath, videoFilesJsonPath });
+      console.log('MIDI data:', midiData);
+      console.log('Writing JSON files:', { midiJsonPath, videoFilesJsonPath });
       writeFileSync(midiJsonPath, JSON.stringify(midiData));
       writeFileSync(videoFilesJsonPath, JSON.stringify(videoFilesForPython));
 
@@ -131,13 +123,13 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
         videoFilesJsonPath,
         outputPath,
       ]);
-      logger.info('Python process started:', pythonProcess.pid);
+      console.log('Python process started:', pythonProcess.pid);
       pythonProcess.stdout.on('data', (data) => {
-        logger.info(`Python stdout: ${data}`);
+        console.log(`Python stdout: ${data}`);
       });
 
       pythonProcess.stderr.on('data', (data) => {
-        logger.error(`Python stderr: ${data}`);
+        console.error(`Python stderr: ${data}`);
       });
 
       pythonProcess.on('close', (code) => {
@@ -145,7 +137,7 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
           // Verify output video has audio
           ffmpeg.ffprobe(outputPath, (err, metadata) => {
             if (err) {
-              logger.error('Error verifying output video:', err);
+              console.error('Error verifying output video:', err);
               reject(err);
               return;
             }
@@ -154,7 +146,7 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
               (s) => s.codec_type === 'audio'
             );
             if (!hasAudio) {
-              logger.error('Output video has no audio stream!');
+              console.error('Output video has no audio stream!');
               reject(new Error('Output video missing audio'));
               return;
             }
@@ -229,126 +221,124 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
 
 export const composeVideo = async (req, res) => {
   const sessionId = uuidv4();
-  logger.info('Received composition request');
-  logger.info('Files:', req.files?.map((f) => f.fieldname));
-  logger.info('Body:', req.body);
-  logger.info('Composition request received', {
-    sessionId,
-    requestId: req.id,
-    timestamp: new Date().toISOString()
-  });
 
   try {
-      const { midi, videoFiles } = req.body;
-      const midiData = new Midi(Buffer.from(midi));
-      logger.info('MIDI data:', {
-          format: midiData.header.format,
-          tracks: midiData.tracks.map((t, i) => ({
-              index: i,
-              name: t.instrument?.name,
-              channel: t.channel,
-              noteCount: t.notes?.length,
-          })),
-      });
-      const processedTracks = {};
-      const processedDrums = {};
-      
-      midiData.tracks.forEach((track, index) => {
-          if (isDrumTrack(track)) {
-            logger.info(`\nAnalyzing drum track ${index}:`, track.instrument.name);
-              const drumGroups = processDrumTrack(track, index);
-              logger.info(`\nDrum groups for track ${index}:`, drumGroups);
-              Object.entries(drumGroups).forEach(([drumName, notes]) => {
-                  const videoKey = `drum_${drumName}`;
-                  logger.info('Drum video key:', videoKey);
-                  if (videoFiles[videoKey]) {
-                    logger.info('Drum video found:', videoFiles[videoKey]);
-                      processedDrums[videoKey] = {
-                          notes,
-                          video: videoFiles[videoKey],
-                          index
-                      };
-                      logger.info('Processed drums:', processedDrums);
-                  }
-              });
-          } else {
-              const trackKey = normalizeInstrumentName(track.instrument.name);
-              logger.info(`\nProcessing melodic track ${index}:`, track.instrument.name);
-              logger.info('Normalized key:', trackKey);
-              if (videoFiles[trackKey]) {
-                  processedTracks[trackKey] = {
-                      notes: track.notes,
-                      video: videoFiles[trackKey],
-                      index
-                  };
-              }
+    console.log('Processing request body', {
+      sessionId,
+      filesCount: req.files?.length,
+      bodyKeys: Object.keys(req.body || {}),
+    });
+
+    const { midi, videoFiles } = req.body;
+    const midiData = new Midi(Buffer.from(midi));
+
+    console.log('MIDI data:', {
+      format: midiData.header.format,
+      tracks: midiData.tracks.map((t, i) => ({
+        index: i,
+        name: t.instrument?.name,
+        channel: t.channel,
+        noteCount: t.notes?.length,
+      })),
+    });
+    const processedTracks = {};
+    const processedDrums = {};
+
+    midiData.tracks.forEach((track, index) => {
+      if (isDrumTrack(track)) {
+        console.log(`\nAnalyzing drum track ${index}:`, track.instrument.name);
+        const drumGroups = processDrumTrack(track, index);
+        console.log(`\nDrum groups for track ${index}:`, drumGroups);
+        Object.entries(drumGroups).forEach(([drumName, notes]) => {
+          const videoKey = `drum_${drumName}`;
+          console.log('Drum video key:', videoKey);
+          if (videoFiles[videoKey]) {
+            console.log('Drum video found:', videoFiles[videoKey]);
+            processedDrums[videoKey] = {
+              notes,
+              video: videoFiles[videoKey],
+              index,
+            };
+            console.log('Processed drums:', processedDrums);
           }
-      });
-
-      const config = {
-          tracks: processedTracks,
-          drums: processedDrums,
-          sessionId: uuidv4()
-      };
-
-      writeFileSync(
-          join(TEMP_DIR, `config_${config.sessionId}.json`),
-          JSON.stringify(config, null, 2)
-      );
-
-      const outputPath = join(TEMP_DIR, `output_${config.sessionId}.mp4`);
-      await processVideoWithPython(midiData, config, outputPath);
-
-      const stat = statSync(outputPath);
-      const fileSize = stat.size;
-      const head = {
-          'Content-Length': fileSize,
-          'Content-Type': 'video/mp4',
-          'Content-Disposition': 'attachment; filename="composed-video.mp4"',
-      };
-
-      res.writeHead(200, head);
-      const readStream = createReadStream(outputPath);
-
-      readStream.on('error', (error) => {
-          logger.error('Stream error:', error);
-          if (!res.headersSent) {
-              res.status(500).json({ error: 'Failed to stream video' });
-          }
-          cleanup();
-      });
-
-      readStream.on('end', () => {
-          logger.info('Stream completed');
-          cleanup();
-      });
-
-      readStream.pipe(res);
-
-      function cleanup() {
-          setTimeout(() => {
-              cleanupTempDirectory(TEMP_DIR).catch(logger.error);
-          }, 1000);
+        });
+      } else {
+        const trackKey = normalizeInstrumentName(track.instrument.name);
+        console.log(
+          `\nProcessing melodic track ${index}:`,
+          track.instrument.name
+        );
+        console.log('Normalized key:', trackKey);
+        if (videoFiles[trackKey]) {
+          processedTracks[trackKey] = {
+            notes: track.notes,
+            video: videoFiles[trackKey],
+            index,
+          };
+        }
       }
-  } catch (error) {
-      logger.error('Composition error:', error);
+    });
+
+    const config = {
+      tracks: processedTracks,
+      drums: processedDrums,
+      sessionId: uuidv4(),
+    };
+
+    writeFileSync(
+      join(TEMP_DIR, `config_${config.sessionId}.json`),
+      JSON.stringify(config, null, 2)
+    );
+
+    const outputPath = join(TEMP_DIR, `output_${config.sessionId}.mp4`);
+    await processVideoWithPython(midiData, config, outputPath);
+
+    const stat = statSync(outputPath);
+    const fileSize = stat.size;
+    const head = {
+      'Content-Length': fileSize,
+      'Content-Type': 'video/mp4',
+      'Content-Disposition': 'attachment; filename="composed-video.mp4"',
+    };
+
+    res.writeHead(200, head);
+    const readStream = createReadStream(outputPath);
+
+    readStream.on('error', (error) => {
+      console.error('Stream error:', error);
       if (!res.headersSent) {
-          res.status(500).json({ error: error.message });
+        res.status(500).json({ error: 'Failed to stream video' });
       }
+      cleanup();
+    });
+
+    readStream.on('end', () => {
+      console.log('Stream completed');
+      cleanup();
+    });
+
+    readStream.pipe(res);
+
+    function cleanup() {
       setTimeout(() => {
-          cleanupTempDirectory(TEMP_DIR).catch(logger.error);
+        cleanupTempDirectory(TEMP_DIR).catch(console.error);
       }, 1000);
+    }
+  } catch (error) {
+    console.error('Composition error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+    setTimeout(() => {
+      cleanupTempDirectory(TEMP_DIR).catch(console.error);
+    }, 1000);
   }
 };
 
-
-
-
-
 // Modify the composeVideo function to use the Python processor
 // export const composeVideo = async (req, res) => {
-//   logger.info('Received composition request');
-//   logger.info(
+//   console.log('Received composition request');
+//   console.log(
 //     'Files:',
 //     req.files?.map((f) => ({
 //       fieldname: f.fieldname,
@@ -358,13 +348,13 @@ export const composeVideo = async (req, res) => {
 //   );
 
 //   if (!req.files || req.files.length === 0) {
-//     logger.error('No files received');
+//     console.error('No files received');
 //     return res.status(400).json({ error: 'No files were uploaded' });
 //   }
 
 //   const midiFile = req.files.find((file) => file.fieldname === 'midiData');
 //   if (!midiFile) {
-//     logger.error('No MIDI data found');
+//     console.error('No MIDI data found');
 //     return res.status(400).json({ error: 'MIDI data is missing' });
 //   }
 
@@ -372,7 +362,7 @@ export const composeVideo = async (req, res) => {
 //     file.fieldname.startsWith('videos[')
 //   );
 //   if (videoFiles.length === 0) {
-//     logger.error('No video files found');
+//     console.error('No video files found');
 //     return res.status(400).json({ error: 'No video files were uploaded' });
 //   }
 
@@ -384,7 +374,7 @@ export const composeVideo = async (req, res) => {
 //     !ensureDirectoryExists(UPLOADS_DIR) ||
 //     !ensureDirectoryExists(sessionDir)
 //   ) {
-//     logger.error('Failed to create required directories');
+//     console.error('Failed to create required directories');
 //     return res
 //       .status(500)
 //       .json({ error: 'Failed to create required directories' });
@@ -396,7 +386,7 @@ export const composeVideo = async (req, res) => {
 //       throw new Error('No files were uploaded');
 //     }
 
-//     logger.debug(
+//     console.log(
 //       'Files received:',
 //       files.map((f) => ({
 //         fieldname: f.fieldname,
@@ -416,7 +406,7 @@ export const composeVideo = async (req, res) => {
 //     try {
 //       if (midiFile.mimetype === 'application/json') {
 //         const midiJson = JSON.parse(midiFile.buffer.toString());
-//         logger.info('Raw MIDI JSON:', {
+//         console.log('Raw MIDI JSON:', {
 //           tracks: midiJson.tracks.map((t, i) => ({
 //             index: i,
 //             name: t.instrument?.name,
@@ -445,7 +435,7 @@ export const composeVideo = async (req, res) => {
 //           }
 //         });
 
-//         logger.info(
+//         console.log(
 //           'Parsed MIDI tracks detail:',
 //           midi.tracks.map((track, i) => debugMidiTrack(track, i))
 //         );
@@ -453,16 +443,16 @@ export const composeVideo = async (req, res) => {
 //         midi = new Midi(midiFile.buffer);
 //       }
 //     } catch (error) {
-//       logger.error('Error parsing MIDI data:', error);
+//       console.error('Error parsing MIDI data:', error);
 //       throw new Error('Invalid MIDI data format');
 //     }
 
 //     // After parsing, add drum track validation
 //     const midiDrumTracks = midi.tracks.filter(isDrumTrack);
-//     logger.info('\nDrum Track Analysis:');
-//     logger.info('Total drum tracks found:', midiDrumTracks.length);
+//     console.log('\nDrum Track Analysis:');
+//     console.log('Total drum tracks found:', midiDrumTracks.length);
 //     midiDrumTracks.forEach((track, i) => {
-//       logger.info(`\nDrum Track ${i}:`, {
+//       console.log(`\nDrum Track ${i}:`, {
 //         name: track.instrument.name,
 //         channel: track.channel,
 //         noteCount: track.notes.length,
@@ -491,28 +481,28 @@ export const composeVideo = async (req, res) => {
 //       }
 //     });
 
-//     logger.info(
+//     console.log(
 //       'Available video files for instruments:',
 //       Object.keys(videoFiles)
 //     );
-//     logger.info(
+//     console.log(
 //       'MIDI tracks:',
 //       midi.tracks.map((track) => track.instrument.name)
 //     );
 
 //     // Process each track
 //     const processedFiles = new Map();
-//     logger.info('\n=== Starting Track Processing ===');
+//     console.log('\n=== Starting Track Processing ===');
 
 //     // First, validate drum videos against MIDI tracks
 //     const drumTracksNeeded = new Set();
 //     midi.tracks.forEach((track, index) => {
 //       if (isDrumTrack(track)) {
-//         logger.info(`\nAnalyzing drum track ${index}:`, track.instrument.name);
+//         console.log(`\nAnalyzing drum track ${index}:`, track.instrument.name);
 //         track.notes.forEach((note) => {
 //           const group = getNoteGroup(note.midi);
 //           drumTracksNeeded.add(group);
-//           logger.info(
+//           console.log(
 //             `Required drum group: ${group} for MIDI note: ${note.midi}`
 //           );
 //         });
@@ -523,15 +513,15 @@ export const composeVideo = async (req, res) => {
 //     const availableDrumVideos = Object.keys(videoFiles).filter((name) =>
 //       name.startsWith('drum_')
 //     );
-//     logger.info('\nDrum videos validation:');
-//     logger.info('Required drum groups:', Array.from(drumTracksNeeded));
-//     logger.info('Available drum videos:', availableDrumVideos);
+//     console.log('\nDrum videos validation:');
+//     console.log('Required drum groups:', Array.from(drumTracksNeeded));
+//     console.log('Available drum videos:', availableDrumVideos);
 
 //     // Validate drum video coverage
 //     drumTracksNeeded.forEach((group) => {
 //       const drumVideoKey = `drum_${group.toLowerCase().replace(/\s+/g, '_')}`;
 //       if (!videoFiles[drumVideoKey]) {
-//         logger.warn(`⚠️ Missing drum video for group: ${group}`);
+//         console.log(`⚠️ Missing drum video for group: ${group}`);
 //       }
 //     });
 
@@ -544,15 +534,15 @@ export const composeVideo = async (req, res) => {
 //         normalizedName: normalizeInstrumentName(track.instrument.name),
 //       }));
 
-//     logger.info(`Active tracks (with notes): ${activeTracksData.length}`);
+//     console.log(`Active tracks (with notes): ${activeTracksData.length}`);
 
 //     // Calculate layout based on number of active tracks
 //     const layoutConfig = calculateLayoutConfig(activeTracksData.length);
-//     logger.info('Layout configuration:', layoutConfig);
+//     console.log('Layout configuration:', layoutConfig);
 
 //     const trackPromises = activeTracksData.map(
 //       async ({ track, index, normalizedName }, layoutIndex) => {
-//         logger.info(`\nProcessing track ${index}:`, {
+//         console.log(`\nProcessing track ${index}:`, {
 //           name: track.instrument.name,
 //           notes: track.notes.length,
 //           channel: track.channel,
@@ -560,13 +550,13 @@ export const composeVideo = async (req, res) => {
 
 //         // Skip if no notes
 //         if (!track.notes || track.notes.length === 0) {
-//           logger.info(`Skipping empty track ${index}`);
+//           console.log(`Skipping empty track ${index}`);
 //           return null;
 //         }
 
 //         if (isDrumTrack(track)) {
 //           // Use imported function
-//           logger.info(`Processing drum track ${index}:`, track.instrument.name);
+//           console.log(`Processing drum track ${index}:`, track.instrument.name);
 //           const drumNotes = processDrumTrack(track, index);
 
 //           // Process each drum group
@@ -577,7 +567,7 @@ export const composeVideo = async (req, res) => {
 //             const videoFile = videoFiles[drumVideoKey]; // Use the map instead of find
 
 //             if (videoFile) {
-//               logger.info(
+//               console.log(
 //                 `Processing drum group: ${drumName} with ${notes.length} notes`
 //               );
 //               const uniqueTrackId = `${drumVideoKey}_track${index}`;
@@ -600,14 +590,14 @@ export const composeVideo = async (req, res) => {
 //                   notes: notes,
 //                 };
 //               } catch (error) {
-//                 logger.error(
+//                 console.error(
 //                   `Error processing drum video ${drumName}:`,
 //                   error
 //                 );
 //                 throw error;
 //               }
 //             } else {
-//               logger.warn(
+//               console.log(
 //                 `Missing video file for drum: ${drumName} (key: ${drumVideoKey})`
 //               );
 //             }
@@ -620,7 +610,7 @@ export const composeVideo = async (req, res) => {
 //           // Find corresponding video file
 //           const videoFile = videoFiles[normalizedName];
 //           if (!videoFile) {
-//             logger.info(
+//             console.log(
 //               `No video found for instrument: ${track.instrument.name} (normalized: ${normalizedName})`
 //             );
 //             return null;
@@ -649,12 +639,12 @@ export const composeVideo = async (req, res) => {
 //               layout: layoutConfig.segments[layoutIndex],
 //             });
 
-//             logger.info(
+//             console.log(
 //               `Processed ${uniqueTrackId} with ${notes.length} notes`
 //             );
 //             return uniqueTrackId;
 //           } catch (error) {
-//             logger.error(
+//             console.error(
 //               `Error processing melodic track ${uniqueTrackId}:`,
 //               error
 //             );
@@ -667,14 +657,14 @@ export const composeVideo = async (req, res) => {
 //     await Promise.all(trackPromises);
 
 //     // Log final processed files before sending to Python
-//     logger.info('\n=== Final Processed Files ===');
-//     logger.info('Total processed tracks:', processedFiles.size);
+//     console.log('\n=== Final Processed Files ===');
+//     console.log('Total processed tracks:', processedFiles.size);
 //     processedFiles.forEach((value, key) => {
-//       logger.info(`\nTrack: ${key}`);
-//       logger.info(`- Is drum: ${value.isDrum}`);
-//       logger.info(`- Note count: ${value.notes.length}`);
-//       logger.info(`- File exists: ${existsSync(value.path)}`);
-//       logger.info(`- First 3 notes:`, value.notes.slice(0, 3));
+//       console.log(`\nTrack: ${key}`);
+//       console.log(`- Is drum: ${value.isDrum}`);
+//       console.log(`- Note count: ${value.notes.length}`);
+//       console.log(`- File exists: ${existsSync(value.path)}`);
+//       console.log(`- First 3 notes:`, value.notes.slice(0, 3));
 //     });
 
 //     const outputPath = join(sessionDir, 'output.mp4');
@@ -690,7 +680,7 @@ export const composeVideo = async (req, res) => {
 //     midiData.duration = midi.duration;
 
 //     // Add verification before Python processing
-//     logger.info('\n=== Pre-Python Processing Verification ===');
+//     console.log('\n=== Pre-Python Processing Verification ===');
 //     const processedDrumTracks = Array.from(processedFiles.entries())
 //       .filter(([key, value]) => value.isDrum)
 //       .map(([key, value]) => ({
@@ -699,7 +689,7 @@ export const composeVideo = async (req, res) => {
 //         noteCount: value.notes.length,
 //       }));
 
-//     logger.info('Drum tracks being sent to Python:', processedDrumTracks);
+//     console.log('Drum tracks being sent to Python:', processedDrumTracks);
 
 //     // Wait for any pending file operations to complete
 //     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -729,7 +719,7 @@ export const composeVideo = async (req, res) => {
 
 //       // Handle stream events
 //       readStream.on('error', (error) => {
-//         logger.error('Stream error:', error);
+//         console.error('Stream error:', error);
 //         if (!res.headersSent) {
 //           res.status(500).json({ error: 'Failed to stream video' });
 //         }
@@ -737,7 +727,7 @@ export const composeVideo = async (req, res) => {
 //       });
 
 //       readStream.on('end', () => {
-//         logger.info('Stream completed');
+//         console.log('Stream completed');
 //         cleanup();
 //       });
 
@@ -750,16 +740,16 @@ export const composeVideo = async (req, res) => {
 //     // Cleanup function
 //     function cleanup() {
 //       setTimeout(() => {
-//         cleanupTempDirectory(sessionDir).catch(logger.error);
+//         cleanupTempDirectory(sessionDir).catch(console.error);
 //       }, 1000);
 //     }
 //   } catch (error) {
-//     logger.error('Composition error:', error);
+//     console.error('Composition error:', error);
 //     if (!res.headersSent) {
 //       res.status(500).json({ error: error.message });
 //     }
 //     setTimeout(() => {
-//       cleanupTempDirectory(sessionDir).catch(logger.error);
+//       cleanupTempDirectory(sessionDir).catch(console.error);
 //     }, 1000);
 //   }
 // };
@@ -767,9 +757,9 @@ export const composeVideo = async (req, res) => {
 async function cleanupTempDirectory(dirPath) {
   try {
     await rm(dirPath, { recursive: true, force: true });
-    logger.info(`Temp directory ${dirPath} cleaned up successfully.`);
+    console.log(`Temp directory ${dirPath} cleaned up successfully.`);
   } catch (error) {
-    logger.error(`Error cleaning up temp directory ${dirPath}:`, error);
+    console.error(`Error cleaning up temp directory ${dirPath}:`, error);
   }
 }
 
@@ -810,7 +800,7 @@ async function cleanupTempDirectory(dirPath) {
 //           const audioStream = metadata.streams.find(
 //             (s) => s.codec_type === 'audio'
 //           );
-//           logger.info(`[Attempt ${attempt}] Input audio stream:`, audioStream);
+//           console.log(`[Attempt ${attempt}] Input audio stream:`, audioStream);
 
 //           const command = ffmpeg(inputPath);
 
@@ -882,13 +872,13 @@ async function cleanupTempDirectory(dirPath) {
 
 //           command
 //             .on('start', (cmdline) =>
-//               logger.info(
+//               console.log(
 //                 `[Attempt ${attempt}] Running FFmpeg command:`,
 //                 cmdline
 //               )
 //             )
 //             .on('stderr', (stderrLine) =>
-//               logger.info(`[Attempt ${attempt}] FFmpeg stderr:`, stderrLine)
+//               console.log(`[Attempt ${attempt}] FFmpeg stderr:`, stderrLine)
 //             )
 //             .on('end', () => resolve())
 //             .on('error', (err) => reject(err))
@@ -898,7 +888,7 @@ async function cleanupTempDirectory(dirPath) {
 
 //       return; // Success - exit retry loop
 //     } catch (error) {
-//       logger.error(`Attempt ${attempt} failed:`, error);
+//       console.error(`Attempt ${attempt} failed:`, error);
 //       if (attempt === maxRetries) {
 //         throw new Error(
 //           `Failed to convert video after ${maxRetries} attempts: ${error.message}`
@@ -916,3 +906,5 @@ async function cleanupTempDirectory(dirPath) {
 //     (instrumentName || '').toLowerCase().includes('percussion')
 //   );
 // }
+
+// Initialize controller

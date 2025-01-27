@@ -1,62 +1,43 @@
-import winston from 'winston';
-import { join } from 'path';
+import { appendFileSync, existsSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-import { existsSync, mkdirSync } from 'fs';
+import process from 'process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const logDir = join(__dirname, '../logs');
+const LOG_DIR = join(__dirname, '../logs');
 
-if (!existsSync(logDir)) {
-  mkdirSync(logDir, { recursive: true });
+// Ensure log directory exists
+if (!existsSync(LOG_DIR)) {
+  mkdirSync(LOG_DIR, { recursive: true });
 }
 
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json(),
-    winston.format.printf(({ timestamp, level, message, ...rest }) => {
-      return JSON.stringify({
-        timestamp,
-        level,
-        message,
-        ...rest,
-      });
-    })
-  ),
-  transports: [
-    new winston.transports.File({
-      filename: join(logDir, 'composition-error.log'),
-      level: 'error',
-      handleExceptions: true,
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-    }),
-    new winston.transports.File({
-      filename: join(logDir, 'composition.log'),
-      level: 'info',
-      handleExceptions: true,
-      maxsize: 5242880, // 5MB
-      maxFiles: 5,
-      options: { flags: 'a' },
-    }),
-    new winston.transports.Console({
-      format: winston.format.simple(),
-      handleExceptions: true,
-    }),
-  ],
-  exitOnError: false
-});
+class FileLogger {
+  constructor(filename = 'app.log') {
+    this.logPath = join(LOG_DIR, filename);
+  }
 
-// Add explicit flush method
-logger.flush = () => {
-  logger.transports.forEach((transport) => {
-    if (typeof transport.flush === 'function') {
-      transport.flush();
+  _writeLog(level, message, meta = {}) {
+    const timestamp = new Date().toISOString();
+    const logEntry = JSON.stringify({
+      timestamp,
+      level,
+      message,
+      ...meta
+    }) + '\n';
+
+    // Write to file
+    appendFileSync(this.logPath, logEntry);
+    
+    // Also log to console in development
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`${timestamp} [${level}]: ${message}`, meta);
     }
-  });
-};
+  }
 
-export default logger;
+  info(message, meta) { this._writeLog('info', message, meta); }
+  error(message, meta) { this._writeLog('error', message, meta); }
+  debug(message, meta) { this._writeLog('debug', message, meta); }
+}
+
+export default new FileLogger('composition.log');
