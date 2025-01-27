@@ -15,7 +15,8 @@ app.use(express.urlencoded({ limit: '1000mb', extended: true }));
 
 // Configure timeout
 app.use((req, res, next) => {
-  res.setTimeout(900000, () => { // 15 minutes
+  res.setTimeout(900000, () => {
+    console.log('Request has timed out.');
     console.log('Request has timed out.');
     res.status(408).json({ error: 'Request timeout' });
   });
@@ -57,5 +58,6 @@ app.use((err, req, res) => {
 });
 
 app.listen(3000, () => {
+  console.log('Server running on port 3000');
   console.log('Server running on port 3000');
 });
