@@ -1,10 +1,12 @@
 import os
 import gc
 import logging
+import traceback
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import math
 import shutil
+import subprocess
 
 # Third-party imports
 import numpy as np
@@ -89,82 +91,6 @@ class VideoComposer:
         if 'tracks' not in midi_data:
             raise ValueError("Missing 'tracks' in midi_data")
 
-        # tracks = midi_data['tracks']
-        # self.tracks = {}
-        # self.drum_tracks = []
-        # self.regular_tracks = []
-        
-        # # First, process and copy drum videos
-        # logging.info("\n=== Processing Drum Videos ===")
-        # for idx, track in enumerate(tracks if isinstance(tracks, list) else tracks.values()):
-        #     track_id = str(idx)
-        #     normalized_track = self._normalize_track(track)
-            
-        #     # Check if it's a drum track
-        #     is_drum = (
-        #         normalized_track.get('isDrum') or 
-        #         normalized_track.get('instrument', {}).get('isDrum') or
-        #         normalized_track.get('channel') == 9 or
-        #         any(name in normalized_track.get('instrument', {}).get('name', '').lower() 
-        #             for name in ['drum', 'percussion', 'kit'])
-        #     )
-            
-        #     if is_drum:
-        #         logging.info(f"\nProcessing drum track {track_id}: {normalized_track.get('instrument', {}).get('name')}")
-                
-        #         # Create drum directory
-        #         drum_dir = self.processed_videos_dir / f"track_{idx}_drums"
-        #         drum_dir.mkdir(exist_ok=True)
-        #         logging.info(f"Created drum directory: {drum_dir}")
-                
-        #         # Get unique drum types needed from notes
-        #         needed_drums = set()
-        #         for note in normalized_track.get('notes', []):
-        #             midi_note = note.get('midi')
-        #             drum_name = DRUM_NOTES.get(midi_note)
-        #             if drum_name:
-        #                 needed_drums.add((midi_note, drum_name))
-        #                 logging.info(f"Found drum note: {midi_note} -> {drum_name}")
-                
-        #         logging.info(f"\nUploads directory contents:")
-        #         for file in self.uploads_dir.glob('*.mp4'):
-        #             logging.info(f"Found file: {file}")
-        #         logging.info(f"Looking for drum files in uploads: {self.uploads_dir}")
-
-        #         # Search both directories for drum files
-        #         for midi_note, drum_name in needed_drums:
-        #             normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
-        #             source_file = None
-                    
-        #             # First check uploads directory
-        #             logging.info(f"Looking for drum file pattern in uploads: *{normalized_name}.mp4")
-        #             for file in self.uploads_dir.glob(f"*{normalized_name}.mp4"):
-        #                 source_file = file
-        #                 logging.info(f"Found drum file in uploads: {file}")
-        #                 break
-                        
-        #             # If not found, check processed directory
-        #             if not source_file:
-        #                 logging.info(f"Looking for drum file pattern in processed: *{normalized_name}.mp4")
-        #                 for file in self.processed_videos_dir.glob(f"*{normalized_name}.mp4"):
-        #                     source_file = file
-        #                     logging.info(f"Found drum file in processed: {file}")
-        #                     break
-
-        #             if source_file:
-        #                 dest_file = drum_dir / f"{normalized_name}.mp4"
-        #                 if not dest_file.exists():
-        #                     shutil.copy2(str(source_file), str(dest_file))
-        #                     logging.info(f"Copied drum file: {source_file} -> {dest_file}")
-        #             else:
-        #                 logging.error(f"Missing drum file for {drum_name} ({normalized_name})")
-                
-        #         self.drum_tracks.append(normalized_track)
-        #     else:
-        #         self.regular_tracks.append(normalized_track)
-        #         self.tracks[track_id] = normalized_track
-
-        # logging.info(f"\nProcessed {len(self.tracks)} regular tracks and {len(self.drum_tracks)} drum tracks")
         tracks = midi_data['tracks']
         self.tracks = {}
         self.drum_tracks = []
@@ -224,13 +150,39 @@ class VideoComposer:
                     if source_file:
                         dest_file = drum_dir / f"{normalized_name}.mp4"
                         if not dest_file.exists():
-                            shutil.copy2(str(source_file), str(dest_file))
-                            logging.info(f"Copied drum file: {source_file.name} -> {dest_file.name}")
-                    else:
-                        logging.error(f"Missing drum file for {drum_name}")
-                        logging.error(f"Looked for pattern: {normalized_name} in files: {[f.name for f in upload_files]}")
-                
-                self.drum_tracks.append(normalized_track)
+                            try:
+                                # Extract audio first
+                                temp_audio = self.temp_dir / f"temp_{normalized_name}.wav"
+                                cmd = [
+                                    'ffmpeg', '-y',
+                                    '-i', str(source_file),
+                                    '-vn', '-acodec', 'pcm_s16le',
+                                    '-ar', '44100', '-ac', '1',
+                                    str(temp_audio)
+                                ]
+                                subprocess.run(cmd, check=True)
+                                
+                                # Combine video with processed audio
+                                cmd = [
+                                    'ffmpeg', '-y',
+                                    '-i', str(source_file),
+                                    '-i', str(temp_audio),
+                                    '-map', '0:v',
+                                    '-map', '1:a',
+                                    '-c:v', 'h264',
+                                    '-c:a', 'aac',
+                                    '-movflags', '+faststart',
+                                    str(dest_file)
+                                ]
+                                subprocess.run(cmd, check=True)
+                                
+                                # Cleanup temp file
+                                temp_audio.unlink()
+                                
+                                logging.info(f"Processed and copied drum file: {source_file.name} -> {dest_file.name}")
+                            except Exception as e:
+                                logging.error(f"Error processing drum file {normalized_name}: {e}")
+                                continue
             else:
                 self.regular_tracks.append(normalized_track)
                 self.tracks[track_id] = normalized_track
@@ -323,11 +275,15 @@ class VideoComposer:
         """Setup track-specific configuration and grid layout"""
         try:
             valid_tracks = []
+            self.grid_positions = {}  # Initialize grid positions
+            total_slots = 0
             
             # First handle regular tracks
             for track_idx, track in enumerate(self.tracks.values()):
                 if track.get('notes'):
                     valid_tracks.append((track_idx, track))
+                    self.grid_positions[f"track_{track_idx}"] = total_slots
+                    total_slots += 1
             
             # Handle drum tracks
             logging.info("\n=== DRUM TRACK CONFIGURATION ===")
@@ -339,17 +295,12 @@ class VideoComposer:
                     drum_notes = {}
                     
                     for note in track.get('notes', []):
-                        logging.info(f"Note type: {type(note)}")
-                        logging.info(f"Raw note data: {note}")
-                        
-                        # Get MIDI note number
                         if isinstance(note, dict):
                             midi_note = note.get('midi')
                         else:
                             midi_note = int(note)
                         
                         # Use DRUM_NOTES mapping to get drum name
-                        from drum_utils import DRUM_NOTES
                         drum_name = DRUM_NOTES.get(midi_note)
                         
                         if drum_name:
@@ -358,27 +309,17 @@ class VideoComposer:
                             
                             if position_key not in drum_notes:
                                 drum_notes[position_key] = []
+                                # Assign grid position
+                                self.grid_positions[position_key] = total_slots
+                                total_slots += 1
+                                
                             drum_notes[position_key].append(note)
-                            valid_tracks.append((position_key, track))
-                        else:
-                            logging.warning(f"No drum mapping found for MIDI note: {midi_note}")
             
-            # Setup grid positions
-            total_slots = 0
-            self.grid_positions = {}
-            
-            for track_id, track in valid_tracks:
-                self.grid_positions[str(track_id)] = total_slots
-                total_slots += 1
+            return total_slots  # Return total slots but ensure grid_positions is populated
                 
-            logging.info(f"\nGrid positions: {self.grid_positions}")
-            
-            return len(valid_tracks)
-            
         except Exception as e:
             logging.error(f"Layout error: {str(e)}")
             raise
-
     def validate_track_data(self, track):
         """Validate single track data structure"""
         if not isinstance(track, dict):
@@ -438,27 +379,22 @@ class VideoComposer:
     def get_track_duration(self, track):
         """Get duration for any track type"""
         try:
+            if isinstance(track, int):
+                logging.warning(f"Received integer {track} instead of track dictionary")
+                return 0
+                
             notes = track.get('notes', [])
             if not notes:
                 return 0
                 
-            # For drum tracks, consider all drum hits
-            if track.get('isDrum'):
-                all_times = [float(note['time'] + note.get('duration', 0.5)) 
-                            for note in notes]
-                return max(all_times) if all_times else 0
-                
-            # For regular tracks
-            end_times = [float(note['time'] + note.get('duration', 0)) 
+            # Calculate end times using direct key access
+            end_times = [float(note['time'] + note['duration']) 
                         for note in notes]
             return max(end_times) if end_times else 0
                 
         except Exception as e:
             logging.error(f"Error calculating track duration: {str(e)}")
             return 0
-        
-    
-
     
     # def calculate_chunk_lengths(self, midi_data):
     #     try:
@@ -519,24 +455,32 @@ class VideoComposer:
     def calculate_chunk_lengths(self):
         """Calculate chunk lengths for composition"""
         try:
-            # Include both regular and drum tracks
-            all_tracks = list(self.tracks.values()) + self.drum_tracks
-            durations = []
+            # Get all track notes in one list
+            all_notes = []
             
-            for track in all_tracks:
-                duration = self.get_track_duration(track)
-                logging.info(f"Track duration: {duration} ({track.get('instrument', {}).get('name')})")
-                if duration > 0:
-                    durations.append(duration)
+            # Add regular track notes
+            for track in self.midi_data['tracks']:
+                if isinstance(track, dict) and 'notes' in track:
+                    all_notes.extend(track['notes'])
             
-            if not durations:
-                raise ValueError("No valid track durations found")
-                
-            total_duration = max(durations)
-            full_chunks = int(total_duration // self.CHUNK_DURATION)
-            final_chunk = total_duration % self.CHUNK_DURATION
+            if not all_notes:
+                raise ValueError("No notes found in any tracks")
             
-            logging.info(f"Calculated chunks: {full_chunks} full + {final_chunk:.2f}s remaining")
+            # Find last note end time
+            last_note_time = 0
+            for note in all_notes:
+                if isinstance(note, dict):
+                    note_end = float(note['time']) + float(note['duration'])
+                    last_note_time = max(last_note_time, note_end)
+            
+            # Calculate chunks
+            full_chunks = int(last_note_time // self.CHUNK_DURATION)
+            final_chunk = last_note_time % self.CHUNK_DURATION
+            
+            logging.info(f"Total duration: {last_note_time:.2f}s")
+            logging.info(f"Full chunks: {full_chunks}")
+            logging.info(f"Final chunk: {final_chunk:.2f}s")
+            
             return full_chunks, final_chunk
                 
         except Exception as e:
@@ -547,6 +491,61 @@ class VideoComposer:
         """Check if track has any valid notes"""
         notes = track.get('notes', [])
         return len(notes) > 0
+
+    # def get_track_layout(self):
+    #     try:
+    #         total_slots = 0
+    #         self.grid_positions = {}
+
+    #         # Filter tracks with notes first
+    #         valid_tracks = [(idx, track) for idx, track in enumerate(self.midi_data['tracks'])
+    #                         if self.has_valid_notes(track)]
+            
+    #         logging.info("\nGrid Layout Planning:")
+    #         logging.info(f"\nFound {len(valid_tracks)} tracks with notes:")
+            
+    #         # First pass - Count all tracks including drums
+    #         for track_idx, track in valid_tracks:
+    #             if is_drum_kit(track.get('instrument', {})):
+    #                 # Get all drum groups used in this track
+    #                 drum_groups = set()
+    #                 for note in track.get('notes', []):
+    #                     drum_group = get_drum_groups(note.get('midi'))
+    #                     if drum_group:
+    #                         drum_groups.add(drum_group)
+                    
+    #                 # Now process each drum group
+    #                 for drum_group in drum_groups:
+    #                     position_key = f"drum_{drum_group}"
+    #                     self.grid_positions[position_key] = total_slots
+    #                     logging.info(f"Position {total_slots}: Drum {drum_group} (track_{track_idx})")
+    #                     total_slots += 1
+    #             else:
+    #                 # Regular instrument track processing remains the same
+    #                 self.grid_positions[f"track_{track_idx}"] = total_slots
+    #                 instrument_name = normalize_instrument_name(track.get('instrument', {}).get('name', 'unknown'))
+    #                 logging.info(f"Position {total_slots}: {instrument_name} (track_{track_idx})")
+    #                 total_slots += 1
+            
+    #         cols = min(4, math.ceil(math.sqrt(total_slots)))
+    #         rows = math.ceil(total_slots / cols)
+            
+    #         # Visual grid representation
+    #         logging.info("\nGrid Visual Layout:")
+    #         for row in range(rows):
+    #             row_str = ""
+    #             for col in range(cols):
+    #                 pos = row * cols + col
+    #                 instrument = next((k for k, v in self.grid_positions.items() if v == pos), "empty")
+    #                 row_str += f"[{instrument:^20}] "
+    #             logging.info(row_str)
+                
+    #         logging.info(f"\nGrid dimensions: {rows}x{cols} ({total_slots} slots)")
+    #         return (rows, cols)
+                
+    #     except Exception as e:
+    #         logging.error(f"Layout error: {str(e)}")
+    #         return (1, 1)
 
     def get_track_layout(self):
         try:
@@ -560,33 +559,32 @@ class VideoComposer:
             logging.info("\nGrid Layout Planning:")
             logging.info(f"\nFound {len(valid_tracks)} tracks with notes:")
             
-            # First pass - Count all tracks including drums
+            # Process tracks to determine grid positions
             for track_idx, track in valid_tracks:
                 if is_drum_kit(track.get('instrument', {})):
-                    # Get all drum groups used in this track
-                    drum_groups = set()
-                    for note in track.get('notes', []):
-                        drum_group = get_drum_groups(note.get('midi'))
-                        if drum_group:
-                            drum_groups.add(drum_group)
-                    
-                    # Now process each drum group
-                    for drum_group in drum_groups:
-                        position_key = f"drum_{drum_group}"
-                        self.grid_positions[position_key] = total_slots
-                        logging.info(f"Position {total_slots}: Drum {drum_group} (track_{track_idx})")
-                        total_slots += 1
+                    # For drum tracks, check actual files in drum directory
+                    drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+                    if drum_dir.exists():
+                        # Look for actual drum videos that were copied during processing
+                        for drum_file in drum_dir.glob('*.mp4'):
+                            drum_group = drum_file.stem.replace('drum_', '')  # Remove 'drum_' prefix if present
+                            position_key = f"drum_{drum_group}"
+                            self.grid_positions[position_key] = total_slots
+                            logging.info(f"Position {total_slots}: Drum {drum_group}")
+                            total_slots += 1
                 else:
-                    # Regular instrument track processing remains the same
-                    self.grid_positions[f"track_{track_idx}"] = total_slots
-                    instrument_name = normalize_instrument_name(track.get('instrument', {}).get('name', 'unknown'))
-                    logging.info(f"Position {total_slots}: {instrument_name} (track_{track_idx})")
+                    # Regular instrument track
+                    position_key = f"track_{track_idx}"
+                    self.grid_positions[position_key] = total_slots
+                    instrument_name = track.get('instrument', {}).get('name', f'track_{track_idx}')
+                    logging.info(f"Position {total_slots}: {instrument_name}")
                     total_slots += 1
-            
+
+            # Calculate grid dimensions
             cols = min(4, math.ceil(math.sqrt(total_slots)))
             rows = math.ceil(total_slots / cols)
             
-            # Visual grid representation
+            # Log grid layout
             logging.info("\nGrid Visual Layout:")
             for row in range(rows):
                 row_str = ""
@@ -601,6 +599,7 @@ class VideoComposer:
                 
         except Exception as e:
             logging.error(f"Layout error: {str(e)}")
+            logging.error(f"Traceback: {traceback.format_exc()}")
             return (1, 1)
         
     def validate_midi_note(self, note, track_idx):
@@ -647,6 +646,191 @@ class VideoComposer:
         
         logging.info(f"Volume calculation: velocity={velocity}, normalized={normalized_velocity:.2f}, final={volume:.2f}")
         return volume
+    
+    def process_chunk(self, tracks, start_time, end_time, chunk_idx):
+        try:
+            rows, cols = self.get_track_layout()
+            grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+                            color=(0,0,0), 
+                            duration=end_time - start_time) 
+                    for _ in range(cols)] 
+                    for _ in range(rows)]
+
+            # Process regular tracks first
+            for track_idx, track in enumerate(tracks):
+                if not is_drum_kit(track.get('instrument', {})):
+                    position_key = f"track_{track_idx}"
+                    if position_key in self.grid_positions:
+                        pos = self.grid_positions[position_key]
+                        row, col = pos // cols, pos % cols
+                        logging.info(f"Processing regular track {track_idx} at position [{row}][{col}]")
+
+                        if row < rows and col < cols:
+                            instrument_dir = self.processed_videos_dir / f"track_{track_idx}_{normalize_instrument_name(track['instrument']['name'])}"
+                            if instrument_dir.exists():
+                                clips_for_track = []
+                                for note in self.get_chunk_notes(track, start_time, end_time):
+                                    try:
+                                        midi_note = int(note['midi'])
+                                        note_file = instrument_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                                        
+                                        if note_file.exists():
+                                            clip = VideoFileClip(str(note_file))
+                                            time = float(note['time']) - start_time
+                                            duration = float(note.get('duration', clip.duration))
+                                            clip = clip.set_start(time).set_duration(duration)
+                                            clips_for_track.append(clip)
+                                    except Exception as e:
+                                        logging.error(f"Error processing regular note: {e}")
+                                        continue
+                                
+                                if clips_for_track:
+                                    composite = CompositeVideoClip(clips_for_track)
+                                    grid[row][col] = composite.set_duration(end_time - start_time)
+
+            # Process drum tracks with duration handling
+            for track in tracks:
+                if is_drum_kit(track.get('instrument', {})):
+                    chunk_notes = self.get_chunk_notes(track, start_time, end_time)
+                    
+                    # Group notes by drum type
+                    drum_notes = {}
+                    for note in chunk_notes:
+                        midi_note = int(note['midi'])
+                        drum_name = DRUM_NOTES.get(midi_note)
+                        if drum_name:
+                            normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
+                            if normalized_name not in drum_notes:
+                                drum_notes[normalized_name] = []
+                            drum_notes[normalized_name].append(note)
+                    
+                    # Process each drum type
+                    for drum_key, notes in drum_notes.items():
+                        if drum_key in self.grid_positions:
+                            pos = self.grid_positions[drum_key]
+                            row = pos // cols
+                            col = pos % cols
+                            
+                            if row < rows and col < cols:
+                                drum_file = self.processed_videos_dir / f"track_5_drums" / f"{drum_key}.mp4"
+                                if drum_file.exists():
+                                    try:
+                                        # Use cv2 to get video duration
+                                        cap = cv2.VideoCapture(str(drum_file))
+                                        fps = cap.get(cv2.CAP_PROP_FPS)
+                                        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                        duration = frame_count / fps if fps > 0 else 0.5  # Default to 0.5s if can't get fps
+                                        cap.release()
+                                        
+                                        for note in notes:
+                                            clip = VideoFileClip(str(drum_file), has_mask=True)
+                                            time = float(note['time']) - start_time
+                                            clip = clip.set_duration(duration).set_start(time)
+                                            
+                                            if isinstance(grid[row][col], ColorClip):
+                                                grid[row][col] = clip
+                                            else:
+                                                grid[row][col] = CompositeVideoClip([grid[row][col], clip])
+                                            
+                                    except Exception as e:
+                                        logging.error(f"Error processing drum clip: {e}")
+                                        continue
+
+            # Create and save chunk
+            chunk = clips_array(grid)
+            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            chunk.write_videofile(str(chunk_path), fps=30, codec='h264_nvenc')
+            return str(chunk_path)
+
+        except Exception as e:
+            logging.error(f"Error in process_chunk: {str(e)}")
+            return None
+    
+    # def process_chunk(self, tracks, start_time, end_time, chunk_idx):
+    #     try:
+    #         active_clips = []
+    #         rows, cols = self.get_track_layout()
+    #         logging.info(f"\n=== Process Chunk Debug ===")
+    #         logging.info(f"\n=== CHUNK {chunk_idx} GRID DEBUG ===")
+    #         logging.info(f"Grid dimensions: {rows}x{cols}")
+    #         logging.info(f"Grid positions map: {self.grid_positions}")
+    #         # Initialize grid
+    #         grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                         color=(0,0,0), 
+    #                         duration=end_time - start_time) 
+    #                 for _ in range(cols)] 
+    #                 for _ in range(rows)]
+            
+    #         logging.info(f"Grid dimensions: {len(grid)}x{len(grid[0])}")
+            
+    #         for track_idx, track in enumerate(tracks):
+    #             chunk_notes = self.get_chunk_notes(track, start_time, end_time)
+    #             logging.info(f"\nProcessing track {track_idx}")
+    #             logging.info(f"Grid positions: {self.grid_positions}")
+    #             logging.info(f"Track type: {'Drum' if is_drum_kit(track.get('instrument', {})) else 'Instrument'}")
+                
+    #             position_key = f"track_{track_idx}"
+    #             if position_key in self.grid_positions:
+    #                 position = self.grid_positions[position_key]
+    #                 row = position // cols
+    #                 col = position % cols
+    #                 logging.info(f"Position key {position_key} maps to position {position}")
+    #                 logging.info(f"Calculated grid position: row={row}, col={col}")
+    #                 logging.info(f"Grid bounds: rows={len(grid)}, cols={len(grid[0])}")
+                    
+    #                 if row >= len(grid) or col >= len(grid[0]):
+    #                     logging.error(f"Index out of range! row={row}, col={col}")
+    #                     continue
+                
+    #                 if is_drum_kit(track.get('instrument', {})):
+    #                     drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+    #                     logging.info(f"Looking for drum files in: {drum_dir}")
+    #                     if drum_dir.exists():
+    #                         logging.info("Drum directory exists")
+    #                         files = list(drum_dir.glob('*.mp4'))
+    #                         logging.info(f"Found drum files: {[f.name for f in files]}")
+    #                 else:
+    #                     # Instrument track
+    #                     instrument_dir = self.processed_videos_dir / f"track_{track_idx}"
+    #                     logging.info(f"Looking for instrument files in: {instrument_dir}")
+    #                     if instrument_dir.exists():
+    #                         logging.info("Instrument directory exists")
+    #                         files = list(instrument_dir.glob('*.mp4'))
+    #                         logging.info(f"Found instrument files: {[f.name for f in files]}")
+    #                 # Log grid state after processing track
+    #                 logging.info(f"Grid cell [{row}][{col}] type: {type(grid[row][col]).__name__}")
+    #             else:
+    #                 logging.warning(f"No grid position for track {track_idx}")
+
+    #             for note in chunk_notes:
+    #                 try:
+    #                     midi_note = note.get('midi')
+    #                     position_key = f"track_{track_idx}"
+    #                     logging.info(f"\nProcessing note {midi_note} at position_key {position_key}")
+                        
+    #                     if position_key in self.grid_positions:
+    #                         position = self.grid_positions[position_key]
+    #                         row = position // cols
+    #                         col = position % cols
+    #                         logging.info(f"Grid position: [{row}][{col}]")
+    #                     else:
+    #                         logging.error(f"Position key {position_key} not found in grid_positions")
+    #                         continue
+
+    #                 except Exception as e:
+    #                     logging.error(f"Error processing note: {e}")
+    #                     continue
+
+    #         # Log final grid state
+    #         logging.info("\n=== Final Grid State ===")
+    #         for i, row in enumerate(grid):
+    #             logging.info(f"Row {i}: {[type(clip).__name__ for clip in row]}")
+
+    #         return grid
+
+    #     except Exception as e:
+    #         logging.error(f"Error processing chunk: {e}")
+    #         return None
         
     # def process_chunk(self, tracks, start_time, end_time, chunk_idx):
     #     """Process chunk with overlapping notes"""
@@ -826,72 +1010,138 @@ class VideoComposer:
     #                 pass
     #         gc.collect()
 
+    
+    # def process_chunk(self, tracks, start_time, end_time, chunk_idx):
+    #     """Process chunk with proper video mapping"""
+    #     try:
+    #         # Get grid layout
+    #         rows, cols = self.get_track_layout()
+            
+    #         # Initialize with black clips
+    #         grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                         color=(0,0,0), 
+    #                         duration=end_time - start_time) 
+    #                 for _ in range(cols)] 
+    #                 for _ in range(rows)]
+
+    #         # Process each track
+    #         for track_idx, track in enumerate(tracks):
+    #             chunk_notes = self.get_chunk_notes(track, start_time, end_time)
+                
+    #             if is_drum_kit(track.get('instrument', {})):
+    #                 # Handle drums
+    #                 drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+    #                 if drum_dir.exists():
+    #                     for note in chunk_notes:
+    #                         drum_group = self.get_drum_group_for_note(note['midi'])
+    #                         if drum_group:
+    #                             position_key = f"drum_{track_idx}_{drum_group}"
+    #                             if position_key in self.grid_positions:
+    #                                 position = self.grid_positions[position_key]
+    #                                 row = position // cols
+    #                                 col = position % cols
+                                    
+    #                                 # Load drum video
+    #                                 drum_file = drum_dir / f"{drum_group}.mp4"
+    #                                 if drum_file.exists():
+    #                                     clip = VideoFileClip(str(drum_file))
+    #                                     time = float(note['time']) - start_time
+    #                                     clip = clip.set_start(time)
+                                        
+    #                                     # Replace or composite
+    #                                     if isinstance(grid[row][col], ColorClip):
+    #                                         grid[row][col] = clip
+    #                                     else:
+    #                                         grid[row][col] = CompositeVideoClip([grid[row][col], clip])
+    #             else:
+    #                 # Handle instruments
+    #                 position_key = f"track_{track_idx}"
+    #                 if position_key in self.grid_positions:
+    #                     position = self.grid_positions[position_key]
+    #                     row = position // cols
+    #                     col = position % cols
+                        
+    #                     clips_for_track = []
+    #                     for note in chunk_notes:
+    #                         midi_note = int(float(note['midi']))
+    #                         note_file = self.processed_videos_dir / f"track_{track_idx}_{normalize_instrument_name(track['instrument']['name'])}" / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                            
+    #                         if note_file.exists():
+    #                             clip = VideoFileClip(str(note_file))
+    #                             time = float(note['time']) - start_time
+    #                             duration = float(note.get('duration', clip.duration))
+    #                             clip = clip.set_start(time).set_duration(duration)
+    #                             clips_for_track.append(clip)
+                        
+    #                     if clips_for_track:
+    #                         grid[row][col] = CompositeVideoClip(clips_for_track)
+
+    #         # Create chunk with crossfade
+    #         chunk = clips_array(grid)
+    #         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            
+    #         chunk.write_videofile(
+    #             str(chunk_path),
+    #             fps=30,
+    #             codec='h264_nvenc',
+    #             audio_codec='aac',
+    #             preset='medium',
+    #             ffmpeg_params=["-vsync", "1", "-async", "1"]
+    #         )
+
+    #         return str(chunk_path)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error processing chunk: {e}")
+    #         return None
+
     def process_chunk(self, tracks, start_time, end_time, chunk_idx):
         """Process chunk with memory optimization"""
         try:
-            active_clips = []
+            active_clips = []  # Track active clips for cleanup
             rows, cols = self.get_track_layout()
             
-            # Pre-allocate grid
+            # Pre-allocate grid with empty clips
             grid = [[ColorClip(size=(1920//cols, 1080//rows), 
                             color=(0,0,0), 
                             duration=end_time - start_time) 
                     for _ in range(cols)] 
                     for _ in range(rows)]
 
-            # Convert tracks to dict if needed
-            track_dict = tracks if isinstance(tracks, dict) else {
-                str(idx): track for idx, track in enumerate(tracks)
-            }
-
-            for track_id, track in track_dict.items():
-                try:
-                    if not isinstance(track, dict):
-                        logging.warning(f"Skipping invalid track {track_id}")
-                        continue
-
-                    track_idx = int(track_id)
-                    chunk_notes = self.get_chunk_notes(track, start_time, end_time)
+            for track_idx, track in enumerate(tracks):
+                chunk_notes = self.get_chunk_notes(track, start_time, end_time)
+                
+                # Process in smaller batches
+                BATCH_SIZE = 5
+                for i in range(0, len(chunk_notes), BATCH_SIZE):
+                    batch = chunk_notes[i:i + BATCH_SIZE]
                     
-                    # Process in smaller batches
-                    BATCH_SIZE = 5
-                    for i in range(0, len(chunk_notes), BATCH_SIZE):
-                        batch = chunk_notes[i:i + BATCH_SIZE]
-                        
-                        for note in batch:
-                            try:
-                                # Handle drum tracks differently
-                                if track.get('isDrum'):
-                                    clip = self.get_drum_clip(track, note)
+                    for note in batch:
+                        try:
+                            clip = self.get_note_clip(track, note)
+                            if clip:
+                                active_clips.append(clip)
+                                # Process immediately
+                                time = float(note['time']) - start_time
+                                clip = clip.set_start(time)
+                                row = track_idx // cols
+                                col = track_idx % cols
+                                
+                                if isinstance(grid[row][col], ColorClip):
+                                    grid[row][col] = clip
                                 else:
-                                    clip = self.get_note_clip(track, note)
-
-                                if clip:
-                                    active_clips.append(clip)
-                                    time = float(note['time']) - start_time
-                                    clip = clip.set_start(time)
-                                    row = track_idx // cols
-                                    col = track_idx % cols
-                                    
-                                    if isinstance(grid[row][col], ColorClip):
-                                        grid[row][col] = clip
-                                    else:
-                                        existing = grid[row][col]
-                                        grid[row][col] = CompositeVideoClip([existing, clip])
-                            
-                            finally:
-                                # Cleanup after each note
-                                for clip in active_clips:
-                                    try:
-                                        clip.close()
-                                    except:
-                                        pass
-                                active_clips.clear()
-                                gc.collect()
-
-                except Exception as e:
-                    logging.error(f"Error processing track {track_id}: {str(e)}")
-                    continue
+                                    existing = grid[row][col]
+                                    grid[row][col] = CompositeVideoClip([existing, clip])
+                        
+                        finally:
+                            # Cleanup after each note
+                            for clip in active_clips:
+                                try:
+                                    clip.close()
+                                except:
+                                    pass
+                            active_clips.clear()
+                            gc.collect()
 
             # Create chunk with optimized parameters
             chunk = clips_array(grid)
@@ -902,7 +1152,7 @@ class VideoComposer:
                 fps=30,
                 codec='h264_nvenc',
                 audio_codec='aac',
-                preset='fast',
+                preset='fast',  # Faster encoding
                 ffmpeg_params=[
                     "-vsync", "1",
                     "-async", "1",
@@ -927,7 +1177,178 @@ class VideoComposer:
                 except:
                     pass
             gc.collect()
+        
 
+    def create_composition(self):
+            try:
+                full_chunks, final_duration = self.calculate_chunk_lengths()
+                total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+                rows, cols = self.get_track_layout()
+                
+                chunk_files = []
+                active_clips = []
+                for chunk_idx in range(total_chunks):
+                    start_time = chunk_idx * 10
+                    end_time = start_time + (final_duration if chunk_idx == full_chunks else 10)
+                    
+                    # Debug grid creation
+                    logging.info(f"\nProcessing Chunk {chunk_idx}")
+                    logging.info(f"Time Range: {start_time}-{end_time}")
+                    
+                    grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+                                    color=(0,0,0), 
+                                    duration=end_time - start_time) 
+                            for _ in range(cols)] 
+                            for _ in range(rows)]
+                    
+                    # Process each track
+                    for track_idx, track in enumerate(self.midi_data['tracks']):
+                        chunk_notes = [
+                            note for note in track.get('notes', [])
+                            if start_time <= float(note['time']) < end_time
+                        ]
+                        
+                        logging.info(f"\nTrack {track_idx}: {track.get('instrument', {}).get('name', 'unknown')}")
+                        logging.info(f"Notes in chunk: {len(chunk_notes)}")
+
+                        if not chunk_notes:
+                            continue
+                        
+                        if is_drum_kit(track.get('instrument', {})):
+                            drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+                            if drum_dir.exists():
+                                drum_notes = {}
+                                # Group notes by drum type
+                                for note in chunk_notes:
+                                    midi_note = int(note['midi'])
+                                    drum_name = DRUM_NOTES.get(midi_note)
+                                    if drum_name:
+                                        # Normalize drum name for file lookup
+                                        normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
+                                        if normalized_name not in drum_notes:
+                                            drum_notes[normalized_name] = []
+                                        drum_notes[normalized_name].append(note)
+                                        logging.info(f"Added note {midi_note} to drum group {normalized_name}")
+
+                                # Process each drum type
+                                for drum_key, notes in drum_notes.items():
+                                    position_key = drum_key  # Use normalized name directly as position key
+                                    logging.info(f"Processing {drum_key} at position {position_key}")
+                                    if position_key in self.grid_positions:
+                                        position = self.grid_positions[position_key]
+                                        row = position // cols
+                                        col = position % cols
+                                        
+                                        # Use normalized drum filename
+                                        drum_file = drum_dir / f"{drum_key}.mp4"
+                                        if drum_file.exists():
+                                            for note in notes:
+                                                try:
+                                                    clip = VideoFileClip(str(drum_file))
+                                                    active_clips.append(clip)
+                                                    
+                                                    # Keep existing volume calculation
+                                                    velocity = float(note.get('velocity', 100))
+                                                    volume = self.get_note_volume(velocity, is_drum=True)
+                                                    clip = clip.volumex(volume)
+                                                    
+                                                    # Keep existing timing logic
+                                                    time = float(note['time']) - start_time
+                                                    duration = min(float(note['duration']), clip.duration)
+                                                    clip = clip.subclip(0, duration).set_start(time)
+                                                    
+                                                    if isinstance(grid[row][col], ColorClip):
+                                                        grid[row][col] = clip
+                                                    else:
+                                                        existing = grid[row][col]
+                                                        grid[row][col] = CompositeVideoClip([existing, clip])
+                                                    
+                                                    logging.info(f"Added {drum_key} at [{row}][{col}] t={time}")
+                                                except Exception as e:
+                                                    logging.error(f"Error processing drum clip: {e}")
+                                                    continue
+                    
+                        else:
+                            position_key = f"track_{track_idx}"
+                            if position_key in self.grid_positions:
+                                position = self.grid_positions[position_key]
+                                row = position // cols
+                                col = position % cols
+                                
+                                clips_for_instrument = []
+                                for note in chunk_notes:
+                                    midi_note = int(float(note['midi']))
+                                    note_file = self.processed_videos_dir / f"track_{track_idx}_{normalize_instrument_name(track['instrument']['name'])}" / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                                    
+                                    logging.info(f"Loading note: {note_file}")
+                                    
+                                    if note_file.exists():
+                                        clip = VideoFileClip(str(note_file))
+                                        active_clips.append(clip)
+                                        
+                                        # Get and normalize MIDI velocity
+                                        velocity = float(note.get('velocity', 100))
+                                        volume = self.get_note_volume(velocity, is_drum=False)  # Ensure minimum audible volume
+                                        
+                                        # Apply volume to clip
+                                        clip = clip.volumex(volume)
+                                        
+                                        # Log volume level for debugging
+                                        logging.info(f"Note {note.get('midi')}: velocity={velocity:.2f}, volume={volume:.2f}")
+                                        
+                                        time = float(note['time']) - start_time
+                                        duration = min(float(note['duration']), clip.duration)
+                                        clip = clip.subclip(0, duration).set_start(time)
+                                        clips_for_instrument.append(clip)
+                                
+                                if clips_for_instrument:
+                                    composite = CompositeVideoClip(clips_for_instrument)
+                                    grid[row][col] = composite.set_duration(end_time - start_time)
+                                    logging.info(f"Added instrument at [{row}][{col}]")
+                    
+                    # Create chunk
+                    chunk = clips_array(grid)
+                    chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+                    chunk.write_videofile(
+                        str(chunk_path),
+                        fps=30,
+                        codec='h264_nvenc',  # NVIDIA GPU encoder
+                        audio_codec='aac',
+                        preset='medium',
+                        ffmpeg_params=[
+                            "-vsync", "1",
+                            "-async", "1",
+                            "-b:v", "5M",
+                            "-maxrate", "10M",
+                            "-bufsize", "10M",
+                            "-rc", "vbr",
+                            "-tune", "hq"
+                        ]
+                    )
+                    chunk_files.append(str(chunk_path))
+                    
+                    # Aggressive cleanup after each chunk
+                    for clip in active_clips:
+                        try:
+                            clip.close()
+                        except:
+                            pass
+                    active_clips.clear()
+                    
+                    # Force garbage collection
+                    gc.collect()
+                
+                # Combine chunks
+                if chunk_files:
+                    logging.info(f"Attempting to concatenate {len(chunk_files)} chunks")
+                    logging.info(f"Chunk files: {chunk_files}")
+                    return self._combine_chunks(chunk_files)
+            
+                    
+            except Exception as e:
+                logging.error(f"Composition error: {str(e)}")
+                return None
+            
     def _combine_chunks(self, chunk_files):
         """Combine chunks with precise timing"""
         try:
@@ -991,416 +1412,268 @@ class VideoComposer:
                     os.unlink(f)
                 except:
                     pass
-        
 
     # def create_composition(self):
+    #     """Main composition method"""
     #     try:
+    #         # Calculate chunks
     #         full_chunks, final_duration = self.calculate_chunk_lengths()
     #         if full_chunks == 0 and final_duration == 0:
     #             raise ValueError("No valid chunks calculated")
-    #         total_chunks = full_chunks + (1 if final_duration > 0 else 0)
-    #         rows, cols = self.get_track_layout()
+                
+    #         # Initialize grid dimensions
+    #         total_tracks = len(self.tracks) + len(self.drum_tracks)
+    #         self.cols = min(4, math.ceil(math.sqrt(total_tracks)))
+    #         self.rows = math.ceil(total_tracks / self.cols)
             
-    #         chunk_files = []
-    #         active_clips = []
-    #         for chunk_idx in range(total_chunks):
-    #             start_time = chunk_idx * 10
-    #             end_time = start_time + (final_duration if chunk_idx == full_chunks else 10)
+    #         # Process chunks
+    #         chunk_files = self._process_chunks(full_chunks, final_duration)
+            
+    #         # Combine final result
+    #         if chunk_files:
+    #             logging.info(f"Concatenating {len(chunk_files)} chunks")
+    #             return self._combine_chunks(chunk_files)
+    #         return None
                 
-    #             # Debug grid creation
-    #             logging.info(f"\nProcessing Chunk {chunk_idx}")
-    #             logging.info(f"Time Range: {start_time}-{end_time}")
+    #     except Exception as e:
+    #         logging.error(f"Composition error: {str(e)}")
+    #         return None
+
+    # def _save_chunk(self, grid, chunk_idx, duration):
+    #     """Save processed chunk to file"""
+    #     try:
+    #         chunk = clips_array(grid)
+    #         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            
+    #         chunk.write_videofile(
+    #             str(chunk_path),
+    #             fps=30,
+    #             codec='h264_nvenc',
+    #             audio_codec='aac',
+    #             preset='fast',
+    #             ffmpeg_params=[
+    #                 "-vsync", "1",
+    #                 "-async", "1",
+    #                 "-b:v", "5M",
+    #                 "-tile-columns", "2",
+    #                 "-threads", "8",
+    #                 "-row-mt", "1"
+    #             ]
+    #         )
+            
+    #         return str(chunk_path)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error saving chunk: {str(e)}")
+    #         return None
+    
+    # def _process_chunks(self, full_chunks, final_duration):
+    #     """Process each time chunk"""
+    #     chunk_files = []
+    #     active_clips = []
+    #     total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+        
+    #     for chunk_idx in range(total_chunks):
+    #         try:
+    #             start_time = chunk_idx * self.CHUNK_DURATION
+    #             end_time = start_time + (final_duration if chunk_idx == full_chunks else self.CHUNK_DURATION)
                 
-    #             grid = [[ColorClip(size=(1920//cols, 1080//rows), 
-    #                             color=(0,0,0), 
-    #                             duration=end_time - start_time) 
-    #                     for _ in range(cols)] 
-    #                     for _ in range(rows)]
+    #             # Initialize empty grid
+    #             grid = self._initialize_grid(end_time - start_time)
                 
-    #             # Process each track
-    #             for track_idx, track in enumerate(self.midi_data['tracks']):
+    #             # Process tracks for this time chunk
+    #             grid = self._process_chunk_tracks(grid, start_time, end_time)
+                
+    #             # Create and save chunk
+    #             chunk_path = self._save_chunk(grid, chunk_idx, end_time - start_time)
+    #             if chunk_path:
+    #                 chunk_files.append(str(chunk_path))
+                
+    #             # Cleanup
+    #             self._cleanup_clips(active_clips)
+                
+    #         except Exception as e:
+    #             logging.error(f"Error processing chunk {chunk_idx}: {e}")
+    #             continue
+                
+    #     return chunk_files
+
+    # def _initialize_grid(self, duration):
+    #     """Initialize empty grid with proper dimensions"""
+    #     return [[ColorClip(size=(1920//self.cols, 1080//self.rows), 
+    #             color=(0,0,0), 
+    #             duration=duration) 
+    #             for _ in range(self.cols)] 
+    #             for _ in range(self.rows)]
+
+    # def _process_chunk_tracks(self, grid, start_time, end_time):
+    #     """Process all tracks for current time chunk"""
+    #     try:
+    #         # Process regular tracks first
+    #         for track_id, track in self.tracks.items():
+    #             try:
+    #                 track_path = self.processed_videos_dir / f"{track.get('name', '')}_notes"
+    #                 if not track_path.exists():
+    #                     continue
+                        
     #                 chunk_notes = [
     #                     note for note in track.get('notes', [])
     #                     if start_time <= float(note['time']) < end_time
     #                 ]
                     
-    #                 logging.info(f"\nTrack {track_idx}: {track.get('instrument', {}).get('name', 'unknown')}")
-    #                 logging.info(f"Notes in chunk: {len(chunk_notes)}")
-
-    #                 if not chunk_notes:
-    #                     continue
-                    
-    #                 if is_drum_kit(track.get('instrument', {})):
-    #                     for note in track.get('notes', []):
-    #                         drum_group = self.get_drum_group(note.get('midi', 0))  # Add this line
-    #                         position_key = f"drum_{drum_group}"
-    #                     drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
-    #                     if drum_dir.exists():
-    #                         drum_notes = {}
-    #                         for note in chunk_notes:
-    #                             drum_group = self.get_drum_group_for_note(note['midi'])
-    #                             logging.info(f"Processing drum note {note['midi']} -> group {drum_group}")
-    #                             if drum_group:
-    #                                 if drum_group not in drum_notes:
-    #                                     drum_notes[drum_group] = []
-    #                                 drum_notes[drum_group].append(note)
-
-    #                         for drum_group, notes in drum_notes.items():
-    #                             # position_key = f"drum_{track_idx}_{drum_group}"
-    #                             logging.info(f"Processing drum group {drum_group} at position {position_key}")
-    #                             if position_key in self.grid_positions:
-    #                                 position = self.grid_positions[position_key]
-    #                                 row = position // cols
-    #                                 col = position % cols
-    #                                 drum_file = drum_dir / f"{drum_group}.mp4"
-    #                                 if drum_file.exists():
-    #                                     for note in notes:
-    #                                         try:
-    #                                             clip = VideoFileClip(str(drum_file))
-    #                                             active_clips.append(clip)
-                                                
-    #                                             # Extract and normalize velocity
-    #                                             velocity = float(note.get('velocity', 100))
-    #                                             volume = self.get_note_volume(velocity, is_drum=True)
-                                                
-    #                                             # Apply volume adjustment
-    #                                             clip = clip.volumex(volume)
-                                                
-    #                                             # Log for debugging
-    #                                             logging.info(f"Drum {drum_group} velocity={velocity:.2f}, volume={volume:.2f}")
-                                                
-    #                                             time = float(note['time']) - start_time
-    #                                             duration = min(float(note['duration']), clip.duration)
-    #                                             clip = clip.subclip(0, duration).set_start(time)
-                                                
-    #                                             if isinstance(grid[row][col], ColorClip):
-    #                                                 grid[row][col] = clip
-    #                                             else:
-    #                                                 existing = grid[row][col]
-    #                                                 grid[row][col] = CompositeVideoClip([existing, clip])
-                                                
-    #                                             logging.info(f"Added drum {drum_group} at [{row}][{col}] t={time}")
-    #                                         except Exception as e:
-    #                                             logging.error(f"Error processing drum clip: {e}")
-    #                                             continue
-                
-    #                 else:
-    #                     position_key = f"track_{track_idx}"
-    #                     if position_key in self.grid_positions:
-    #                         position = self.grid_positions[position_key]
-    #                         row = position // cols
-    #                         col = position % cols
+    #                 if chunk_notes:
+    #                     position = self.grid_positions.get(str(track_id))
+    #                     if position is not None:
+    #                         row = position // self.cols
+    #                         col = position % self.cols
+    #                         clips = []
                             
-    #                         clips_for_instrument = []
     #                         for note in chunk_notes:
-    #                             midi_note = int(float(note['midi']))
-    #                             note_file = self.processed_videos_dir / f"track_{track_idx}_{normalize_instrument_name(track['instrument']['name'])}" / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
-                                
-    #                             logging.info(f"Loading note: {note_file}")
+    #                             midi_note = note['midi']
+    #                             note_name = midi_to_note(midi_note)
+    #                             note_file = track_path / f"note_{midi_note}_{note_name}.mp4"
                                 
     #                             if note_file.exists():
     #                                 clip = VideoFileClip(str(note_file))
-    #                                 active_clips.append(clip)
-                                    
-    #                                 # Get and normalize MIDI velocity
-    #                                 velocity = float(note.get('velocity', 100))
-    #                                 volume = self.get_note_volume(velocity, is_drum=False)  # Ensure minimum audible volume
-                                    
-    #                                 # Apply volume to clip
-    #                                 clip = clip.volumex(volume)
-                                    
-    #                                 # Log volume level for debugging
-    #                                 logging.info(f"Note {note.get('midi')}: velocity={velocity:.2f}, volume={volume:.2f}")
-                                    
     #                                 time = float(note['time']) - start_time
-    #                                 duration = min(float(note['duration']), clip.duration)
-    #                                 clip = clip.subclip(0, duration).set_start(time)
-    #                                 clips_for_instrument.append(clip)
+    #                                 clip = clip.set_start(time)
+    #                                 clips.append(clip)
                             
-    #                         if clips_for_instrument:
-    #                             composite = CompositeVideoClip(clips_for_instrument)
-    #                             grid[row][col] = composite.set_duration(end_time - start_time)
-    #                             logging.info(f"Added instrument at [{row}][{col}]")
+    #                         if clips:
+    #                             grid[row][col] = CompositeVideoClip(clips)
+                                
+    #             except Exception as e:
+    #                 logging.error(f"Error processing track {track_id}: {str(e)}")
+    #                 continue
+
+    #         # Then process drum tracks
+    #         for track_idx, track in enumerate(self.drum_tracks):
+    #             chunk_notes = [note for note in track.get('notes', [])
+    #                         if start_time <= float(note['time']) < end_time]
                 
-    #             # Create chunk
-    #             chunk = clips_array(grid)
-    #             chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-    #             chunk.write_videofile(
-    #                 str(chunk_path),
-    #                 fps=30,
-    #                 codec='h264_nvenc',  # NVIDIA GPU encoder
-    #                 audio_codec='aac',
-    #                 preset='medium',
-    #                 ffmpeg_params=[
-    #                     "-vsync", "1",
-    #                     "-async", "1",
-    #                     "-b:v", "5M",
-    #                     "-maxrate", "10M",
-    #                     "-bufsize", "10M",
-    #                     "-rc", "vbr",
-    #                     "-tune", "hq"
-    #                 ]
-    #             )
-    #             chunk_files.append(str(chunk_path))
-                
-    #             # Aggressive cleanup after each chunk
-    #             for clip in active_clips:
-    #                 try:
-    #                     clip.close()
-    #                 except:
-    #                     pass
-    #             active_clips.clear()
-                
-    #             # Force garbage collection
-    #             gc.collect()
-            
-    #         # Combine chunks
-    #         if chunk_files:
-    #             logging.info(f"Attempting to concatenate {len(chunk_files)} chunks")
-    #             logging.info(f"Chunk files: {chunk_files}")
-    #             return self._combine_chunks(chunk_files)
-           
+    #             if chunk_notes:
+    #                 grid = self._process_drum_track(grid, track_idx, track, chunk_notes, start_time)
+                    
+    #         return grid
                 
     #     except Exception as e:
-    #         logging.error(f"Composition error: {str(e)}")
-    #         return None
-    def create_composition(self):
-        """Main composition method"""
+    #         logging.error(f"Error in _process_chunk_tracks: {str(e)}")
+    #         return grid
+
+    # def _process_drum_track(self, grid, track_idx, track, chunk_notes, start_time):
+    #     try:
+    #         logging.info(f"\n=== DRUM TRACK PROCESSING ===")
+    #         logging.info(f"Track Index: {track_idx}")
+            
+    #         # Create drum directory
+    #         drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+    #         drum_dir.mkdir(exist_ok=True)
+    #         logging.info(f"Created drum directory: {drum_dir}")
+
+    #         # List ALL files in uploads directory first
+    #         upload_files = list(self.uploads_dir.glob('*.mp4'))
+    #         logging.info(f"\nUploads directory contents at {self.uploads_dir}:")
+    #         for file in upload_files:
+    #             logging.info(f"Found uploaded file: {file.name}")
+
+    #         # Get unique drum types needed
+    #         needed_drums = set()
+    #         for note in chunk_notes:
+    #             midi_note = note['midi']
+    #             drum_name = DRUM_NOTES.get(midi_note)
+    #             if drum_name:
+    #                 needed_drums.add((midi_note, drum_name))
+    #                 logging.info(f"Need drum video for: {drum_name} (MIDI: {midi_note})")
+
+    #         # Process each needed drum
+    #         for midi_note, drum_name in needed_drums:
+    #             normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
+    #             logging.info(f"\nLooking for drum: {normalized_name}")
+                
+    #             # Look for matching file
+    #             source_file = None
+    #             for file in upload_files:
+    #                 # Just check if normalized name is in the filename
+    #                 if normalized_name in file.name.lower():
+    #                     source_file = file
+    #                     logging.info(f"Found matching drum file: {file.name}")
+    #                     break
+
+    #             if source_file:
+    #                 dest_file = drum_dir / f"{normalized_name}.mp4"
+    #                 if not dest_file.exists():
+    #                     shutil.copy2(str(source_file), str(dest_file))
+    #                     logging.info(f"Copied drum file: {source_file.name} -> {dest_file.name}")
+    #             else:
+    #                 logging.error(f"Missing drum file for {drum_name}")
+    #                 logging.error(f"Looked for pattern: {normalized_name} in files: {[f.name for f in upload_files]}")
+
+    #         # Verify copied files
+    #         logging.info("\nVerifying copied drum files:")
+    #         for file in drum_dir.glob('*.mp4'):
+    #             logging.info(f"Found copied file: {file}")
+
+    #         return grid
+                
+    #     except Exception as e:
+    #         logging.error(f"Error in _process_drum_track: {str(e)}")
+    #         return grid
+                        
+    # def _verify_drum_files(self, drum_dir):
+    #     """Verify drum files were copied correctly"""
+    #     logging.info(f"\nVerifying drum files in: {drum_dir}")
+    #     if drum_dir.exists():
+    #         for file in drum_dir.glob('*.mp4'):
+    #             logging.info(f"Found drum file: {file}")
+    #             if file.stat().st_size == 0:
+    #                 logging.error(f"Empty drum file: {file}")
+    #     else:
+    #         logging.error(f"Drum directory not found: {drum_dir}")
+
+    # def _process_regular_track(self, grid, track_idx, track, chunk_notes, start_time):
+    #     """Process regular instrument track clips"""
+    #     position_key = f"track_{track_idx}"
+    #     if position_key not in self.grid_positions:
+    #         return grid
+            
+    #     position = self.grid_positions[position_key]
+    #     row = position // self.cols
+    #     col = position % self.cols
+        
+    #     # Bounds check
+    #     if row >= len(grid) or col >= len(grid[0]):
+    #         logging.error(f"Position {position} out of grid bounds ({self.rows}x{self.cols})")
+    #         return grid
+            
+    #     clips = self._create_instrument_clips(track_idx, track, chunk_notes, start_time)
+    #     if clips:
+    #         grid[row][col] = CompositeVideoClip(clips)
+            
+    #     return grid
+
+def calculate_chunk_lengths(self, midi_data):
         try:
+            # Find last note end time
+            last_note_time = 0
+            for track in midi_data['tracks']:
+                for note in track.get('notes', []):
+                    note_end = float(note['time']) + float(note['duration'])
+                    last_note_time = max(last_note_time, note_end)
+            
             # Calculate chunks
-            full_chunks, final_duration = self.calculate_chunk_lengths()
-            if full_chunks == 0 and final_duration == 0:
-                raise ValueError("No valid chunks calculated")
-                
-            # Initialize grid dimensions
-            total_tracks = len(self.tracks) + len(self.drum_tracks)
-            self.cols = min(4, math.ceil(math.sqrt(total_tracks)))
-            self.rows = math.ceil(total_tracks / self.cols)
+            CHUNK_SIZE = 10  # seconds
+            full_chunks = int(last_note_time // CHUNK_SIZE)
+            final_chunk_duration = last_note_time % CHUNK_SIZE
             
-            # Process chunks
-            chunk_files = self._process_chunks(full_chunks, final_duration)
+            logging.info(f"Total duration: {last_note_time}")
+            logging.info(f"Full chunks: {full_chunks}")
+            logging.info(f"Final chunk duration: {final_chunk_duration}")
             
-            # Combine final result
-            if chunk_files:
-                logging.info(f"Concatenating {len(chunk_files)} chunks")
-                return self._combine_chunks(chunk_files)
-            return None
-                
-        except Exception as e:
-            logging.error(f"Composition error: {str(e)}")
-            return None
-
-    def _save_chunk(self, grid, chunk_idx, duration):
-        """Save processed chunk to file"""
-        try:
-            chunk = clips_array(grid)
-            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-            
-            chunk.write_videofile(
-                str(chunk_path),
-                fps=30,
-                codec='h264_nvenc',
-                audio_codec='aac',
-                preset='fast',
-                ffmpeg_params=[
-                    "-vsync", "1",
-                    "-async", "1",
-                    "-b:v", "5M",
-                    "-tile-columns", "2",
-                    "-threads", "8",
-                    "-row-mt", "1"
-                ]
-            )
-            
-            return str(chunk_path)
+            return full_chunks, final_chunk_duration
             
         except Exception as e:
-            logging.error(f"Error saving chunk: {str(e)}")
-            return None
-    
-    def _process_chunks(self, full_chunks, final_duration):
-        """Process each time chunk"""
-        chunk_files = []
-        active_clips = []
-        total_chunks = full_chunks + (1 if final_duration > 0 else 0)
-        
-        for chunk_idx in range(total_chunks):
-            try:
-                start_time = chunk_idx * self.CHUNK_DURATION
-                end_time = start_time + (final_duration if chunk_idx == full_chunks else self.CHUNK_DURATION)
-                
-                # Initialize empty grid
-                grid = self._initialize_grid(end_time - start_time)
-                
-                # Process tracks for this time chunk
-                grid = self._process_chunk_tracks(grid, start_time, end_time)
-                
-                # Create and save chunk
-                chunk_path = self._save_chunk(grid, chunk_idx, end_time - start_time)
-                if chunk_path:
-                    chunk_files.append(str(chunk_path))
-                
-                # Cleanup
-                self._cleanup_clips(active_clips)
-                
-            except Exception as e:
-                logging.error(f"Error processing chunk {chunk_idx}: {e}")
-                continue
-                
-        return chunk_files
-
-    def _initialize_grid(self, duration):
-        """Initialize empty grid with proper dimensions"""
-        return [[ColorClip(size=(1920//self.cols, 1080//self.rows), 
-                color=(0,0,0), 
-                duration=duration) 
-                for _ in range(self.cols)] 
-                for _ in range(self.rows)]
-
-    def _process_chunk_tracks(self, grid, start_time, end_time):
-        """Process all tracks for current time chunk"""
-        try:
-            # Process regular tracks first
-            for track_id, track in self.tracks.items():
-                try:
-                    track_path = self.processed_videos_dir / f"{track.get('name', '')}_notes"
-                    if not track_path.exists():
-                        continue
-                        
-                    chunk_notes = [
-                        note for note in track.get('notes', [])
-                        if start_time <= float(note['time']) < end_time
-                    ]
-                    
-                    if chunk_notes:
-                        position = self.grid_positions.get(str(track_id))
-                        if position is not None:
-                            row = position // self.cols
-                            col = position % self.cols
-                            clips = []
-                            
-                            for note in chunk_notes:
-                                midi_note = note['midi']
-                                note_name = midi_to_note(midi_note)
-                                note_file = track_path / f"note_{midi_note}_{note_name}.mp4"
-                                
-                                if note_file.exists():
-                                    clip = VideoFileClip(str(note_file))
-                                    time = float(note['time']) - start_time
-                                    clip = clip.set_start(time)
-                                    clips.append(clip)
-                            
-                            if clips:
-                                grid[row][col] = CompositeVideoClip(clips)
-                                
-                except Exception as e:
-                    logging.error(f"Error processing track {track_id}: {str(e)}")
-                    continue
-
-            # Then process drum tracks
-            for track_idx, track in enumerate(self.drum_tracks):
-                chunk_notes = [note for note in track.get('notes', [])
-                            if start_time <= float(note['time']) < end_time]
-                
-                if chunk_notes:
-                    grid = self._process_drum_track(grid, track_idx, track, chunk_notes, start_time)
-                    
-            return grid
-                
-        except Exception as e:
-            logging.error(f"Error in _process_chunk_tracks: {str(e)}")
-            return grid
-
-    def _process_drum_track(self, grid, track_idx, track, chunk_notes, start_time):
-        try:
-            logging.info(f"\n=== DRUM TRACK PROCESSING ===")
-            logging.info(f"Track Index: {track_idx}")
-            
-            # Create drum directory
-            drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
-            drum_dir.mkdir(exist_ok=True)
-            logging.info(f"Created drum directory: {drum_dir}")
-
-            # List ALL files in uploads directory first
-            upload_files = list(self.uploads_dir.glob('*.mp4'))
-            logging.info(f"\nUploads directory contents at {self.uploads_dir}:")
-            for file in upload_files:
-                logging.info(f"Found uploaded file: {file.name}")
-
-            # Get unique drum types needed
-            needed_drums = set()
-            for note in chunk_notes:
-                midi_note = note['midi']
-                drum_name = DRUM_NOTES.get(midi_note)
-                if drum_name:
-                    needed_drums.add((midi_note, drum_name))
-                    logging.info(f"Need drum video for: {drum_name} (MIDI: {midi_note})")
-
-            # Process each needed drum
-            for midi_note, drum_name in needed_drums:
-                normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
-                logging.info(f"\nLooking for drum: {normalized_name}")
-                
-                # Look for matching file
-                source_file = None
-                for file in upload_files:
-                    # Just check if normalized name is in the filename
-                    if normalized_name in file.name.lower():
-                        source_file = file
-                        logging.info(f"Found matching drum file: {file.name}")
-                        break
-
-                if source_file:
-                    dest_file = drum_dir / f"{normalized_name}.mp4"
-                    if not dest_file.exists():
-                        shutil.copy2(str(source_file), str(dest_file))
-                        logging.info(f"Copied drum file: {source_file.name} -> {dest_file.name}")
-                else:
-                    logging.error(f"Missing drum file for {drum_name}")
-                    logging.error(f"Looked for pattern: {normalized_name} in files: {[f.name for f in upload_files]}")
-
-            # Verify copied files
-            logging.info("\nVerifying copied drum files:")
-            for file in drum_dir.glob('*.mp4'):
-                logging.info(f"Found copied file: {file}")
-
-            return grid
-                
-        except Exception as e:
-            logging.error(f"Error in _process_drum_track: {str(e)}")
-            return grid
-                        
-    def _verify_drum_files(self, drum_dir):
-        """Verify drum files were copied correctly"""
-        logging.info(f"\nVerifying drum files in: {drum_dir}")
-        if drum_dir.exists():
-            for file in drum_dir.glob('*.mp4'):
-                logging.info(f"Found drum file: {file}")
-                if file.stat().st_size == 0:
-                    logging.error(f"Empty drum file: {file}")
-        else:
-            logging.error(f"Drum directory not found: {drum_dir}")
-
-    def _process_regular_track(self, grid, track_idx, track, chunk_notes, start_time):
-        """Process regular instrument track clips"""
-        position_key = f"track_{track_idx}"
-        if position_key not in self.grid_positions:
-            return grid
-            
-        position = self.grid_positions[position_key]
-        row = position // self.cols
-        col = position % self.cols
-        
-        # Bounds check
-        if row >= len(grid) or col >= len(grid[0]):
-            logging.error(f"Position {position} out of grid bounds ({self.rows}x{self.cols})")
-            return grid
-            
-        clips = self._create_instrument_clips(track_idx, track, chunk_notes, start_time)
-        if clips:
-            grid[row][col] = CompositeVideoClip(clips)
-            
-        return grid
+            logging.error(f"Error calculating chunks: {str(e)}")
+            return None, None
             
 
 def compose_from_processor_output(processor_result, output_path):
