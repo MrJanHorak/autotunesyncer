@@ -25,23 +25,6 @@ logging.basicConfig(
     ]
 )
 
-# def get_drum_groups(track):
-#     """Match frontend's DRUM_GROUPS logic"""
-#     drum_groups = {
-#         'kick': [35, 36],
-#         'snare': [38, 40],
-#         'hihat': [42, 44, 46],
-#         'cymbal': [49, 51, 52, 55, 57],
-#         'tom': [41, 43, 45, 47, 48, 50]
-#     }
-#     # Extract unique drum groups from track notes
-#     groups = set()
-#     for note in track.get('notes', []):
-#         for group, midi_numbers in drum_groups.items():
-#             if note['midi'] in midi_numbers:
-#                 groups.add(group)
-#     return groups
-
 def is_drum_kit(instrument):
     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
     drum_keywords = ['standard kit', 'drum kit', 'drums', 'percussion']
@@ -582,22 +565,22 @@ if __name__ == "__main__":
             f"final_composition_{processor.session_id}.mp4"
         )
         
-        composition_result = compose_from_processor_output(
-            {
-                'processed_videos_dir': processor.videos_dir,
-                'tracks': config['tracks'],
-                'processed_files': result
-            },
-            output_path
-        )
+        # composition_result = compose_from_processor_output(
+        #     {
+        #         'processed_videos_dir': processor.videos_dir,
+        #         'tracks': config['tracks'],
+        #         'processed_files': result
+        #     },
+        #     output_path
+        # )
         
-        print(json.dumps({
-            'success': True,
-            'data': {
-                'processed': result,
-                'composition': composition_result
-            }
-        }), flush=True)
+        # print(json.dumps({
+        #     'success': True,
+        #     'data': {
+        #         'processed': result,
+        #         'composition': composition_result
+        #     }
+        # }), flush=True)
         
     except Exception as e:
         logging.error(f"Error in main: {str(e)}")
