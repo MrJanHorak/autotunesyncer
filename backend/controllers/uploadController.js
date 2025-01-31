@@ -9,6 +9,7 @@ const __dirname = dirname(__filename);
 const UPLOADS_DIR = join(__dirname, '../uploads');
 
 export const handleUpload = (req, res) => {
+  console.log('Uploading file:', req);
   try {
     const file = req.file;
     if (!file) {
@@ -16,6 +17,7 @@ export const handleUpload = (req, res) => {
     }
 
     const filePath = join(UPLOADS_DIR, `${uuidv4()}.mp4`);
+    console.log('Uploading file:', filePath);
     writeFileSync(filePath, file.buffer);
 
     res.status(200).json({ message: 'File uploaded successfully', filePath });

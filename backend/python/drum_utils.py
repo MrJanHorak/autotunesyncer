@@ -1,3 +1,5 @@
+import logging
+
 DRUM_NOTES = {
   27: 'Laser',
   28: 'Whip',
@@ -76,21 +78,36 @@ def is_drum_kit(instrument):
         channel == 9
     )
 
-def get_drum_groups(track):
-    """Get unique drum types from track notes"""
-    if not track.get('notes'):
-        return set()
+def get_drum_groups(input_data):
+    """Get drum groups from either a track or single MIDI note"""
+    # Add debug logging
+    logging.info(f"get_drum_groups called with: {input_data}")
+    
+    # Handle single MIDI note
+    if isinstance(input_data, (int, float)):
+        drum_name = DRUM_NOTES.get(int(input_data))
+        logging.info(f"MIDI note {input_data} maps to drum: {drum_name}")
+        return drum_name
         
-    drum_groups = set()
-    for note in track['notes']:
-        midi_note = note.get('midi')
-        if midi_note in DRUM_NOTES:
-            drum_groups.add(DRUM_NOTES[midi_note])
-    return drum_groups
+    # Handle track dictionary
+    if isinstance(input_data, dict):
+        if not input_data.get('notes'):
+            return set()
+            
+        drum_groups = set()
+        for note in input_data['notes']:
+            midi_note = note.get('midi')
+            if midi_note in DRUM_NOTES:
+                drum_name = DRUM_NOTES[midi_note]
+                logging.info(f"MIDI note {midi_note} maps to drum: {drum_name}")
+                drum_groups.add(drum_name)
+        return drum_groups
+        
+    return None
 
 def get_drum_name(midi_note):
-    """Get specific drum name for a MIDI note number"""
-    return DRUM_NOTES.get(midi_note, f'Unknown Drum ({midi_note})')
+    """Get drum name from MIDI note number"""
+    return DRUM_NOTES.get(midi_note)
 
 # Replace the old group-based function with exact drum names
 def process_drum_track(track):
