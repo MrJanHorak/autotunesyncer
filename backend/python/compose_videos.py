@@ -1,6 +1,6 @@
-# compose_videos.py
 import json
 import logging
+import os
 from pathlib import Path
 from audio_processor import process_track_videos, AudioVideoProcessor
 from video_composer import compose_from_processor_output
@@ -27,15 +27,6 @@ if __name__ == "__main__":
         
         output_path = Path(processor.videos_dir).parent / f"final_composition_{processor.session_id}.mp4"
         
-        # composition_result = compose_from_processor_output(
-        #     {
-        #         'processed_videos_dir': processor.videos_dir,
-        #         'tracks': config['tracks'],
-        #         'processed_files': result
-        #     },
-        #     str(output_path)
-        # )
-
         try:
             composition_result = compose_from_processor_output(
                 {

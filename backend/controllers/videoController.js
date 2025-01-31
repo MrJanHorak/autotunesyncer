@@ -5,6 +5,7 @@ import ffmpeg from 'fluent-ffmpeg';
 // import tunePitch from 'tune-pitch'; // Assuming tune-pitch is the correct library
 
 const extractAudio = (videoPath, outputAudioPath) => {
+  console.log('Extracting audio from video:', videoPath);
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
       .output(outputAudioPath)
@@ -30,6 +31,7 @@ const extractAudio = (videoPath, outputAudioPath) => {
 // };
 
 export const uploadVideo = async (req, res) => {
+  console.log('Uploading video req:', req);
   console.log('Uploading video:', req.file);
 
   try {
