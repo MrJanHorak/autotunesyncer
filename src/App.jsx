@@ -16,6 +16,7 @@ import AudioContextInitializer from './components/AudioContextInitializer/AudioC
 import CompositionSection from './components/CompositionSection/CompositionSection';
 import MidiParser from './components/MidiParser/MidiParser';
 import ProgressBar from './components/ProgressBar/ProgressBar';
+import Grid from './components/Grid/Grid';
 
 import './App.css';
 
@@ -159,11 +160,12 @@ function App() {
           {instruments.length > 0 && (
             <InstrumentList instruments={instruments} />
           )}
+<Grid midiData={parsedMidiData} />
 
           {!isReadyToCompose && instruments.length > 0 && (
             <ProgressBar
-              current={recordedVideosCount}
-              total={instruments.length}
+            current={recordedVideosCount}
+            total={instruments.length}
             />
           )}
 
