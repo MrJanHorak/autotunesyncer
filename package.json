@@ -19,6 +19,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-dropzone": "^14.2.10",
+    "react-grid-layout": "^1.5.0",
     "react-player": "^2.16.0",
     "tone": "^15.0.4"
   },

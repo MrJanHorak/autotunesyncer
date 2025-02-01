@@ -1,21 +1,20 @@
 /* eslint-disable no-unused-vars */
-// src/components/Grid/Grid.jsx
-import { useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import PropTypes from 'prop-types';
+import GridLayout from 'react-grid-layout';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
-import './Grid.css';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
 
 const Grid = ({ midiData }) => {
-  const gridData = useMemo(() => {
+  const initialGridData = useMemo(() => {
     const trackData = [];
     const drumData = new Map();
     
-    // Process MIDI tracks
     midiData.tracks.forEach((track, index) => {
       if (!track.notes?.length) return;
 
       if (isDrumTrack(track)) {
-        // Group drum notes by type
         track.notes.forEach(note => {
           const drumName = getDrumName(note.midi);
           const key = `drum_${drumName.toLowerCase().replace(/\s+/g, '_')}`;
@@ -28,7 +27,6 @@ const Grid = ({ midiData }) => {
           drumData.get(key).count++;
         });
       } else {
-        // Add melodic track
         trackData.push({
           name: track.instrument.name,
           count: track.notes.length,
@@ -39,25 +37,47 @@ const Grid = ({ midiData }) => {
     return [...trackData, ...Array.from(drumData.values())];
   }, [midiData]);
 
-  // Calculate heat intensity based on note count
+  const [items, setItems] = useState(initialGridData);
+  const [layout, setLayout] = useState(
+    items.map((_, i) => ({
+      i: i.toString(),
+      x: i % 4,
+      y: Math.floor(i / 4),
+      w: 1,
+      h: 1
+    }))
+  );
+
+  const getHeatColor = (intensity) => {
+    const hue = (1 - intensity) * 240;
+    return `hsl(${hue}, 70%, 50%)`;
+  };
+
   const getHeatIntensity = (count) => {
-    const maxCount = Math.max(...gridData.map(item => item.count));
+    const maxCount = Math.max(...items.map(item => item.count));
     return count / maxCount;
   };
 
-  const getHeatColor = (intensity) => {
-    // Create a gradient from blue (cold) to red (hot)
-    const hue = (1 - intensity) * 240; // 240 is blue, 0 is red
-    return `hsl(${hue}, 70%, 50%)`;
+  const handleLayoutChange = (newLayout) => {
+    setLayout(newLayout);
   };
 
   return (
     <div className="grid-container">
-      <h2>Track Distribution</h2>
-      <div className="grid">
-        {gridData.map((item, index) => (
-          <div 
-            key={index}
+      <GridLayout
+        className="grid"
+        layout={layout}
+        cols={4}
+        rowHeight={Math.floor(window.innerHeight / 6)}
+        width={window.innerWidth * 0.9}
+        onLayoutChange={handleLayoutChange}
+        isDraggable={true}
+        isResizable={false}
+        margin={[8, 8]}
+      >
+        {items.map((item, index) => (
+          <div
+            key={index.toString()}
             className="grid-cell"
             style={{
               backgroundColor: getHeatColor(getHeatIntensity(item.count))
@@ -69,7 +89,7 @@ const Grid = ({ midiData }) => {
             </div>
           </div>
         ))}
-      </div>
+      </GridLayout>
     </div>
   );
 };
