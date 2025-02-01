@@ -80,7 +80,6 @@ function App() {
     setMidiFile(file);
   };
 
-
   const handleParsedMidi = useCallback(
     (midiInfo) => {
       console.log('Parsed MIDI info:', midiInfo);
@@ -99,9 +98,12 @@ function App() {
     }
     console.log('Instrument: ', instrument);
     if (instrument.isDrum) {
-    instrument.name = instrument.group
+      instrument.name = instrument.group;
     }
-    console.log('Handle Recording is complete Instrument after adding drum name:', instrument);
+    console.log(
+      'Handle Recording is complete Instrument after adding drum name:',
+      instrument
+    );
     const key = instrument.isDrum
       ? `drum_${instrument.name.toLowerCase().replace(/\s+/g, '_')}`
       : normalizeInstrumentName(instrument.name);
@@ -121,7 +123,7 @@ function App() {
 
   // Add handleVideoReady function
   const handleVideoReady = useCallback((videoUrl, instrument) => {
-    instrument.isDrum ? instrument.name = instrument.group : instrument.name;
+    instrument.isDrum ? (instrument.name = instrument.group) : instrument.name;
     const instrumentKey = instrument.isDrum
       ? `drum_${instrument.name}`
       : normalizeInstrumentName(instrument.name);
@@ -160,12 +162,12 @@ function App() {
           {instruments.length > 0 && (
             <InstrumentList instruments={instruments} />
           )}
-<Grid midiData={parsedMidiData} />
+          <Grid midiData={parsedMidiData} />
 
           {!isReadyToCompose && instruments.length > 0 && (
             <ProgressBar
-            current={recordedVideosCount}
-            total={instruments.length}
+              current={recordedVideosCount}
+              total={instruments.length}
             />
           )}
 
