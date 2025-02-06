@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { composeVideos } from '../../../services/videoServices.js';
 
-const VideoComposer = ({ videoFiles, midiData }) => {
+const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
@@ -13,6 +13,7 @@ const VideoComposer = ({ videoFiles, midiData }) => {
   }, [videoFiles]);
 
   const startComposition = async () => {
+    console.log('Grid arrangement:', gridArrangement);
     setIsProcessing(true);
     setProgress(0);
     setError(null);
@@ -21,14 +22,18 @@ const VideoComposer = ({ videoFiles, midiData }) => {
       const formData = new FormData();
 
       // Add MIDI data
-      const midiJsonString = JSON.stringify(midiData);
+      const midiJsonString = JSON.stringify({
+        ...midiData,
+        gridArrangement, 
+      });
+      console.log('Midi data being sent:', JSON.parse(midiJsonString));
       const midiBlob = new Blob([midiJsonString], { type: 'application/json' });
       formData.append('midiData', midiBlob);
 
       // Process and append videos
       for (const [instrumentName, videoData] of Object.entries(videoFiles)) {
         console.log(`Processing ${instrumentName} video:`, videoData);
-        
+
         if (!videoData) {
           console.error(`No video data for ${instrumentName}`);
           continue;
@@ -39,16 +44,22 @@ const VideoComposer = ({ videoFiles, midiData }) => {
         if (!(videoData instanceof Blob)) {
           try {
             const response = await fetch(videoData);
-            if (!response.ok) throw new Error(`Failed to fetch video for ${instrumentName}`);
+            if (!response.ok)
+              throw new Error(`Failed to fetch video for ${instrumentName}`);
             videoBlob = await response.blob();
           } catch (error) {
-            console.error(`Error processing video for ${instrumentName}:`, error);
+            console.error(
+              `Error processing video for ${instrumentName}:`,
+              error
+            );
             continue;
           }
         }
 
         formData.append('videos', videoBlob, `${instrumentName}.mp4`);
-        console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}`);
+        console.log(
+          `Added video for ${instrumentName}, size: ${videoBlob.size}`
+        );
       }
 
       // Log FormData contents for debugging
@@ -58,12 +69,16 @@ const VideoComposer = ({ videoFiles, midiData }) => {
 
       const response = await composeVideos(formData, {
         onUploadProgress: (progressEvent) => {
-          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
           setProgress(percentCompleted);
         },
         onDownloadProgress: (progressEvent) => {
           if (progressEvent.total) {
-            const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            const percent = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
             setProgress(percent);
           }
         },
@@ -76,7 +91,7 @@ const VideoComposer = ({ videoFiles, midiData }) => {
           const error = JSON.parse(text);
           throw new Error(error.error || 'Failed to process video');
         }
-        
+
         const url = URL.createObjectURL(response.data);
         setComposedVideoUrl(url);
       } else {
@@ -85,9 +100,11 @@ const VideoComposer = ({ videoFiles, midiData }) => {
     } catch (error) {
       console.error('Composition failed:', error);
       setError(error.message || 'Failed to compose video');
-      
+
       if (error.code === 'ECONNABORTED') {
-        setError('Video processing took too long. Try with fewer or shorter videos.');
+        setError(
+          'Video processing took too long. Try with fewer or shorter videos.'
+        );
       }
     } finally {
       setIsProcessing(false);
@@ -104,40 +121,34 @@ const VideoComposer = ({ videoFiles, midiData }) => {
   }, [composedVideoUrl]);
 
   return (
-    <div className="video-composer">
+    <div className='video-composer'>
       <button
         onClick={startComposition}
         disabled={isProcessing || Object.keys(videoFiles).length === 0}
-        className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+        className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50'
       >
         {isProcessing ? 'Processing...' : 'Start Composition'}
       </button>
 
       {isProcessing && (
-        <div className="mt-4">
-          <div className="w-full h-2 bg-gray-200 rounded">
+        <div className='mt-4'>
+          <div className='w-full h-2 bg-gray-200 rounded'>
             <div
-              className="h-full bg-blue-500 rounded"
+              className='h-full bg-blue-500 rounded'
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className="text-sm text-gray-600 mt-1">{progress}% complete</p>
+          <p className='text-sm text-gray-600 mt-1'>{progress}% complete</p>
         </div>
       )}
 
       {error && (
-        <div className="mt-4 p-4 bg-red-100 text-red-700 rounded">
-          {error}
-        </div>
+        <div className='mt-4 p-4 bg-red-100 text-red-700 rounded'>{error}</div>
       )}
 
       {composedVideoUrl && (
-        <div className="mt-4">
-          <video
-            src={composedVideoUrl}
-            controls
-            className="w-full max-w-4xl"
-          />
+        <div className='mt-4'>
+          <video src={composedVideoUrl} controls className='w-full max-w-4xl' />
         </div>
       )}
     </div>
