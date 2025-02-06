@@ -1,4 +1,4 @@
-/* eslint-disable no-prototype-builtins */
+ 
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState } from 'react';
 
@@ -75,6 +75,7 @@ function App() {
 
   const [parsedMidiData, setParsedMidiData] = useState(null);
   const [midiFile, setMidiFile] = useState(null);
+  const [gridArrangement, setGridArrangement] = useState({});
 
   const handleMidiProcessed = (file) => {
     setMidiFile(file);
@@ -119,6 +120,7 @@ function App() {
       ...prev,
       [key]: blob,
     }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Add handleVideoReady function
@@ -132,6 +134,7 @@ function App() {
       ...prev,
       [instrumentKey]: videoUrl,
     }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Add click handler to initialize audio context
@@ -162,7 +165,10 @@ function App() {
           {instruments.length > 0 && (
             <InstrumentList instruments={instruments} />
           )}
-          <Grid midiData={parsedMidiData} />
+          <Grid
+            midiData={parsedMidiData}
+            onArrangementChange={setGridArrangement}
+          />
 
           {!isReadyToCompose && instruments.length > 0 && (
             <ProgressBar
@@ -186,6 +192,7 @@ function App() {
           videoFiles={videoFiles}
           midiData={parsedMidiData}
           instrumentTrackMap={instrumentTrackMap}
+          gridArrangement={gridArrangement}
         />
       )}
     </div>
