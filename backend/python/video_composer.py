@@ -51,6 +51,10 @@ class VideoComposer:
     def __init__(self, processed_videos_dir, midi_data, output_path):
         """Initialize VideoComposer with proper path handling"""
         try:
+            logging.info("=== VideoComposer Initialization ===")
+            logging.info(f"Received MIDI data structure: {list(midi_data.keys())}")
+            logging.info(f"Grid arrangement from MIDI: {midi_data.get('gridArrangement')}")
+
             self.processed_videos_dir = Path(processed_videos_dir)
             # Fix uploads path - go up two levels to /backend/uploads
             self.uploads_dir = Path(processed_videos_dir).parent.parent.parent / "uploads"
@@ -369,6 +373,7 @@ class VideoComposer:
         logging.info("Grid arrangement: %s", self.midi_data.get('gridArrangement'))
         try:
             grid_arrangement = self.midi_data.get('gridArrangement', {})
+            logging.info(f"Extracted grid arrangement: {grid_arrangement}")
             self.grid_positions = {}
             
             if grid_arrangement:
@@ -1055,6 +1060,12 @@ def compose_from_processor_output(processor_result, output_path):
     try:
         base_dir = processor_result['processed_videos_dir']
         logging.info(f"Using base directory: {base_dir}")
+        logging.info("=== Processing Grid Arrangement ===")
+        logging.info(f"Grid arrangement in processor result: {processor_result.get('tracks', {}).get('gridArrangement')}")
+
+        logging.info("=== Processing Grid Arrangement ===")
+        logging.info(f"Processor result tracks: {processor_result['tracks']}")
+        logging.info(f"Grid arrangement in tracks: {processor_result['tracks'].get('gridArrangement')}")
         
         # Store validated tracks
         validated_tracks = {}
