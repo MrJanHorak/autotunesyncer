@@ -6,7 +6,6 @@ import path from 'path';
 import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 
-
 const router = express.Router();
 
 // Ensure uploads directory exists
@@ -20,12 +19,12 @@ const storage = multer.diskStorage({
   destination: uploadsDir,
   filename: (req, file, cb) => {
     // Keep original filename but make it unique
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
     cb(null, `${uniqueSuffix}-${file.originalname}`);
-  }
+  },
 });
 
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
     console.log('Received file:', file);
@@ -34,10 +33,10 @@ const upload = multer({
     } else {
       cb(new Error('Unexpected field'));
     }
-  }
+  },
 });
 
-// const upload = multer({ 
+// const upload = multer({
 //   dest: 'uploads/',
 //   limits: {
 //     fileSize: 50 * 1024 * 1024 // 50MB limit
@@ -53,7 +52,7 @@ router.post('/', upload.any(), async (req, res) => {
     }
 
     // Find MIDI file
-    const midiFile = req.files.find(f => f.fieldname === 'midiData');
+    const midiFile = req.files.find((f) => f.fieldname === 'midiData');
     if (!midiFile) {
       throw new Error('MIDI data not found in upload');
     }
@@ -64,8 +63,8 @@ router.post('/', upload.any(), async (req, res) => {
 
     // Process video files
     const videos = {};
-    const videoFiles = req.files.filter(f => f.fieldname === 'videos');
-    
+    const videoFiles = req.files.filter((f) => f.fieldname === 'videos');
+
     if (videoFiles.length === 0) {
       throw new Error('No video files found in upload');
     }
@@ -76,7 +75,7 @@ router.post('/', upload.any(), async (req, res) => {
     //   console.log(`Processed video for ${instrumentName}: ${file.path}`);
     // });
 
-    videoFiles.forEach(file => {
+    videoFiles.forEach((file) => {
       const instrumentName = path.parse(file.originalname).name;
       // Store absolute path
       videos[instrumentName] = path.resolve(file.path);
@@ -85,29 +84,29 @@ router.post('/', upload.any(), async (req, res) => {
 
     console.log('Final video mapping:', videos);
 
-        // Create temp config file
-        const config = {
-          tracks: {
-            tracks: midiData.tracks, 
-            header: midiData.header
-          },
-          videos: videos
-        };
-        
-        const configPath = path.join(os.tmpdir(), `video-config-${uuidv4()}.json`);
-        fs.writeFileSync(configPath, JSON.stringify(config));
-    
-        // Call Python processor with config file path
-        const result = await runPythonProcessor(configPath);
-        
-        // Cleanup
-        fs.unlinkSync(configPath);
-        
-        res.json({ 
-          success: true,
-          result: result
-        });
-    
+    // Create temp config file
+    const config = {
+      tracks: {
+        tracks: midiData.tracks,
+        header: midiData.header,
+        gridArrangement: midiData.gridArrangement, // Add this line
+      },
+      videos: videos,
+    };
+    console.log('Grid arrangement in config:', config.tracks.gridArrangement);
+    const configPath = path.join(os.tmpdir(), `video-config-${uuidv4()}.json`);
+    fs.writeFileSync(configPath, JSON.stringify(config));
+
+    // Call Python processor with config file path
+    const result = await runPythonProcessor(configPath);
+
+    // Cleanup
+    fs.unlinkSync(configPath);
+
+    res.json({
+      success: true,
+      result: result,
+    });
 
     // // Process videos
     // const processedVideos = await runPythonProcessor(midiData, videos);
@@ -123,17 +122,16 @@ router.post('/', upload.any(), async (req, res) => {
     //   }
     // });
 
-    // res.json({ 
+    // res.json({
     //   success: true,
     //   videos: processedVideos
     // });
-
   } catch (error) {
     console.error('Video processing error:', error);
-    
+
     // Cleanup temporary files on error
     if (req.files) {
-      req.files.forEach(file => {
+      req.files.forEach((file) => {
         try {
           if (fs.existsSync(file.path)) {
             fs.unlinkSync(file.path);
@@ -143,10 +141,10 @@ router.post('/', upload.any(), async (req, res) => {
         }
       });
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: 'Failed to process videos',
-      details: error.message 
+      details: error.message,
     });
   }
 });
