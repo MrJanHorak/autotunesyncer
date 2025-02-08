@@ -361,6 +361,8 @@ class VideoComposer:
     #     except Exception as e:
     #         logging.error(f"Layout error: {str(e)}")
     #         raise
+
+    
     def _calculate_default_layout(self):
         """Calculate default grid layout"""
         rows = math.ceil(len(self.tracks) / 4)
@@ -377,25 +379,57 @@ class VideoComposer:
             self.grid_positions = {}
             
             if grid_arrangement:
-                # Convert arrangement to grid positions
-                for item_id, pos_data in grid_arrangement.items():
-                    if pos_data.get('type') == 'drum':
-                        key = f"drum_{item_id}"
-                    else:
-                        key = f"track_{item_id}"
-                    self.grid_positions[key] = pos_data['position']
-                
+                # Convert the frontend grid positions to video positions
+                for track_id, pos_data in grid_arrangement.items():
+                    # Remove 'drum-' or 'track-' prefix
+                    clean_id = track_id.replace('drum-', '').replace('track-', '')
+                    self.grid_positions[clean_id] = {
+                        'row': pos_data['row'],
+                        'column': pos_data['column'],
+                        'position': pos_data['position']
+                    }
+                    
                 # Calculate dimensions from arrangement
-                max_position = max(pos['position'] for pos in grid_arrangement.values())
-                total_slots = max_position + 1
-                cols = min(4, math.ceil(math.sqrt(total_slots)))
-                rows = math.ceil(total_slots / cols)
-                return rows, cols
-            
+                max_row = max(pos['row'] for pos in grid_arrangement.values())
+                max_col = max(pos['column'] for pos in grid_arrangement.values())
+                return max_row + 1, max_col + 1
+                
             return self._calculate_default_layout()
+        
         except Exception as e:
-            logging.error(f"Layout error: {str(e)}")
-            raise
+            logging.error(f"Error getting chunk notes: {e}")
+
+    def _add_video_at_position(self, video_path, track_id, timestamp, grid, rows, cols):
+        try:
+            # First clean track_id to match grid arrangement keys
+            clean_id = track_id.replace('track_', '').replace('drum_', '')
+            logging.info(f"Looking up position for {clean_id} in grid arrangement")
+            
+            if clean_id in self.grid_positions:
+                pos_data = self.grid_positions[clean_id]
+                row = pos_data.get('row', 0)
+                col = pos_data.get('column', 0)
+                logging.info(f"Found grid position for {clean_id}: row={row}, col={col}")
+            else:
+                logging.warning(f"No grid position found for {clean_id}, calculating position")
+                position = len(self.grid_positions)
+                row = position // cols
+                col = position % cols
+                
+            if row < rows and col < cols:
+                logging.info(f"Adding {track_id} at position [{row}][{col}]")
+                clip = VideoFileClip(str(video_path))
+                if isinstance(grid[row][col], ColorClip):
+                    grid[row][col] = clip
+                else:
+                    existing = grid[row][col]
+                    grid[row][col] = CompositeVideoClip([existing, clip])
+                return True
+                
+        except Exception as e:
+            logging.error(f"Error adding video at position for {track_id}: {str(e)}")
+            logging.error(f"Grid positions: {self.grid_positions}")
+            return False
 
     def validate_track_data(self, track):
         """Validate single track data structure"""
@@ -847,9 +881,14 @@ class VideoComposer:
                                     position_key = drum_key  # Use normalized name directly as position key
                                     logging.info(f"Processing {drum_key} at position {position_key}")
                                     if position_key in self.grid_positions:
-                                        position = self.grid_positions[position_key]
-                                        row = position // cols
-                                        col = position % cols
+                                        self._add_video_at_position(
+                                            video_path=note_file,
+                                            track_id=position_key,
+                                            timestamp=time,
+                                            grid=grid,
+                                            rows=rows,
+                                            cols=cols
+                                        )
                                         
                                         # Use normalized drum filename
                                         drum_file = drum_dir / f"{drum_key}.mp4"
