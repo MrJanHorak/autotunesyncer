@@ -18,7 +18,6 @@ import {
 } from '../utils/drumUtils.js';
 import { createReadStream, statSync } from 'fs';
 
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TEMP_DIR = join(__dirname, '../temp');
@@ -113,7 +112,20 @@ async function processVideoWithPython(midiData, processedFiles, outputPath) {
       const videoFilesJsonPath = join(TEMP_DIR, 'video_files.json');
       console.log('MIDI data:', midiData);
       console.log('Writing JSON files:', { midiJsonPath, videoFilesJsonPath });
-      writeFileSync(midiJsonPath, JSON.stringify(midiData));
+
+      // Add detailed logging for grid arrangement
+      console.log('\n=== Grid Arrangement Validation ===');
+      console.log('Full MIDI data structure:', Object.keys(midiData));
+      console.log('Grid arrangement:', midiData.gridArrangement);
+
+      // Log the data being written to files
+      const dataToWrite = {
+        ...midiData,
+        gridArrangement: midiData.gridArrangement, // Ensure grid arrangement is included
+      };
+      console.log('Writing MIDI data with arrangement:', dataToWrite);
+
+      writeFileSync(midiJsonPath, JSON.stringify(dataToWrite));
       writeFileSync(videoFilesJsonPath, JSON.stringify(videoFilesForPython));
 
       // Spawn Python process with detailed logger

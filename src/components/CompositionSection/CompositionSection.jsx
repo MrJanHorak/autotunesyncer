@@ -2,7 +2,7 @@ import { useState } from 'react';
 import PropTypes from 'prop-types';
 import VideoComposer from '../VideoComposer/VideoComposer';
 
-const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap }) => {
+const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap, gridArrangement }) => {
   const [composing, setComposing] = useState(false);
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -43,6 +43,7 @@ const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap }) => {
         videoFiles={videoFiles}
         midiData={midiData}
         instrumentTrackMap={instrumentTrackMap}
+        gridArrangement={gridArrangement}
         onProgress={handleCompositionProgress}
         onError={handleCompositionError}
         onStart={() => setComposing(true)}
@@ -55,7 +56,8 @@ const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap }) => {
 CompositionSection.propTypes = {
   videoFiles: PropTypes.object.isRequired,
   midiData: PropTypes.object.isRequired,
-  instrumentTrackMap: PropTypes.object.isRequired
+  instrumentTrackMap: PropTypes.object.isRequired,
+  gridArrangement: PropTypes.object.isRequired
 };
 
 export default CompositionSection;
