@@ -66,61 +66,100 @@ DRUM_NOTES = {
   93: 'Snare Drum Brush'
 }
 
-def is_drum_kit(instrument):
-    """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
-    drum_keywords = ['standard kit', 'drum kit', 'drums', 'percussion']
-    name = instrument.get('name', '').lower()
-    channel = instrument.get('channel', 0)
+# def is_drum_kit(instrument):
+#     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
+#     drum_keywords = ['standard kit', 'drum kit', 'drums', 'percussion']
+#     name = instrument.get('name', '').lower()
+#     channel = instrument.get('channel', 0)
     
-    return (
-        any(keyword in name for keyword in drum_keywords) or
-        'drum' in name or
-        channel == 9
-    )
+#     return (
+#         any(keyword in name for keyword in drum_keywords) or
+#         'drum' in name or
+#         channel == 9
+#     )
 
-def get_drum_groups(input_data):
-    """Get drum groups from either a track or single MIDI note"""
-    # Add debug logging
-    logging.info(f"get_drum_groups called with: {input_data}")
+# def get_drum_groups(input_data):
+#     """Get drum groups from either a track or single MIDI note"""
+#     # Add debug logging
+#     logging.info(f"get_drum_groups called with: {input_data}")
     
-    # Handle single MIDI note
-    if isinstance(input_data, (int, float)):
-        drum_name = DRUM_NOTES.get(int(input_data))
-        logging.info(f"MIDI note {input_data} maps to drum: {drum_name}")
-        return drum_name
+#     # Handle single MIDI note
+#     if isinstance(input_data, (int, float)):
+#         drum_name = DRUM_NOTES.get(int(input_data))
+#         logging.info(f"MIDI note {input_data} maps to drum: {drum_name}")
+#         return drum_name
         
-    # Handle track dictionary
-    if isinstance(input_data, dict):
-        if not input_data.get('notes'):
-            return set()
+#     # Handle track dictionary
+#     if isinstance(input_data, dict):
+#         if not input_data.get('notes'):
+#             return set()
             
-        drum_groups = set()
-        for note in input_data['notes']:
-            midi_note = note.get('midi')
-            if midi_note in DRUM_NOTES:
-                drum_name = DRUM_NOTES[midi_note]
-                logging.info(f"MIDI note {midi_note} maps to drum: {drum_name}")
-                drum_groups.add(drum_name)
-        return drum_groups
+#         drum_groups = set()
+#         for note in input_data['notes']:
+#             midi_note = note.get('midi')
+#             if midi_note in DRUM_NOTES:
+#                 drum_name = DRUM_NOTES[midi_note]
+#                 logging.info(f"MIDI note {midi_note} maps to drum: {drum_name}")
+#                 drum_groups.add(drum_name)
+#         return drum_groups
         
-    return None
+#     return None
+
+# def get_drum_name(midi_note):
+#     """Get drum name from MIDI note number"""
+#     return DRUM_NOTES.get(midi_note)
+
+# Replace the old group-based function with exact drum names
+# def process_drum_track(track):
+#     """Process a drum track and return a dict of drum names and their notes"""
+#     drum_notes = {}
+    
+#     if not track.get('notes'):
+#         return drum_notes
+        
+#     for note in track['notes']:
+#         drum_name = get_drum_name(note['midi'])
+#         if drum_name not in drum_notes:
+#             drum_notes[drum_name] = []
+#         drum_notes[drum_name].append(note)
+def process_drum_track(track, start_time, end_time):
+    """Process drum track notes within time window"""
+    drum_notes = {}
+    try:
+        for note in track.get('notes', []):
+            if start_time <= note['time'] < end_time:
+                midi_note = note.get('midi')
+                drum_name = DRUM_NOTES.get(midi_note)
+                if drum_name:
+                    key = f"drum_{drum_name.lower().replace(' ', '_')}"
+                    if key not in drum_notes:
+                        drum_notes[key] = []
+                    drum_notes[key].append(note)
+    except Exception as e:
+        logging.error(f"Error processing drum track: {e}")
+    return drum_notes
+
+def get_drum_groups(notes):
+    """Group drum notes by type"""
+    if not isinstance(notes, list):
+        return {}
+        
+    groups = {}
+    for note in notes:
+        if isinstance(note, dict):
+            midi_note = note.get('midi')
+            drum_name = DRUM_NOTES.get(midi_note)
+            if drum_name:
+                key = f"drum_{drum_name.lower().replace(' ', '_')}"
+                if key not in groups:
+                    groups[key] = []
+                groups[key].append(note)
+    return groups
 
 def get_drum_name(midi_note):
     """Get drum name from MIDI note number"""
-    return DRUM_NOTES.get(midi_note)
+    return DRUM_NOTES.get(midi_note, 'Unknown')
 
-# Replace the old group-based function with exact drum names
-def process_drum_track(track):
-    """Process a drum track and return a dict of drum names and their notes"""
-    drum_notes = {}
-    
-    if not track.get('notes'):
-        return drum_notes
-        
-    for note in track['notes']:
-        drum_name = get_drum_name(note['midi'])
-        if drum_name not in drum_notes:
-            drum_notes[drum_name] = []
-        drum_notes[drum_name].append(note)
-        
-    return drum_notes
+def is_drum_kit(instrument):
+    """Check if instrument is a drum kit"""
+    return instrument.get('family', '').lower() == 'drums'
