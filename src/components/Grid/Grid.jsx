@@ -18,7 +18,7 @@ import { SortableItem } from './SortableItems';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
 import './Grid.css';
 
-const Grid = ({ midiData }) => {
+const Grid = ({ midiData, onArrangementChange }) => {
   // 1. Process MIDI data first
   const processedData = useMemo(() => {
     const trackData = [];
@@ -117,18 +117,46 @@ const Grid = ({ midiData }) => {
   );
 
   // Handlers
+  // const handleDragEnd = (event) => {
+  //   const { active, over } = event;
+
+  //   if (active.id !== over.id) {
+  //     setItems((items) => {
+  //       const oldIndex = items.findIndex((item) => item.id === active.id);
+  //       const newIndex = items.findIndex((item) => item.id === over.id);
+
+  //       if (oldIndex !== -1 && newIndex !== -1) {
+  //         return arrayMove(items, oldIndex, newIndex);
+  //       }
+  //       return items;
+  //     });
+  //   }
+  // };
+
   const handleDragEnd = (event) => {
     const { active, over } = event;
-
     if (active.id !== over.id) {
       setItems((items) => {
         const oldIndex = items.findIndex((item) => item.id === active.id);
         const newIndex = items.findIndex((item) => item.id === over.id);
+        const newItems = arrayMove(items, oldIndex, newIndex);
 
-        if (oldIndex !== -1 && newIndex !== -1) {
-          return arrayMove(items, oldIndex, newIndex);
-        }
-        return items;
+        // Modify arrangement to match backend expectations
+        const arrangement = newItems.reduce((acc, item, index) => {
+          if (!item.isEmpty) {
+            // Extract the actual identifier without the prefix
+            const id = item.id.replace(/^(track-|drum-)/, '');
+            acc[id] = {
+              position: index,
+              row: Math.floor(index / columnCount),
+              column: index % columnCount,
+              type: item.id.startsWith('drum-') ? 'drum' : 'track',
+            };
+          }
+          return acc;
+        }, {});
+        onArrangementChange(arrangement);
+        return newItems;
       });
     }
   };
@@ -234,6 +262,7 @@ Grid.propTypes = {
       })
     ),
   }).isRequired,
+  onArrangementChange: PropTypes.func.isRequired,
 };
 
 export default Grid;
