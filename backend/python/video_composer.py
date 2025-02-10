@@ -41,7 +41,7 @@ logging.basicConfig(
 class VideoComposer:
     # Class-level constants
     FRAME_RATE = 30
-    CHUNK_DURATION = 10
+    CHUNK_DURATION = 4
     OVERLAP_DURATION = 0.3
     CROSSFADE_DURATION = 0.25
     VOLUME_MULTIPLIERS = {
@@ -49,7 +49,36 @@ class VideoComposer:
         'instruments': 1.5
     }
 
-    def __init__(self, processed_videos_dir, midi_data, output_path):
+    # def __init__(self, processed_videos_dir, midi_data, output_path):
+    #     """Initialize VideoComposer with proper path handling"""
+    #     try:
+    #         logging.info("=== VideoComposer Initialization ===")
+    #         logging.info(f"Received MIDI data structure: {list(midi_data.keys())}")
+    #         logging.info(f"Grid arrangement from MIDI: {midi_data.get('gridArrangement')}")
+
+    #         self.processed_videos_dir = Path(processed_videos_dir)
+    #         # Fix uploads path - go up two levels to /backend/uploads
+    #         self.uploads_dir = Path(processed_videos_dir).parent.parent.parent / "uploads"
+    #         logging.info(f"Setting uploads directory: {self.uploads_dir}")
+    #         # Verify uploads directory exists
+    #         if not self.uploads_dir.exists():
+    #             raise ValueError(f"Uploads directory not found: {self.uploads_dir}")
+    #         self.output_path = output_path
+    #         self.midi_data = midi_data
+    #         self._setup_paths(processed_videos_dir, output_path)
+    #         self.midi_data = midi_data
+    #         self._process_midi_data(midi_data)
+    #         self._setup_track_configuration()
+    #          # Log track information
+    #         logging.info(f"Regular tracks: {len(self.tracks)}")
+    #         logging.info(f"Drum tracks: {len(self.drum_tracks)}")
+    #         for track in self.drum_tracks:
+    #             logging.info(f"Drum track found: {track.get('instrument', {}).get('name')}")
+                
+    #     except Exception as e:
+    #         logging.error(f"VideoComposer init error: {str(e)}")
+    #         raise
+    def __init__(self, processed_videos_dir, midi_data, output_path, use_av1=False):
         """Initialize VideoComposer with proper path handling"""
         try:
             logging.info("=== VideoComposer Initialization ===")
@@ -57,19 +86,16 @@ class VideoComposer:
             logging.info(f"Grid arrangement from MIDI: {midi_data.get('gridArrangement')}")
 
             self.processed_videos_dir = Path(processed_videos_dir)
-            # Fix uploads path - go up two levels to /backend/uploads
             self.uploads_dir = Path(processed_videos_dir).parent.parent.parent / "uploads"
             logging.info(f"Setting uploads directory: {self.uploads_dir}")
-            # Verify uploads directory exists
             if not self.uploads_dir.exists():
                 raise ValueError(f"Uploads directory not found: {self.uploads_dir}")
             self.output_path = output_path
+            self.use_av1 = use_av1
             self.midi_data = midi_data
             self._setup_paths(processed_videos_dir, output_path)
-            self.midi_data = midi_data
             self._process_midi_data(midi_data)
             self._setup_track_configuration()
-             # Log track information
             logging.info(f"Regular tracks: {len(self.tracks)}")
             logging.info(f"Drum tracks: {len(self.drum_tracks)}")
             for track in self.drum_tracks:
@@ -740,15 +766,32 @@ class VideoComposer:
                 codec='h264_nvenc',
                 audio_codec='aac',
                 preset='fast',  # Faster encoding
-                ffmpeg_params=[
-                    "-vsync", "1",
-                    "-async", "1",
-                    "-b:v", "5M",
-                    "-tile-columns", "2",
-                    "-threads", "8",
-                    "-row-mt", "1"
-                ]
-            )
+            #     ffmpeg_params=[
+            #         "-vsync", "1",
+            #         "-async", "1",
+            #         "-b:v", "5M",
+            #         "-tile-columns", "2",
+            #         "-threads", "8",
+            #         "-row-mt", "1"
+            #     ]
+            # )
+                 ffmpeg_params=[
+                        # Enables GPU-accelerated decoding if supported
+                        '-hwaccel', 'cuda',
+                        '-hwaccel_output_format', 'cuda',
+
+                        # Helps keep video/frame alignment in sync
+                        '-vsync', '1',
+                        '-async', '1',
+
+                        # Adjust to make full use of GPU hardware
+                        '-b:v', '5M',
+                        '-maxrate', '10M',
+                        '-bufsize', '10M',
+                        '-rc', 'vbr',
+                        '-tune', 'hq',
+                    ]
+                )
             
             return str(chunk_path)
             
@@ -915,24 +958,39 @@ class VideoComposer:
                         else:
                             self._process_instrument_chunk(track_idx, track, chunk_notes, grid, active_clips, start_time, end_time)
 
-                    # Create chunk after processing ALL tracks
+                     # Create chunk after processing ALL tracks
                     chunk = clips_array(grid)
                     chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+                    
+                    # Configure encoding parameters
+                    ffmpeg_params = [
+                        
+                        # Video encoding settings
+                        "-c:v", "h264_nvenc",
+                        "-preset", "fast",  # Valid NVENC presets are: p1-p7 (p1 is fastest)
+                        "-tune", "hq",
+                        "-b:v", "5M",
+                        "-maxrate", "10M",
+                        "-bufsize", "10M",
+                        "-rc", "vbr",
+                        "-profile:v", "high",
+                        "-pix_fmt", "yuv420p",
+                        
+                        # Audio settings
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        
+                        # Container settings
+                        "-movflags", "faststart"
+                    ]
+
                     chunk.write_videofile(
                         str(chunk_path),
-                        fps=30,
-                        codec='h264_nvenc',
-                        audio_codec='aac',
-                        preset='fast',
-                        ffmpeg_params=[
-                            "-vsync", "1",
-                            "-async", "1",
-                            "-b:v", "5M",
-                            "-maxrate", "10M",
-                            "-bufsize", "10M",
-                            "-rc", "vbr",
-                            "-tune", "hq"
-                        ]
+                        fps=self.FRAME_RATE,
+                        codec="h264_nvenc",
+                        audio_codec="aac",
+                        ffmpeg_params=ffmpeg_params,
+                        logger=None
                     )
                     
                     return str(chunk_path)
@@ -947,6 +1005,7 @@ class VideoComposer:
                             clip.close()
                         except:
                             pass
+                    gc.collect()
 
             # Process chunks in parallel
             with ThreadPoolExecutor() as executor:
@@ -976,6 +1035,110 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Composition error: {str(e)}")
             return None
+        
+    # def create_composition(self):
+    #     try:
+    #         full_chunks, final_duration = self.calculate_chunk_lengths()
+    #         total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+    #         rows, cols = self.get_track_layout()
+            
+    #         chunk_files = []
+    #         self.chunk_clips = {}  # Initialize as instance variable
+
+    #         def process_chunk(chunk_idx):
+    #             try:
+    #                 active_clips = []
+    #                 start_time = chunk_idx * 10
+    #                 end_time = start_time + (final_duration if chunk_idx == full_chunks else 10)
+                    
+    #                 logging.info(f"\nProcessing Chunk {chunk_idx}")
+    #                 logging.info(f"Time Range: {start_time}-{end_time}")
+                    
+    #                 grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                                 color=(0,0,0), 
+    #                                 duration=end_time - start_time) 
+    #                         for _ in range(cols)] 
+    #                         for _ in range(rows)]
+
+    #                 # Process tracks within the chunk
+    #                 for track_idx, track in enumerate(self.midi_data['tracks']):
+    #                     if not track.get('notes'):
+    #                         continue
+                            
+    #                     chunk_notes = [
+    #                         note for note in track.get('notes', [])
+    #                         if start_time <= float(note['time']) < end_time
+    #                     ]
+
+    #                     if not chunk_notes:
+    #                         continue
+
+    #                     if is_drum_kit(track.get('instrument', {})):
+    #                         self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
+    #                     else:
+    #                         self._process_instrument_chunk(track_idx, track, chunk_notes, grid, active_clips, start_time, end_time)
+
+    #                 # Create chunk after processing ALL tracks
+    #                 chunk = clips_array(grid)
+    #                 chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+    #                 chunk.write_videofile(
+    #                     str(chunk_path),
+    #                     fps=30,
+    #                     codec='h264_nvenc',
+    #                     audio_codec='aac',
+    #                     preset='fast',
+    #                     ffmpeg_params=[
+    #                         "-vsync", "1",
+    #                         "-async", "1",
+    #                         "-b:v", "5M",
+    #                         "-maxrate", "10M",
+    #                         "-bufsize", "10M",
+    #                         "-rc", "vbr",
+    #                         "-tune", "hq"
+    #                     ]
+    #                 )
+                    
+    #                 return str(chunk_path)
+
+    #             except Exception as e:
+    #                 logging.error(f"Error processing chunk: {str(e)}")
+    #                 return None
+    #             finally:
+    #                 # Clean up clips
+    #                 for clip in active_clips:
+    #                     try:
+    #                         clip.close()
+    #                     except:
+    #                         pass
+
+    #         # Process chunks in parallel
+    #         with ThreadPoolExecutor() as executor:
+    #             future_to_chunk = {
+    #                 executor.submit(process_chunk, chunk_idx): chunk_idx 
+    #                 for chunk_idx in range(total_chunks)
+    #             }
+                
+    #             # Wait for all chunks to complete
+    #             for future in as_completed(future_to_chunk):
+    #                 chunk_idx = future_to_chunk[future]
+    #                 try:
+    #                     chunk_path = future.result()
+    #                     if chunk_path:
+    #                         chunk_files.append(chunk_path)
+    #                         logging.info(f"Chunk {chunk_idx} completed: {chunk_path}")
+    #                 except Exception as e:
+    #                     logging.error(f"Chunk {chunk_idx} failed: {str(e)}")
+
+    #         # Sort and combine chunks
+    #         if chunk_files:
+    #             chunk_files.sort(key=lambda x: int(x.split('chunk_')[1].split('.')[0]))
+    #             return self._combine_chunks(chunk_files)
+            
+    #         return None
+
+    #     except Exception as e:
+    #         logging.error(f"Composition error: {str(e)}")
+    #         return None
 
     # def create_composition(self):
     #     try:
@@ -1169,7 +1332,61 @@ def calculate_chunk_lengths(self, midi_data):
             return None, None
             
 
-def compose_from_processor_output(processor_result, output_path):
+# def compose_from_processor_output(processor_result, output_path):
+#     try:
+#         base_dir = processor_result['processed_videos_dir']
+#         logging.info(f"Using base directory: {base_dir}")
+#         logging.info("=== Processing Grid Arrangement ===")
+#         logging.info(f"Grid arrangement in processor result: {processor_result.get('tracks', {}).get('gridArrangement')}")
+
+#         logging.info("=== Processing Grid Arrangement ===")
+#         logging.info(f"Processor result tracks: {processor_result['tracks']}")
+#         logging.info(f"Grid arrangement in tracks: {processor_result['tracks'].get('gridArrangement')}")
+        
+#         # Store validated tracks
+#         validated_tracks = {}
+        
+#         if 'tracks' in processor_result['processed_files']:
+#             for instrument, data in processor_result['processed_files']['tracks'].items():
+#                 try:
+#                     track_idx = data.get('track_idx', 0)
+                    
+#                     # Keep full instrument name, just remove track index if present
+#                     instrument_parts = instrument.split('_')
+#                     if instrument_parts[-1].isdigit():
+#                         instrument_name = '_'.join(instrument_parts[:-1])
+#                     else:
+#                         instrument_name = instrument
+                    
+#                     # Construct track path preserving full instrument name
+#                     track_path = os.path.join(
+#                         base_dir, 
+#                         f"track_{track_idx}_{instrument_name}"
+#                     )
+                    
+#                     logging.info(f"Checking track {track_idx}: {instrument_name}")
+#                     logging.info(f"Track path: {track_path}")
+                    
+#                     if os.path.exists(track_path):
+#                         validated_tracks[instrument] = {
+#                             'base_path': track_path,
+#                             'instrument_name': instrument_name,  # Store full name
+#                             'notes': data.get('notes', {})
+#                         }
+                        
+#                 except Exception as e:
+#                     logging.error(f"Error processing track {instrument}: {str(e)}")
+#                     continue
+
+#         composer = VideoComposer(base_dir, processor_result['tracks'], output_path)
+#         composer.tracks = validated_tracks
+#         return composer.create_composition()
+
+#     except Exception as e:
+#         logging.error(f"Error in video composition: {str(e)}")
+#         raise
+
+def compose_from_processor_output(processor_result, output_path, use_av1=False):
     try:
         base_dir = processor_result['processed_videos_dir']
         logging.info(f"Using base directory: {base_dir}")
@@ -1215,7 +1432,7 @@ def compose_from_processor_output(processor_result, output_path):
                     logging.error(f"Error processing track {instrument}: {str(e)}")
                     continue
 
-        composer = VideoComposer(base_dir, processor_result['tracks'], output_path)
+        composer = VideoComposer(base_dir, processor_result['tracks'], output_path, use_av1=use_av1)
         composer.tracks = validated_tracks
         return composer.create_composition()
 
