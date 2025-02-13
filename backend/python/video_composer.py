@@ -19,7 +19,7 @@ from moviepy.editor import ( # type: ignore
     concatenate_videoclips
 )
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from utils import normalize_instrument_name, midi_to_note
 from drum_utils import (
     DRUM_NOTES,
@@ -915,7 +915,7 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Error creating note clip: {e}")
             return None
-        
+
     def create_composition(self):
         try:
             full_chunks, final_duration = self.calculate_chunk_lengths()
@@ -928,8 +928,8 @@ class VideoComposer:
             def process_chunk(chunk_idx):
                 try:
                     active_clips = []
-                    start_time = chunk_idx * 10
-                    end_time = start_time + (final_duration if chunk_idx == full_chunks else 10)
+                    start_time = chunk_idx * self.CHUNK_DURATION
+                    end_time = start_time + (final_duration if chunk_idx == full_chunks else self.CHUNK_DURATION)
                     
                     logging.info(f"\nProcessing Chunk {chunk_idx}")
                     logging.info(f"Time Range: {start_time}-{end_time}")
@@ -958,12 +958,15 @@ class VideoComposer:
                         else:
                             self._process_instrument_chunk(track_idx, track, chunk_notes, grid, active_clips, start_time, end_time)
 
-                     # Create chunk after processing ALL tracks
+                    # Create chunk after processing ALL tracks
                     chunk = clips_array(grid)
                     chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
                     
                     # Configure encoding parameters
                     ffmpeg_params = [
+                        # Input hardware acceleration
+                        "-hwaccel", "cuda",
+                        "-hwaccel_output_format", "cuda",
                         
                         # Video encoding settings
                         "-c:v", "h264_nvenc",
@@ -1008,7 +1011,7 @@ class VideoComposer:
                     gc.collect()
 
             # Process chunks in parallel
-            with ThreadPoolExecutor() as executor:
+            with ProcessPoolExecutor() as executor:
                 future_to_chunk = {
                     executor.submit(process_chunk, chunk_idx): chunk_idx 
                     for chunk_idx in range(total_chunks)
@@ -1034,7 +1037,126 @@ class VideoComposer:
 
         except Exception as e:
             logging.error(f"Composition error: {str(e)}")
-            return None
+            return None  
+    # def create_composition(self):
+    #     try:
+    #         full_chunks, final_duration = self.calculate_chunk_lengths()
+    #         total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+    #         rows, cols = self.get_track_layout()
+            
+    #         chunk_files = []
+    #         self.chunk_clips = {}  # Initialize as instance variable
+
+    #         def process_chunk(chunk_idx):
+    #             try:
+    #                 active_clips = []
+    #                 start_time = chunk_idx * 10
+    #                 end_time = start_time + (final_duration if chunk_idx == full_chunks else 10)
+                    
+    #                 logging.info(f"\nProcessing Chunk {chunk_idx}")
+    #                 logging.info(f"Time Range: {start_time}-{end_time}")
+                    
+    #                 grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                                 color=(0,0,0), 
+    #                                 duration=end_time - start_time) 
+    #                         for _ in range(cols)] 
+    #                         for _ in range(rows)]
+
+    #                 # Process tracks within the chunk
+    #                 for track_idx, track in enumerate(self.midi_data['tracks']):
+    #                     if not track.get('notes'):
+    #                         continue
+                            
+    #                     chunk_notes = [
+    #                         note for note in track.get('notes', [])
+    #                         if start_time <= float(note['time']) < end_time
+    #                     ]
+
+    #                     if not chunk_notes:
+    #                         continue
+
+    #                     if is_drum_kit(track.get('instrument', {})):
+    #                         self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
+    #                     else:
+    #                         self._process_instrument_chunk(track_idx, track, chunk_notes, grid, active_clips, start_time, end_time)
+
+    #                  # Create chunk after processing ALL tracks
+    #                 chunk = clips_array(grid)
+    #                 chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+                    
+    #                 # Configure encoding parameters
+    #                 ffmpeg_params = [
+                        
+    #                     # Video encoding settings
+    #                     "-c:v", "h264_nvenc",
+    #                     "-preset", "fast",  # Valid NVENC presets are: p1-p7 (p1 is fastest)
+    #                     "-tune", "hq",
+    #                     "-b:v", "5M",
+    #                     "-maxrate", "10M",
+    #                     "-bufsize", "10M",
+    #                     "-rc", "vbr",
+    #                     "-profile:v", "high",
+    #                     "-pix_fmt", "yuv420p",
+                        
+    #                     # Audio settings
+    #                     "-c:a", "aac",
+    #                     "-b:a", "192k",
+                        
+    #                     # Container settings
+    #                     "-movflags", "faststart"
+    #                 ]
+
+    #                 chunk.write_videofile(
+    #                     str(chunk_path),
+    #                     fps=self.FRAME_RATE,
+    #                     codec="h264_nvenc",
+    #                     audio_codec="aac",
+    #                     ffmpeg_params=ffmpeg_params,
+    #                     logger=None
+    #                 )
+                    
+    #                 return str(chunk_path)
+
+    #             except Exception as e:
+    #                 logging.error(f"Error processing chunk: {str(e)}")
+    #                 return None
+    #             finally:
+    #                 # Clean up clips
+    #                 for clip in active_clips:
+    #                     try:
+    #                         clip.close()
+    #                     except:
+    #                         pass
+    #                 gc.collect()
+
+    #         # Process chunks in parallel
+    #         with ThreadPoolExecutor() as executor:
+    #             future_to_chunk = {
+    #                 executor.submit(process_chunk, chunk_idx): chunk_idx 
+    #                 for chunk_idx in range(total_chunks)
+    #             }
+                
+    #             # Wait for all chunks to complete
+    #             for future in as_completed(future_to_chunk):
+    #                 chunk_idx = future_to_chunk[future]
+    #                 try:
+    #                     chunk_path = future.result()
+    #                     if chunk_path:
+    #                         chunk_files.append(chunk_path)
+    #                         logging.info(f"Chunk {chunk_idx} completed: {chunk_path}")
+    #                 except Exception as e:
+    #                     logging.error(f"Chunk {chunk_idx} failed: {str(e)}")
+
+    #         # Sort and combine chunks
+    #         if chunk_files:
+    #             chunk_files.sort(key=lambda x: int(x.split('chunk_')[1].split('.')[0]))
+    #             return self._combine_chunks(chunk_files)
+            
+    #         return None
+
+    #     except Exception as e:
+    #         logging.error(f"Composition error: {str(e)}")
+    #         return None
         
     # def create_composition(self):
     #     try:
