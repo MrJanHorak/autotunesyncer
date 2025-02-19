@@ -7,6 +7,8 @@ from typing import Dict, Optional, Tuple
 import math
 import shutil
 import subprocess
+import time
+import cProfile
 
 # Third-party imports
 import numpy as np
@@ -44,15 +46,13 @@ class EncoderQueue:
         with self.semaphore:
             logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
             try:
-                result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
-                if result.returncode != 0:
-                    logging.error(f"EncoderQueue: Command failed: {result.stderr}")
-                return result
+                gc.collect()  # Force garbage collection
+                return subprocess.run(ffmpeg_command, capture_output=True, text=True)
             except Exception as e:
                 logging.error(f"EncoderQueue: Error executing command: {str(e)}")
                 raise
 
-encoder_queue = EncoderQueue(max_concurrent=2) 
+encoder_queue = EncoderQueue(max_concurrent=4) 
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,7 +65,7 @@ logging.basicConfig(
 class VideoComposer:
 
     FRAME_RATE = 30
-    CHUNK_DURATION = 10
+    CHUNK_DURATION = 4
     OVERLAP_DURATION = 0.3
     CROSSFADE_DURATION = 0.25
     VOLUME_MULTIPLIERS = {
@@ -281,6 +281,20 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Error getting chunk notes: {e}")
             return self._calculate_default_layout()
+        
+    def preprocess_video(video_path, output_path):
+        """Convert uploaded video once to optimal format"""
+        convert_cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-c:v', 'h264_nvenc',
+            '-preset', 'p4',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',
+            output_path
+        ]
+        return encoder_queue.encode(convert_cmd)
 
     def calculate_chunk_lengths(self):
         """Calculate chunk lengths for composition"""
@@ -303,10 +317,14 @@ class VideoComposer:
                     note_end = float(note['time']) + float(note['duration'])
                     last_note_time = max(last_note_time, note_end)
             
-            # Calculate chunks
-            full_chunks = int(last_note_time // self.CHUNK_DURATION)
+            # Calculate chunks based on exact duration needed
+            full_chunks = math.floor(last_note_time / self.CHUNK_DURATION)
             final_chunk = last_note_time % self.CHUNK_DURATION
             
+            # Only include final chunk if there's actual content
+            if final_chunk < 0.1:  # If less than 0.1s remaining, ignore final chunk
+                final_chunk = 0
+                
             logging.info(f"Total duration: {last_note_time:.2f}s")
             logging.info(f"Full chunks: {full_chunks}")
             logging.info(f"Final chunk: {final_chunk:.2f}s")
@@ -528,6 +546,9 @@ class VideoComposer:
             self.chunk_clips = {}  # Initialize as instance variable
 
             def process_chunk(chunk_idx):
+                pr = cProfile.Profile()
+                pr.enable() 
+                start_time = time.time()
                 try:
                     active_clips = []
                     start_time = chunk_idx * 10
@@ -564,29 +585,36 @@ class VideoComposer:
                     chunk = clips_array(grid)
                     chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
                     chunk.write_videofile(
-                        str(chunk_path),
-                        fps=30,
-                        codec='h264_nvenc',
-                        audio_codec='aac',
-                        preset='fast',
-                        ffmpeg_params=[
-                            "-vsync", "1",
-                            "-async", "1",
-                            "-b:v", "5M",
-                            "-maxrate", "10M",
-                            "-bufsize", "10M",
-                            "-rc", "vbr",
-                            "-tune", "hq"
-                        ]
+                    str(chunk_path),
+                    fps=30,
+                    codec='h264_nvenc',  
+                    preset='p4',
+                    ffmpeg_params=[
+                        "-vsync", "cfr",
+                        "-c:v", "h264_nvenc",
+                        "-b:v", "5M",
+                        "-maxrate", "8M",
+                        "-bufsize", "8M",
+                        "-rc", "vbr",
+                        "-qmin", "0",
+                        "-qmax", "51",
+                        "-profile:v", "high",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart"
+                        ] 
                     )
-                    
+                        
                     return str(chunk_path)
 
                 except Exception as e:
                     logging.error(f"Error processing chunk: {str(e)}")
                     return None
                 finally:
-                    # Clean up clips
+                    end_time = time.time()  # End timing
+                    duration = end_time - start_time
+                    logging.info(f"Chunk {chunk_idx} processing time: {duration:.2f} seconds")
+                    pr.disable()  # Stop profiling
+                    pr.print_stats(sort='time')
                     for clip in active_clips:
                         try:
                             clip.close()
@@ -625,53 +653,53 @@ class VideoComposer:
     def _combine_chunks(self, chunk_files):
         """Combine chunks with precise timing"""
         try:
-            # Validate grid arrangement
-            if 'gridArrangement' in self.midi_data:
-                arrangement = self.midi_data['gridArrangement']
-                if not all('position' in pos for pos in arrangement.values()):
-                    logging.warning("Invalid grid arrangement, using default layout")
-                    self.midi_data['gridArrangement'] = {}
             clips = []
             first_clip = VideoFileClip(chunk_files[0])
             target_fps = first_clip.fps
-            frame_duration = 1.0 / target_fps
             
+            total_duration = 0
             for i, chunk_file in enumerate(chunk_files):
                 clip = VideoFileClip(chunk_file)
                 
-                # Ensure exact frame boundary alignment
-                if i > 0:
-                    trim_start = self.OVERLAP_DURATION
-                    frame_count = int(round(trim_start * target_fps))
-                    precise_trim = frame_count * frame_duration
-                    clip = clip.subclipped(precise_trim)
+                # Trim to exact content duration
+                if clip.duration > self.CHUNK_DURATION:
+                    clip = clip.subclipped(0, self.CHUNK_DURATION)
                     
-                    # Ensure audio sync
-                    # clip = clip.with_start(i * 10.0 - self.CROSSFADE_DURATION)
-                    clip = clip.with_start(i * 10.0 - self.CROSSFADE_DURATION)
+                # Only add crossfade between chunks, not at start
+                if i > 0:
+                    clip = clip.with_start(total_duration - self.CROSSFADE_DURATION)
+                else:
+                    clip = clip.with_start(0)
+                    
+                total_duration = clip.end
                 clips.append(clip)
-                
-            # Use precise frame-based concatenation
+
             final = concatenate_videoclips(
                 clips,
                 method="compose",
                 padding=-self.CROSSFADE_DURATION
             )
             
-            # Write with strict timing parameters
+            # Write with precise duration
             final.write_videofile(
                 str(self.output_path),
                 fps=target_fps,
                 codec='h264_nvenc',
-                audio_codec='aac',
-                preset='fast',
+                preset='p4',
                 ffmpeg_params=[
-                    "-vsync", "cfr",     # Constant frame rate
-                    "-b:v", "5M",        # Video bitrate
-                    "-movflags", "+faststart"  # Web playback optimization
+                    "-vsync", "cfr",
+                    "-c:v", "h264_nvenc",
+                    "-b:v", "5M",
+                    "-maxrate", "8M",
+                    "-bufsize", "8M",
+                    "-rc", "vbr",
+                    "-qmin", "0",
+                    "-qmax", "51",
+                    "-profile:v", "high",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart"
                 ]
             )
-            
             return self.output_path
             
         except Exception as e:
