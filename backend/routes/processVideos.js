@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { runPythonProcessor } from '../js/pythonBridge.js';
+import { runPythonProcessor, preprocessVideo } from '../js/pythonBridge.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -36,13 +36,6 @@ const upload = multer({
   },
 });
 
-// const upload = multer({
-//   dest: 'uploads/',
-//   limits: {
-//     fileSize: 50 * 1024 * 1024 // 50MB limit
-//   }
-// });
-
 router.post('/', upload.any(), async (req, res) => {
   try {
     console.log('Received request files:', req.files);
@@ -65,22 +58,49 @@ router.post('/', upload.any(), async (req, res) => {
     const videos = {};
     const videoFiles = req.files.filter((f) => f.fieldname === 'videos');
 
+    // Get grid dimensions from MIDI data for sizing
+    const gridArrangement = midiData.gridArrangement;
+    const maxRow = Math.max(
+      ...Object.values(gridArrangement).map((pos) => pos.row)
+    );
+    const maxCol = Math.max(
+      ...Object.values(gridArrangement).map((pos) => pos.column)
+    );
+    const targetWidth = Math.floor(1920 / (maxCol + 1));
+    const targetHeight = Math.floor(1080 / (maxRow + 1));
+
+    // Process each video
+    for (const file of videoFiles) {
+      const instrumentName = path.parse(file.originalname).name;
+      const originalPath = file.path;
+      const processedPath = path.join(
+        uploadsDir, 
+        `processed_${path.basename(file.path)}`
+      );
+
+      try {
+        // Preprocess video with correct dimensions
+        await preprocessVideo(
+          originalPath, 
+          processedPath, 
+          `${targetWidth}x${targetHeight}`
+        );
+        
+        // videos[instrumentName] = processedPath;
+        videos[instrumentName] = path.resolve(processedPath);
+        console.log(`Processed ${instrumentName}: ${processedPath}`);
+        
+        // Cleanup original
+        fs.unlinkSync(originalPath);
+      } catch (err) {
+        console.error(`Error preprocessing ${instrumentName}:`, err);
+        throw err;
+      }
+    }
+
     if (videoFiles.length === 0) {
       throw new Error('No video files found in upload');
     }
-
-    // videoFiles.forEach(file => {
-    //   const instrumentName = path.parse(file.originalname).name;
-    //   videos[instrumentName] = file.path;
-    //   console.log(`Processed video for ${instrumentName}: ${file.path}`);
-    // });
-
-    videoFiles.forEach((file) => {
-      const instrumentName = path.parse(file.originalname).name;
-      // Store absolute path
-      videos[instrumentName] = path.resolve(file.path);
-      console.log(`Processed video for ${instrumentName}: ${file.path}`);
-    });
 
     console.log('Final video mapping:', videos);
 
@@ -108,24 +128,6 @@ router.post('/', upload.any(), async (req, res) => {
       result: result,
     });
 
-    // // Process videos
-    // const processedVideos = await runPythonProcessor(midiData, videos);
-
-    // // Cleanup temporary files
-    // req.files.forEach(file => {
-    //   try {
-    //     if (fs.existsSync(file.path)) {
-    //       fs.unlinkSync(file.path);
-    //     }
-    //   } catch (err) {
-    //     console.error(`Error cleaning up file ${file.path}:`, err);
-    //   }
-    // });
-
-    // res.json({
-    //   success: true,
-    //   videos: processedVideos
-    // });
   } catch (error) {
     console.error('Video processing error:', error);
 
