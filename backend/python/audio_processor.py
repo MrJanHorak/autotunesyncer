@@ -45,7 +45,7 @@ class EncoderQueue:
                 logging.error(f"EncoderQueue: Error executing command: {str(e)}")
                 raise
 
-encoder_queue = EncoderQueue(max_concurrent=2) 
+encoder_queue = EncoderQueue(max_concurrent=4) 
 
 def is_drum_kit(instrument):
     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
