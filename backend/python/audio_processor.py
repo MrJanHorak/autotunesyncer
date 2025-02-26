@@ -1,23 +1,27 @@
 import librosa
 import numpy as np
-from scipy import signal
-import soundfile as sf
+# from scipy import signal
+# import soundfile as sf
 import os
 import tempfile
 import shutil
 import mimetypes
 import logging
-from pathlib import Path
+# from pathlib import Path
 import uuid
 import json
 import subprocess
 import argparse
 from utils import normalize_instrument_name, midi_to_note
 from drum_utils import is_drum_kit, get_drum_groups
-import concurrent.futures 
+# import concurrent.futures 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
-import threading
+# from queue import Queue
+# import threading
+import time
+from collections import OrderedDict
+from processing_utils import ProgressTracker, encoder_queue
+import mmap
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,24 +32,51 @@ logging.basicConfig(
     ]
 )
 
-class EncoderQueue:
-    def __init__(self, max_concurrent=2):
-        self.queue = Queue()
-        self.semaphore = threading.Semaphore(max_concurrent)
+class CacheManager:
+    def __init__(self, max_size=1024*1024*1024):  # 1GB default
+        self.max_size = max_size
+        self.current_size = 0
+        self.cache = OrderedDict()
+        self.last_access = {}
         
-    def encode(self, ffmpeg_command):
-        with self.semaphore:
-            logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
-            try:
-                result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
-                if result.returncode != 0:
-                    logging.error(f"EncoderQueue: Command failed: {result.stderr}")
-                return result
-            except Exception as e:
-                logging.error(f"EncoderQueue: Error executing command: {str(e)}")
-                raise
+    def add(self, key, data, size):
+        while self.current_size + size > self.max_size:
+            self._evict_oldest()
+        self.cache[key] = data
+        self.last_access[key] = time.time()
+        self.current_size += size
+        
+    def get(self, key):
+        if key in self.cache:
+            self.last_access[key] = time.time()
+            return self.cache[key]
+        return None
+        
+    def _evict_oldest(self):
+        if not self.cache:
+            return
+        oldest = min(self.last_access.items(), key=lambda x: x[1])[0]
+        del self.cache[oldest]
+        del self.last_access[oldest]
 
-encoder_queue = EncoderQueue(max_concurrent=4) 
+# class EncoderQueue:
+#     def __init__(self, max_concurrent=2):
+#         self.queue = Queue()
+#         self.semaphore = threading.Semaphore(max_concurrent)
+        
+#     def encode(self, ffmpeg_command):
+#         with self.semaphore:
+#             logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
+#             try:
+#                 result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
+#                 if result.returncode != 0:
+#                     logging.error(f"EncoderQueue: Command failed: {result.stderr}")
+#                 return result
+#             except Exception as e:
+#                 logging.error(f"EncoderQueue: Error executing command: {str(e)}")
+#                 raise
+
+# encoder_queue = EncoderQueue(max_concurrent=4) 
 
 def is_drum_kit(instrument):
     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
@@ -148,6 +179,8 @@ class AudioVideoProcessor:
         self.video_cache = {}
         self.audio_cache = {}
         self.processed_notes_cache = {}
+        self.batch_size = 4
+        self.mmap_cache = {}
     
     def setup_temp_directory(self):
         """Create temporary directories for processing files"""
@@ -195,6 +228,28 @@ class AudioVideoProcessor:
                 self.video_cache[video_path] = temp_video
                 
         return self.video_cache.get(video_path)
+
+    def process_notes_batch(self, notes_batch, video_path):
+        """Process multiple notes in parallel"""
+        results = []
+        with ThreadPoolExecutor(max_workers=self.batch_size) as executor:
+            futures = []
+            for note in notes_batch:
+                output_path = os.path.join(
+                    self.videos_dir,
+                    f"note_{note}_{midi_to_note(note)}.mp4"
+                )
+                if not os.path.exists(output_path):
+                    futures.append(
+                        executor.submit(
+                            self.create_tuned_video,
+                            video_path,
+                            note,
+                            output_path
+                        )
+                    )
+            results.extend([f.result() for f in as_completed(futures)])
+        return results
 
     def _cache_base_audio(self, video_path):
         """Extract and cache base audio"""
@@ -408,44 +463,36 @@ class AudioVideoProcessor:
 
     def create_tuned_video(self, video_path, target_note, output_path, nvenc=True):
         try:
-            # Check if we already processed this note
-            cache_key = f"{video_path}_{target_note}"
-            if cache_key in self.processed_notes_cache:
-                shutil.copy2(self.processed_notes_cache[cache_key], output_path)
-                return output_path
+            # Validate input video exists
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"Input video not found: {video_path}")
+                
+            # Check if output directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Get cached video and audio
+            # Get cached video and audio with validation
             cached_video = self._cache_base_video(video_path)
+            if not cached_video or not os.path.exists(cached_video):
+                raise Exception("Failed to cache video")
+                
             cached_audio = self._cache_base_audio(video_path)
-            
-            if not cached_video or not cached_audio:
-                raise Exception("Failed to cache video or audio")
+            if not cached_audio or not os.path.exists(cached_audio):
+                raise Exception("Failed to cache audio")
 
-            # Get or analyze pitch
-            if isinstance(self.audio_cache.get(video_path), str):
-                # If it's just the path, analyze and update cache
-                current_pitch = self.analyze_pitch(cached_audio)
-                self.audio_cache[video_path] = {
-                    'audio_path': cached_audio,
-                    'pitch': current_pitch
-                }
-            elif isinstance(self.audio_cache.get(video_path), dict):
-                current_pitch = self.audio_cache[video_path]['pitch']
-            else:
-                current_pitch = self.analyze_pitch(cached_audio)
-                self.audio_cache[video_path] = {
-                    'audio_path': cached_audio,
-                    'pitch': current_pitch
-                }
+            # Add pitch analysis
+            current_pitch = self.analyze_pitch(cached_audio)
+            target_note = int(target_note)  # Ensure target note is integer
+            pitch_shift = target_note - current_pitch  # Calculate pitch shift
+
+            logging.info(f"Pitch analysis - Current: {current_pitch:.1f}, Target: {target_note}, Shift: {pitch_shift:.1f}")
+
+            # Skip processing if pitch shift is minimal
+            if abs(pitch_shift) < 0.1:
+                logging.info("Pitch shift too small, copying original video")
+                shutil.copy2(video_path, output_path)
+                return output_path
 
             # Process pitch shift
-            pitch_shift = target_note - current_pitch
-            if abs(pitch_shift) < 0.1:
-                shutil.copy2(video_path, output_path)
-                self.processed_notes_cache[cache_key] = output_path
-                return output_path
-
-            # Pitch shift the cached audio
             tuned_audio = os.path.join(self.temp_dir, f"tuned_{target_note}_{os.path.basename(video_path)}.wav")
             rubberband_cmd = [
                 'rubberband',
@@ -456,28 +503,38 @@ class AudioVideoProcessor:
                 cached_audio,
                 tuned_audio
             ]
-            result = subprocess.run(rubberband_cmd)
-            
-            # Combine cached video with tuned audio
+            result = subprocess.run(rubberband_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f"Rubberband failed: {result.stderr}")
+
+            # Create final video with proper GPU parameters
             ffmpeg_combine = [
                 'ffmpeg', '-y',
+                '-hwaccel', 'cuda',
                 '-i', cached_video,
                 '-i', tuned_audio,
-                '-c:v', 'copy',
-                '-c:a', 'aac',
-                '-strict', 'experimental',
+                '-c:v', 'h264_nvenc',
+                '-preset', 'p4',
+                '-b:v', '5M',
+                '-maxrate', '8M',
+                '-bufsize', '10M',
+                '-tune', 'hq',
+                '-rc', 'vbr',
                 output_path
             ]
             result = encoder_queue.encode(ffmpeg_combine)
-            
-            # Cache the result
-            if result.returncode == 0:
-                self.processed_notes_cache[cache_key] = output_path
-                logging.info(f"Successfully created tuned video for note {target_note}")
-                return output_path
+            if result.returncode != 0:
+                raise Exception(f"FFmpeg combine failed: {result.stderr}")
+                
+            return output_path
 
         except Exception as e:
-            logging.error(f"Error in create_tuned_video: {str(e)}")
+            logging.error(f"Error creating tuned video for note {target_note}: {str(e)}")
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except:
+                    pass
             raise
 
 def process_drum_track(video_path, output_path):
@@ -589,13 +646,19 @@ def process_track_videos(tracks, videos, processor):
                                     output_path
                                 )
                             )
+            total_notes = sum(len(notes) for notes in instrument_notes.values())
+            progress = ProgressTracker(total_notes)
                             
             # Wait for all note processing to complete
             for future in as_completed(futures):
                 try:
-                    future.result()
+                    result = future.result()
+                    progress.update(result is not None)
                 except Exception as e:
+                    progress.update(False)
                     logging.error(f"Note processing failed: {str(e)}")
+                finally:
+                    progress.close()
 
         # Create track entries for instruments
         for track_id, track_info in track_note_map.items():
