@@ -73,6 +73,12 @@ class GPUManager:
             self.streams = [torch.cuda.Stream() for _ in range(4)]
             logging.info(f"Initialized {len(self.streams)} CUDA streams")
 
+
+    def get_next_stream(self):
+        stream = self.streams[self.current_stream]
+        self.current_stream = (self.current_stream + 1) % len(self.streams)
+        return stream
+
     def _get_next_stream(self):
         """Get next available CUDA stream in round-robin fashion"""
         if not self.has_gpu or not self.streams:
