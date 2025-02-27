@@ -1,26 +1,22 @@
 import librosa
 import numpy as np
-# from scipy import signal
-# import soundfile as sf
 import os
 import tempfile
 import shutil
-import mimetypes
 import logging
-# from pathlib import Path
 import uuid
 import json
 import subprocess
 import argparse
 from utils import normalize_instrument_name, midi_to_note
 from drum_utils import is_drum_kit, get_drum_groups
-# import concurrent.futures 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-# from queue import Queue
-# import threading
 import time
 from collections import OrderedDict
-from processing_utils import ProgressTracker, encoder_queue
+import threading
+from processing_utils import ProgressTracker, encoder_queue, GPUManager
+from video_utils import run_ffmpeg_command, encode_video, validate_video
+from threading import RLock
 import mmap
 
 logging.basicConfig(
@@ -32,19 +28,27 @@ logging.basicConfig(
     ]
 )
 
+gpu_manager = GPUManager()
 class CacheManager:
     def __init__(self, max_size=1024*1024*1024):  # 1GB default
+        self.lock = RLock()
         self.max_size = max_size
         self.current_size = 0
         self.cache = OrderedDict()
         self.last_access = {}
+        self.mmap_cache = {}
         
     def add(self, key, data, size):
-        while self.current_size + size > self.max_size:
-            self._evict_oldest()
-        self.cache[key] = data
-        self.last_access[key] = time.time()
-        self.current_size += size
+        with self.lock:
+            if size > self.max_size * 0.25:  # Use mmap for large files
+                self.mmap_cache[key] = self._create_mmap(data)
+                return
+                
+            while self.current_size + size > self.max_size:
+                self._evict_oldest()
+                
+            self.cache[key] = data
+            self.current_size += size
         
     def get(self, key):
         if key in self.cache:
@@ -52,31 +56,20 @@ class CacheManager:
             return self.cache[key]
         return None
         
+    # def _evict_oldest(self):
+    #     if not self.cache:
+    #         return
+    #     oldest = min(self.last_access.items(), key=lambda x: x[1])[0]
+    #     del self.cache[oldest]
+    #     del self.last_access[oldest]
+
     def _evict_oldest(self):
         if not self.cache:
             return
-        oldest = min(self.last_access.items(), key=lambda x: x[1])[0]
-        del self.cache[oldest]
-        del self.last_access[oldest]
+        _, oldest_data = self.cache.popitem(last=False)
+        self.current_size -= len(oldest_data)
 
-# class EncoderQueue:
-#     def __init__(self, max_concurrent=2):
-#         self.queue = Queue()
-#         self.semaphore = threading.Semaphore(max_concurrent)
-        
-#     def encode(self, ffmpeg_command):
-#         with self.semaphore:
-#             logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
-#             try:
-#                 result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
-#                 if result.returncode != 0:
-#                     logging.error(f"EncoderQueue: Command failed: {result.stderr}")
-#                 return result
-#             except Exception as e:
-#                 logging.error(f"EncoderQueue: Error executing command: {str(e)}")
-#                 raise
 
-# encoder_queue = EncoderQueue(max_concurrent=4) 
 
 def is_drum_kit(instrument):
     """Check if instrument is a drum kit based on name or channel 10 (9 in zero-based)"""
@@ -105,15 +98,12 @@ def convert_video_format(input_path, output_path):
         probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
         logging.info(f"Input video probe: {probe_result.stdout}")
         
-        # First check input file
         if not os.path.exists(input_path):
-            raise Exception(f"Input file does not exist: {input_path}")
+            raise FileNotFoundError(f"Input file not found: {input_path}")
             
-        # Log file size
         input_size = os.path.getsize(input_path)
         logging.info(f"Input file size: {input_size} bytes")
         
-        # Convert video with detailed logging
         convert_cmd = [
             'ffmpeg',
             '-y',
@@ -126,39 +116,19 @@ def convert_video_format(input_path, output_path):
             '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',
-            '-progress', 'pipe:1',  # Show progress
+            '-progress', 'pipe:1',
             output_path
         ]
         
         logging.info(f"Running FFmpeg command: {' '.join(convert_cmd)}")
-        # result = subprocess.run(convert_cmd, capture_output=True, text=True)
-        result = encoder_queue.encode(convert_cmd)
+        run_ffmpeg_command(convert_cmd)
+        validate_video(output_path)
         
-        if result.returncode != 0:
-            logging.error(f"FFmpeg stderr: {result.stderr}")
-            logging.error(f"FFmpeg stdout: {result.stdout}")
-            raise Exception(f"FFmpeg conversion failed: {result.stderr}")
-
-        validate_cmd = [
-            'ffmpeg',
-            '-v', 'error',
-            '-i', output_path,
-            '-f', 'null',
-            '-'
-        ]
-        # validate_result = subprocess.run(validate_cmd, capture_output=True, text=True)
-        validate_result = encoder_queue.encode(validate_cmd)
-
-        if validate_result.stderr:
-            logging.error(f"Output validation failed: {validate_result.stderr}")
-            raise Exception("Output video validation failed")
-            
         if os.path.exists(output_path):
-            output_size = os.path.getsize(output_path)
-            logging.info(f"Conversion successful. Output size: {output_size} bytes")
+            logging.info(f"Video conversion successful: {output_path}")
         else:
-            raise Exception("Output file was not created")
-            
+            raise FileNotFoundError(f"Output file not found: {output_path}")
+        
         return output_path
         
     except Exception as e:
@@ -290,176 +260,6 @@ class AudioVideoProcessor:
         except:
             return False
     
-    # def create_tuned_video(self, video_path, target_note, output_path, nvenc=True):
-    #     try:
-    #         logging.info(f"Processing video: {video_path} for note: {target_note}")
-    #         target_note = int(target_note)
-
-    #         # Add file type logging
-    #         file_ext = os.path.splitext(video_path)[1]
-    #         logging.info(f"Input video format: {file_ext}")
-            
-    #         # Create paths in temp directory
-    #         temp_audio = os.path.join(self.temp_dir, f"temp_{os.path.basename(video_path)}.wav")
-    #         tuned_audio = os.path.join(self.temp_dir, f"tuned_{os.path.basename(video_path)}.wav")
-    #         temp_video = os.path.join(self.temp_dir, f"temp_video_{os.path.basename(video_path)}.mp4")
-
-    #         # Check if NVENC is available
-    #         try:
-    #             nvenc_check = subprocess.run(
-    #                 ['ffmpeg', '-hide_banner', '-encoders'],
-    #                 capture_output=True,
-    #                 text=True
-    #             )
-    #             nvenc_available = 'h264_nvenc' in nvenc_check.stdout
-    #         except:
-    #             nvenc_available = False
-            
-    #         # Choose encoder based on availability
-    #         video_codec = 'h264_nvenc' if nvenc_available and nvenc else 'libx264'
-    #         encoder_params = []
-            
-    #         if video_codec == 'h264_nvenc':
-    #             encoder_params.extend([
-    #                 '-rc', 'vbr',              # Variable bitrate mode
-    #                 '-rc-lookahead', '32',     # Look-ahead frames
-    #                 '-gpu', '0',               # Use first GPU
-    #                 '-tune', 'hq',             # High quality tune
-    #                 '-profile:v', 'high'       # High profile
-    #             ])
-    #         else:
-    #             encoder_params.extend([
-    #                 '-preset', 'medium',        # Balance speed/quality
-    #                 '-profile:v', 'high',      # High profile
-    #                 '-tune', 'film'            # Film tune for general content
-    #             ])
-
-    #         # First transcode video
-    #         ffmpeg_transcode = [
-    #             'ffmpeg', '-y',
-    #             '-i', video_path,
-    #             '-c:v', video_codec,
-    #             *encoder_params,
-    #             '-crf', '23',
-    #             '-pix_fmt', 'yuv420p',
-    #             '-an',  # No audio
-    #             temp_video
-    #         ]
-            
-    #         logging.info(f"Transcoding video using {video_codec}: {' '.join(ffmpeg_transcode)}")
-    #         # result = subprocess.run(ffmpeg_transcode, capture_output=True, text=True)
-    #         result = encoder_queue.encode(ffmpeg_transcode)
-            
-    #         if result.returncode != 0:
-    #             if video_codec == 'h264_nvenc':
-    #                 logging.warning("NVENC failed, falling back to CPU encoding")
-    #                 return self.create_tuned_video(video_path, target_note, output_path, nvenc=False)
-    #             else:
-    #                 raise Exception(f"FFmpeg transcode failed: {result.stderr}")
-
-    #         # Extract audio
-    #         ffmpeg_extract = [
-    #             'ffmpeg', '-y',
-    #             '-i', video_path,
-    #             '-vn',
-    #             '-acodec', 'pcm_s16le',
-    #             '-ar', '44100',
-    #             '-ac', '1',
-    #             temp_audio
-    #         ]
-            
-    #         logging.info(f"Extracting audio: {' '.join(ffmpeg_extract)}")
-    #         # result = subprocess.run(ffmpeg_extract, capture_output=True, text=True)
-    #         result = encoder_queue.encode(ffmpeg_extract)
-    #         if result.returncode != 0:
-    #             raise Exception(f"FFmpeg extract failed: {result.stderr}")
-
-    #         # Analyze and shift pitch
-    #         current_pitch = self.analyze_pitch(temp_audio)
-    #         pitch_shift = target_note - current_pitch
-            
-    #         logging.info(f"Current pitch: {current_pitch:.1f}, Target: {target_note}, Shift: {pitch_shift:.1f} semitones")
-            
-    #         if abs(pitch_shift) < 0.1:
-    #             logging.info("Pitch shift too small, copying original video")
-    #             ffmpeg_transcode = [
-    #                 'ffmpeg', '-y',
-    #                 '-i', video_path,
-    #                 '-c:v', video_codec,
-    #                 *encoder_params,
-    #                 '-crf', '23',
-    #                 '-pix_fmt', 'yuv420p',
-    #                 '-an',  # No audio
-    #                 output_path
-    #             ]
-    #             subprocess.run(ffmpeg_transcode, check=True)
-                
-    #             # Validate output
-    #             if not self.validate_output_video(output_path):
-    #                 raise Exception("Output validation failed")
-                    
-    #             return output_path
-            
-    #         rubberband_cmd = [
-    #             'rubberband',
-    #             '-p', f"{pitch_shift:.3f}",  
-    #             '-t', '1.0',                  
-    #             '-F',                         
-    #             '-c', '4',                    
-    #             '-2',                        
-    #             temp_audio,
-    #             tuned_audio
-    #         ]
-
-    #         logging.info(f"Pitch shifting with rubberband: {' '.join(rubberband_cmd)}")
-    #         result = subprocess.run(rubberband_cmd, capture_output=True, text=True)
-    #         if result.returncode != 0:
-    #             raise Exception(f"Rubberband failed: {result.stderr}")
-
-    #         ffmpeg_combine = [
-    #             'ffmpeg', '-y',
-    #             '-i', temp_video,
-    #             '-i', tuned_audio,
-    #             '-c:v', video_codec,  
-    #             '-preset', 'fast',
-    #             '-crf', '23',
-    #             '-c:a', 'aac',
-    #             '-strict', 'experimental',
-    #             '-b:a', '320k',
-    #             '-pix_fmt', 'yuv420p',
-    #             '-map', '0:v:0',
-    #             '-map', '1:a:0',
-    #             '-movflags', '+faststart',
-    #             output_path
-    #         ]
-            
-    #         logging.info(f"Combining video and audio: {' '.join(ffmpeg_combine)}")
-    #         # result = subprocess.run(ffmpeg_combine, capture_output=True, text=True)
-    #         result = encoder_queue.encode(ffmpeg_combine)
-    #         if result.returncode != 0:
-    #             raise Exception(f"FFmpeg combine failed: {result.stderr}")
-
-    #         # Validate output
-    #         if not self.validate_output_video(output_path):
-    #             raise Exception("Output validation failed")
-                
-    #         return output_path
-
-    #     except Exception as e:
-    #         logging.error(f"Error processing video: {str(e)}")
-    #         for temp_file in [temp_audio, tuned_audio, temp_video]:
-    #             if temp_file and os.path.exists(temp_file):
-    #                 try:
-    #                     os.remove(temp_file)
-    #                 except:
-    #                     pass
-    #         if os.path.exists(output_path):
-    #             try:
-    #                 os.remove(output_path)
-    #             except:
-    #                 pass
-    #         logging.error(f"Error in create_tuned_video: {str(e)}")
-    #         raise
 
     def create_tuned_video(self, video_path, target_note, output_path, nvenc=True):
         try:
@@ -540,7 +340,6 @@ class AudioVideoProcessor:
 def process_drum_track(video_path, output_path):
     """Process and validate drum track video"""
     try:
-        # Convert to consistent format first
         temp_output = output_path + '.temp.mp4'
         convert_cmd = [
             'ffmpeg', '-y',
@@ -555,32 +354,60 @@ def process_drum_track(video_path, output_path):
             temp_output
         ]
         
-        # subprocess.run(convert_cmd, check=True)
-        result = encoder_queue.encode(convert_cmd)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, convert_cmd)
+        run_ffmpeg_command(convert_cmd)
+        validate_video(temp_output)
         
-        validate_cmd = [
-            'ffmpeg',
-            '-v', 'error',
-            '-i', temp_output,
-            '-f', 'null',
-            '-'
-        ]
-        
-        # subprocess.run(validate_cmd, check=True)
-        result = encoder_queue.encode(validate_cmd)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(result.returncode, validate_cmd)
-        
-        shutil.move(temp_output, output_path)
-        return True
+        os.rename(temp_output, output_path)
+        logging.info(f"Drum track processed successfully: {output_path}")
         
     except Exception as e:
-        logging.error(f"Failed to process drum track: {str(e)}")
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
-        return False
+        logging.error(f"Error processing drum track: {str(e)}")
+        raise
+
+# def process_drum_track(video_path, output_path):
+#     """Process and validate drum track video"""
+#     try:
+#         # Convert to consistent format first
+#         temp_output = output_path + '.temp.mp4'
+#         convert_cmd = [
+#             'ffmpeg', '-y',
+#             '-i', video_path,
+#             '-c:v', 'h264_nvenc',
+#             '-preset', 'fast',
+#             '-crf', '23',
+#             '-c:a', 'aac',
+#             '-strict', 'experimental',
+#             '-b:a', '192k',
+#             '-pix_fmt', 'yuv420p',
+#             temp_output
+#         ]
+        
+#         # subprocess.run(convert_cmd, check=True)
+#         result = encoder_queue.encode(convert_cmd)
+#         if result.returncode != 0:
+#             raise subprocess.CalledProcessError(result.returncode, convert_cmd)
+        
+#         validate_cmd = [
+#             'ffmpeg',
+#             '-v', 'error',
+#             '-i', temp_output,
+#             '-f', 'null',
+#             '-'
+#         ]
+        
+#         # subprocess.run(validate_cmd, check=True)
+#         result = encoder_queue.encode(validate_cmd)
+#         if result.returncode != 0:
+#             raise subprocess.CalledProcessError(result.returncode, validate_cmd)
+        
+#         shutil.move(temp_output, output_path)
+#         return True
+        
+#     except Exception as e:
+#         logging.error(f"Failed to process drum track: {str(e)}")
+#         if os.path.exists(temp_output):
+#             os.remove(temp_output)
+#         return False
     
 def process_track_videos(tracks, videos, processor):
     """Process video tracks with provided processor instance"""
