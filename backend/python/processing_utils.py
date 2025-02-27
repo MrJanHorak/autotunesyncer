@@ -5,9 +5,11 @@ import logging
 import threading
 import subprocess
 import os
+import torch
 from typing import Optional
 from queue import Queue
 from contextlib import contextmanager
+from threading import RLock
 
 
 class GPUManager:
@@ -17,6 +19,20 @@ class GPUManager:
         self.has_gpu = False
         self.handle = None
         self.pynvml_available = False
+        self.streams = []
+        if torch.cuda.is_available():
+            self.streams = [torch.cuda.Stream() for _ in range(4)]
+        self.current_stream = 0
+        
+        # Try to initialize CUDA
+        try:
+            self.has_gpu = torch.cuda.is_available() and torch.version.cuda is not None
+            if self.has_gpu:
+                self._init_streams()
+        except:
+            self.has_gpu = False
+            logging.warning("CUDA initialization failed, falling back to CPU")
+            
         self._init_gpu()
     
     def _init_gpu(self) -> bool:
@@ -44,6 +60,27 @@ class GPUManager:
               logging.warning("No GPU detected, falling back to CPU processing")
               self.has_gpu = False
               return False
+          
+    def get_stream(self):
+        # Implement CUDA stream management
+        if self.has_gpu:
+            return self._get_next_stream()
+        return None
+
+    def _init_streams(self):
+        """Initialize CUDA streams"""
+        if self.has_gpu:
+            self.streams = [torch.cuda.Stream() for _ in range(4)]
+            logging.info(f"Initialized {len(self.streams)} CUDA streams")
+
+    def _get_next_stream(self):
+        """Get next available CUDA stream in round-robin fashion"""
+        if not self.has_gpu or not self.streams:
+            return None
+        
+        stream = self.streams[self.current_stream]
+        self.current_stream = (self.current_stream + 1) % len(self.streams)
+        return stream
 
     def get_gpu_memory(self) -> int:
         """Get GPU memory in MB"""
@@ -76,18 +113,25 @@ class GPUManager:
             return None
 
     @contextmanager
-    def gpu_context(self, ffmpeg_command: list):
-        """Context manager for GPU-aware FFmpeg encoding"""
-        if self.has_gpu:
-            ffmpeg_command.extend([
-                "-hwaccel", "cuda",
-                "-hwaccel_output_format", "cuda"
-            ])
+    def gpu_context(self):
+        """Context manager for GPU operations with fallback"""
+        if not self.has_gpu:
+            yield None
+            return
+            
+        stream = self._get_next_stream()
         try:
-            yield
+            if stream:
+                with torch.cuda.stream(stream):
+                    yield stream
+            else:
+                yield None
+        except Exception as e:
+            logging.warning(f"GPU context error: {e}, falling back to CPU")
+            yield None
         finally:
-            pass  # Cleanup if needed
-
+            # Only synchronize if CUDA is actually available
+            torch.cuda.current_stream().synchronize()
 
 class ProgressTracker:
     def __init__(self, total_notes):
@@ -112,6 +156,7 @@ class ProgressTracker:
 # Replace your current EncoderQueue with:
 class EncoderQueue:
     def __init__(self, max_concurrent=2):
+        self.lock = RLock()
         cpu_count = os.cpu_count() or 2
         self.max_concurrent = max_concurrent
         self.queue = Queue()
@@ -140,7 +185,9 @@ class EnhancedEncoderQueue(EncoderQueue):
         super().__init__(max_concurrent=max_workers)
         self.gpu_locks = [threading.Lock() for _ in range(max(1, gpu_count))]
         self.gpu_memory = self._get_gpu_memory()
-        self.concurrent_streams = min(8, self.gpu_memory // 1024)  # 2GB per stream
+        self.concurrent_streams = min(8, self.gpu_memory // 1024)
+        self.result_cache = {}
+        self.max_cache_size = 100
         
     def _get_gpu_count(self):
         try:
@@ -160,20 +207,44 @@ class EnhancedEncoderQueue(EncoderQueue):
             return info.total // (1024*1024)  # Convert to MB
         except:
             return 4096  # Default 4GB
+        
+    
+    def _get_cache_key(self, ffmpeg_command):
+        """Generate a cache key from ffmpeg command"""
+        # Only use input/output files and core parameters for cache key
+        key_parts = []
+        skip_next = False
+        for i, part in enumerate(ffmpeg_command):
+            if skip_next:
+                skip_next = False
+                continue
+            if part.startswith('-'):
+                skip_next = True
+                continue
+            if part.endswith(('.mp4', '.wav')):
+                key_parts.append(part)
+        return '_'.join(key_parts)
             
     def encode(self, ffmpeg_command):
-        with self.semaphore:
-            logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
-            try:
-                # Use GPU manager context
-                with self.gpu_manager.gpu_context(ffmpeg_command):
-                    result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
-                    if result.returncode != 0:
-                        logging.error(f"EncoderQueue: Command failed: {result.stderr}")
-                    return result
-            except Exception as e:
-                logging.error(f"EncoderQueue: Error executing command: {str(e)}")
-                raise
+        try:
+            cache_key = self._get_cache_key(ffmpeg_command)
+            if cache_key in self.result_cache:
+                return self.result_cache[cache_key]
+                
+            with self.semaphore:
+                logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
+                try:
+                    with self.gpu_manager.gpu_context():
+                        result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            self.result_cache[cache_key] = result
+                        return result
+                except Exception as e:
+                    logging.error(f"EncoderQueue: Error executing command: {str(e)}")
+                    raise
+        except Exception as e:
+            logging.error(f"Encoding error: {str(e)}")
+            raise
             
     def _get_available_gpu(self):
         try:

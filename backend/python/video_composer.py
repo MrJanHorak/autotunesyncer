@@ -1,5 +1,6 @@
 import os
 import gc
+import subprocess
 import sys
 import logging
 import traceback
@@ -7,13 +8,18 @@ import os.path
 from pathlib import Path
 import math
 import shutil
+import tempfile
 import cProfile
 import pstats
+import threading
+from threading import RLock
+import asyncio
 from pstats import SortKey
 from tqdm import tqdm
 
 # Third-party imports
 import numpy as np
+import torch
 
 from moviepy import (
     VideoFileClip,
@@ -40,6 +46,7 @@ from drum_utils import (
 
 from processing_utils import encoder_queue, GPUManager
 from get_system_metrics import get_system_metrics
+from video_utils import run_ffmpeg_command, encode_video, validate_video
 
 import mmap
 # from contextlib import ExitStack
@@ -55,7 +62,34 @@ logging.basicConfig(
     ],
     force=True
 )
-# Add this new class after your imports
+
+
+class GPUStreamManager:
+    def __init__(self):
+        self.streams = []
+        self._init_streams()
+    
+    def _init_streams(self):
+        if torch.cuda.is_available():
+            self.streams = [torch.cuda.Stream() for _ in range(4)]
+
+class ClipPool:
+    def __init__(self, max_size=8):
+        self.semaphore = threading.BoundedSemaphore(max_size)
+        self.clips = weakref.WeakSet()
+    
+    @contextmanager
+    def acquire(self):
+        self.semaphore.acquire()
+        try:
+            clip = None
+            yield clip
+        finally:
+            if clip:
+                clip.close()
+            self.semaphore.release()
+
+
 class MMAPHandler:
     def __init__(self):
         self.mapped_files = {}
@@ -150,7 +184,7 @@ class VideoComposer:
             self._process_midi_data(midi_data)
             self._setup_track_configuration()
             self.clip_manager = ClipManager()
-            self.chuck_cache = {}
+            self.chunk_cache = {}
             self.max_cached_chunks = 4
             self.metrics_log = []
             self.encoder_params = {
@@ -172,6 +206,9 @@ class VideoComposer:
             self.chunk_size = max(1, min(16, os.cpu_count()))  # Smaller chunk size
             self.max_workers = min(2, os.cpu_count())  # Limit workers
             self.use_gpu = True
+            self.lock = RLock()  # Add class-level lock
+            self.clip_pool = ClipPool(max_size=8)  # Add clip pool
+            self.max_cache_size = 1024 * 1024 * 100
              # Log track information
             logging.info(f"Regular tracks: {len(self.tracks)}")
             logging.info(f"Drum tracks: {len(self.drum_tracks)}")
@@ -181,6 +218,15 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"VideoComposer init error: {str(e)}")
             raise
+
+    def encode_video(self, cmd):
+        logging.info(f"Encoding video with command: {' '.join(cmd)}")
+        result = encode_video(cmd)
+        return result
+
+    def validate_video(self, output_path):
+        validate_video(output_path)
+
 
     def _log_metrics(self):
         """Log system metrics during processing"""
@@ -296,6 +342,11 @@ class VideoComposer:
             logging.warning(f"Invalid track type: {type(track)}")
             return {'notes': [], 'instrument': {}, 'isDrum': False}
         
+    def _create_mmap(self, data):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(data)
+            return mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        
    
     def _calculate_default_layout(self):
         """Calculate default grid layout"""
@@ -330,7 +381,28 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Error setting up track configuration: {e}")
             raise
-            
+
+    def encode_video(cmd):
+        logging.info(f"Encoding video with command: {' '.join(cmd)}")
+        result = encoder_queue.encode(cmd)
+        if result.returncode != 0:
+            logging.error(f"Encoding failed: {result.stderr}")
+            raise Exception(f"Encoding failed: {result.stderr}")
+        return result
+
+    def validate_video(output_path):
+        validate_cmd = [
+            'ffmpeg',
+            '-v', 'error',
+            '-i', output_path,
+            '-f', 'null',
+            '-'
+        ]
+        result = encoder_queue.encode(validate_cmd)
+        if result.returncode != 0:
+            logging.error(f"Validation failed: {result.stderr}")
+            raise Exception(f"Validation failed: {result.stderr}")
+        return result            
 
     def calculate_chunk_lengths(self):
         """Calculate chunk lengths for composition"""
@@ -531,201 +603,263 @@ class VideoComposer:
                 logging.warning(f"Note file not found: {note_file}")
     
 
+    async def _process_chunk_async(self, chunk_idx):
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            return await loop.run_in_executor(pool, self._process_chunk, chunk_idx)
+
+
+    # def _process_chunk(self, chunk_idx):
+    #     clips = []
+    #     active_clips = []  # Track currently active clips
+        
+    #     try:
+    #         start_time = chunk_idx * self.CHUNK_DURATION
+    #         end_time = start_time + (
+    #             self.final_duration if chunk_idx == self.full_chunks 
+    #             else self.CHUNK_DURATION
+    #         )
+    #         chunk_duration = end_time - start_time
+            
+    #         # Initialize grid with explicit durations
+    #         rows, cols = self.get_track_layout()
+    #         grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                         color=(0,0,0),
+    #                         duration=chunk_duration)
+    #                 for _ in range(cols)] 
+    #                 for _ in range(rows)]
+
+    #         # Process tracks in batches
+    #         for track_idx, track in enumerate(self.midi_data['tracks']):
+    #             chunk_notes = [
+    #                 note for note in track.get('notes', [])
+    #                 if start_time <= float(note['time']) < end_time
+    #             ]
+                
+    #             if not chunk_notes:
+    #                 continue
+
+    #             logging.info(f"Processing track {track_idx} with {len(chunk_notes)} notes")
+                
+    #             # Process in smaller batches
+    #             if is_drum_kit(track.get('instrument', {})):
+    #                 self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
+    #             else:
+    #                 self._process_instrument_chunk(
+    #                     track_idx, track, chunk_notes, grid, active_clips,
+    #                     start_time, end_time
+    #                 )
+
+    #         # Create chunk composition
+    #         chunk = clips_array(grid).with_duration(chunk_duration)
+    #         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            
+    #         # Write with GPU parameters
+    #         if self.gpu_manager.has_gpu:
+    #             ffmpeg_params=self.encoder_params['ffmpeg_params']
+    #         else:
+    #             ffmpeg_params = [
+    #                 "-c:v", "libx264",
+    #                 "-preset", "medium",
+    #                 "-crf", "23"
+    #             ]
+
+    #         chunk.write_videofile(
+    #             str(chunk_path),
+    #             fps=self.FRAME_RATE,
+    #             codec=self.encoder_params['codec'] if self.gpu_manager.has_gpu else 'libx264',
+    #             preset=self.encoder_params['preset'] if self.gpu_manager.has_gpu else 'medium',
+    #             ffmpeg_params=ffmpeg_params
+    #         )
+
+    #         validate_video(str(chunk_path))
+
+    #         # Don't close chunks yet - they're needed for combination
+    #         return str(chunk_path)
+
+    #     except Exception as e:
+    #         logging.error(f"Error processing chunk {chunk_idx}: {str(e)}", exc_info=True)
+    #         return None
+    #     finally:
+    #         # Only close active clips, not the final chunks
+    #         for clip in active_clips:
+    #             try:
+    #                 clip.close()
+    #             except:
+    #                 pass
 
     def _process_chunk(self, chunk_idx):
-        clips = []
-        active_clips = []  # Track currently active clips
-        try:
-            start_time = chunk_idx * self.CHUNK_DURATION
-            end_time = start_time + (
-                self.final_duration if chunk_idx == self.full_chunks 
-                else self.CHUNK_DURATION
-            )
-            chunk_duration = end_time - start_time
-            
-            # Initialize grid with explicit durations
-            rows, cols = self.get_track_layout()
-            grid = [[ColorClip(size=(1920//cols, 1080//rows), 
-                            color=(0,0,0),
-                            duration=chunk_duration)
-                    for _ in range(cols)] 
-                    for _ in range(rows)]
+        with self.lock:
+            clips = []
+            active_clips = []
 
-            # Process tracks in batches
-            for track_idx, track in enumerate(self.midi_data['tracks']):
-                chunk_notes = [
-                    note for note in track.get('notes', [])
-                    if start_time <= float(note['time']) < end_time
-                ]
+            try:
+                # Cache handling
+                cache_key = f"chunk_{chunk_idx}"
+                if cache_key in self.chunk_cache:
+                    return self.chunk_cache[cache_key]
+
+                # Calculate timing
+                start_time = chunk_idx * self.CHUNK_DURATION 
+                end_time = start_time + (
+                    self.final_duration if chunk_idx == self.full_chunks
+                    else self.CHUNK_DURATION
+                )
+                chunk_duration = end_time - start_time
+
+                # Initialize grid with explicit durations
+                rows, cols = self.get_track_layout()
+                grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+                                 color=(0,0,0),
+                                 duration=chunk_duration)
+                         for _ in range(cols)] 
+                         for _ in range(rows)]
                 
-                if not chunk_notes:
-                    continue
+                # Process tracks
+                for track_idx, track in enumerate(self.midi_data['tracks']):
+                    chunk_notes = [
+                        note for note in track.get('notes', [])
+                        if start_time <= float(note['time']) < end_time
+                    ]
+                    
+                    if not chunk_notes:
+                        continue
 
-                logging.info(f"Processing track {track_idx} with {len(chunk_notes)} notes")
-                
-                # Process in smaller batches
-                if is_drum_kit(track.get('instrument', {})):
-                    self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
-                else:
-                    self._process_instrument_chunk(
-                        track_idx, track, chunk_notes, grid, active_clips,
-                        start_time, end_time
-                    )
+                    if is_drum_kit(track.get('instrument', {})):
+                        self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
+                    else:
+                        self._process_instrument_chunk(
+                            track_idx, track, chunk_notes, grid, active_clips,
+                            start_time, end_time
+                        )
 
-            # Create chunk composition
-            chunk = clips_array(grid).with_duration(chunk_duration)
-            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-            
-            # Write with GPU parameters
-            if self.gpu_manager.has_gpu:
-                # ffmpeg_params = [
-                #     "-c:v", "h264_nvenc",
-                #     "-preset", "p4",
-                #     "-b:v", "5M",
-                #     "-maxrate", "8M",
-                #     "-bufsize", "10M",
-                #     "-tune", "hq",
-                #     "-rc", "vbr"
-                # ]
-                ffmpeg_params=self.encoder_params['ffmpeg_params']
-            else:
-                ffmpeg_params = [
-                    "-c:v", "libx264",
-                    "-preset", "medium",
-                    "-crf", "23"
-                ]
-
-            chunk.write_videofile(
-                str(chunk_path),
-                fps=self.FRAME_RATE,
-                codec=self.encoder_params['codec'] if self.gpu_manager.has_gpu else 'libx264',
-                preset=self.encoder_params['preset'] if self.gpu_manager.has_gpu else 'medium',
-                ffmpeg_params=ffmpeg_params
-            )
-
-            # Don't close chunks yet - they're needed for combination
-            return str(chunk_path)
-
-        except Exception as e:
-            logging.error(f"Error processing chunk {chunk_idx}: {str(e)}", exc_info=True)
-            return None
-        finally:
-            # Only close active clips, not the final chunks
-            for clip in active_clips:
+                # Encode chunk with proper error handling
                 try:
-                    clip.close()
-                except:
-                    pass
+                    with self.clip_pool.acquire():
+                        chunk = clips_array(grid).with_duration(chunk_duration)
+                        chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+                        
+                        ffmpeg_params = (
+                            self.encoder_params['ffmpeg_params'] 
+                            if self.gpu_manager.has_gpu
+                            else ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+                        )
+
+                        chunk.write_videofile(
+                            str(chunk_path),
+                            fps=self.FRAME_RATE,
+                            codec=self.encoder_params['codec'] if self.gpu_manager.has_gpu else 'libx264',
+                            preset=self.encoder_params['preset'] if self.gpu_manager.has_gpu else 'medium',
+                            ffmpeg_params=ffmpeg_params
+                        )
+
+                        if os.path.exists(str(chunk_path)):
+                            self.chunk_cache[cache_key] = str(chunk_path)
+                            return str(chunk_path)
+
+                except Exception as e:
+                    logging.error(f"Chunk encoding error: {e}")
+                    return None
+
+            except Exception as e:
+                logging.error(f"Error processing chunk {chunk_idx}: {str(e)}", exc_info=True)
+                return None
+
+            finally:
+                for clip in active_clips:
+                    try:
+                        clip.close()
+                    except:
+                        pass
 
         
     def create_composition(self):
         """Create final video composition by processing chunks in parallel"""
         profiler = cProfile.Profile()
         profiler.enable()
-
-        active_clips = []
-        chunk_files = []
-
+        
         try:
-            progress = None
+            # Initialize metrics and chunks
             self._log_metrics()
             self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
             total_chunks = self.full_chunks + (1 if self.final_duration > 0 else 0)
             
-            from processing_utils import ProgressTracker
+            # Setup progress tracking
             progress = ProgressTracker(total_chunks)
-            logging.info("Checking GPU availability...")
-            if self.gpu_manager.has_gpu:
-                gpu_memory = self.gpu_manager.get_gpu_memory()
-                logging.info(f"GPU detected with {gpu_memory}MB memory")
-            else:
-                logging.warning("No GPU detected, falling back to CPU encoding")
-            self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
-            total_chunks = self.full_chunks + (1 if self.final_duration > 0 else 0)
-            progress = ProgressTracker(total_chunks)
+            chunk_files = []
             
-            # Calculate optimal batch size
-            chunk_size = max(1, min(32, os.cpu_count() * 2))
-            batch_count = (total_chunks + chunk_size - 1) // chunk_size
+            # Configure batch processing
+            batch_size = 2  # Process two chunks at a time for better memory management
+            num_workers = min(2, os.cpu_count())  # Limit concurrent workers
             
-            logging.info(f"Creating composition with {total_chunks} chunks in {batch_count} batches")
-            logging.info(f"Batch size: {chunk_size}")
-            logging.info(f"Grid positions: {self.grid_positions}")
+            logging.info(f"Starting composition with {total_chunks} chunks")
+            logging.info(f"Using {num_workers} workers and batch size {batch_size}")
             
+            # Process chunks in batches
             with MMAPHandler() as mmap_handler:
-
-                # In create_composition method:
-                batch_size = 2  # Process two chunks at a time
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    for i in range(0, total_chunks, batch_size):
-                        batch_end = min(i + batch_size, total_chunks)
-                        current_batch = range(i, batch_end)
+                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    # Process chunks in smaller batches
+                    for batch_start in range(0, total_chunks, batch_size):
+                        batch_end = min(batch_start + batch_size, total_chunks)
+                        current_batch = range(batch_start, batch_end)
                         
+                        # Submit batch for processing
                         futures = [
-                            executor.submit(self._process_chunk, idx) 
+                            executor.submit(self._process_chunk, idx)
                             for idx in current_batch
                         ]
                         
+                        # Handle results as they complete
                         for future in as_completed(futures):
                             try:
-                                chunk_path = future.result()
-                                if chunk_path:
+                                if chunk_path := future.result():
                                     chunk_files.append(chunk_path)
                                     progress.update(True)
+                                else:
+                                    progress.update(False)
                             except Exception as e:
-                                progress.update(False)
                                 logging.error(f"Chunk processing failed: {e}")
+                                progress.update(False)
                         
-                        gc.collect()  # Force garbage collection between batches
-                    
-                    if chunk_files:
-                        return self._combine_chunks(chunk_files)
-                    return None
-                
-                self._log_metrics()
+                        # Force cleanup after each batch
+                        gc.collect()
+                        self._log_metrics()
+                        
+                        # Early exit if too many failures
+                        if progress.failed > total_chunks * 0.25:  # 25% failure threshold
+                            logging.error("Too many chunk processing failures")
+                            return None
 
-                if chunk_files:
-                    # Sort chunks by index
-                    chunk_files.sort(key=lambda x: int(x.split('chunk_')[1].split('.')[0]))
-                    return self._combine_chunks(chunk_files)
-
-                logging.error("No chunks were created")
-                return None
+            # Combine processed chunks
+            if chunk_files:
+                logging.info(f"Successfully processed {len(chunk_files)} chunks")
+                # Sort chunks by index before combining
+                chunk_files.sort(key=lambda x: int(Path(x).stem.split('_')[1]))
+                return self._combine_chunks(chunk_files)
+            
+            logging.error("No chunks were successfully processed")
+            return None
 
         except Exception as e:
             logging.error(f"Composition error: {e}")
             traceback.print_exc()
             return None
-
+            
         finally:
-            if progress:
+            if 'progress' in locals():
                 progress.close()
-            # Cleanup any remaining clips
+            
+            # Profile results
             profiler.disable()
             stats = pstats.Stats(profiler)
             stats.sort_stats(SortKey.CUMULATIVE)
-            stats.dump_stats('composition_profile.stats')
-
-             # Log summary of top operations
+            
+            # Save profile data
             with open('profile_summary.log', 'w') as stream:
                 stats.stream = stream
-                
-                # Print most time-consuming functions
-                logging.info("\n=== Performance Profile ===")
                 stats.sort_stats(SortKey.TIME).print_stats(20)
-                
-                # Print call relationships
-                logging.info("\n=== Call Relationships ===")
                 stats.sort_stats(SortKey.CALLS).print_callers(20)
-                
-                # Print cumulative time including subcalls
-                logging.info("\n=== Cumulative Time ===")
                 stats.sort_stats(SortKey.CUMULATIVE).print_stats(20)
-            for clip in active_clips:
-                try:
-                    clip.close()
-                except:
-                    pass
                
     def _combine_chunks(self, chunk_files):
         """Combine chunks with proper GPU memory utilization"""
