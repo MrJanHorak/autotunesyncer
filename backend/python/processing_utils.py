@@ -120,24 +120,30 @@ class GPUManager:
 
     @contextmanager
     def gpu_context(self):
-        """Context manager for GPU operations with fallback"""
+        """Context manager for GPU operations with proper cleanup"""
         if not self.has_gpu:
             yield None
             return
-            
-        stream = self._get_next_stream()
+
+        stream = None
         try:
+            stream = self._get_next_stream()
             if stream:
                 with torch.cuda.stream(stream):
                     yield stream
             else:
                 yield None
+                
         except Exception as e:
             logging.warning(f"GPU context error: {e}, falling back to CPU")
             yield None
+            
         finally:
-            # Only synchronize if CUDA is actually available
-            torch.cuda.current_stream().synchronize()
+            if stream and torch.cuda.is_available():
+                try:
+                    torch.cuda.current_stream().synchronize()
+                except Exception as e:
+                    logging.error(f"CUDA synchronization error: {e}")
 
 class ProgressTracker:
     def __init__(self, total_notes):
