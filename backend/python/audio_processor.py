@@ -331,7 +331,7 @@ class AudioVideoProcessor:
         except:
             return False
         
-    # In audio_processor.py
+    # In audio_processor.py - create_tuned_video method:
     def create_tuned_video(self, video_path, target_note, output_path, nvenc=True):
         try:
             # Validate input video exists
@@ -341,13 +341,18 @@ class AudioVideoProcessor:
             # Check if output directory exists
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-            # Get cached video (no audio needed anymore)
+            # Get cached video without audio
             cached_video = self._cache_base_video(video_path)
             if not cached_video or not os.path.exists(cached_video):
                 raise Exception("Failed to cache video")
+                
+            # Get cached audio 
+            cached_audio = self._cache_base_audio(video_path)
+            if not cached_audio or not os.path.exists(cached_audio):
+                raise Exception("Failed to cache audio")
 
             # Add pitch analysis
-            current_pitch = self.analyze_pitch(video_path)  # Analyze directly from video
+            current_pitch = self.analyze_pitch(cached_audio)  # Analyze from audio file
             target_note = int(target_note)  # Ensure target note is integer
             pitch_shift = target_note - current_pitch  # Calculate pitch shift
 
@@ -359,21 +364,34 @@ class AudioVideoProcessor:
                 shutil.copy2(video_path, output_path)
                 return output_path
 
-            # Create final video with rubberband filter
+            # Process pitch shift
+            tuned_audio = os.path.join(self.temp_dir, f"tuned_{target_note}_{os.path.basename(video_path)}.wav")
+            rubberband_cmd = [
+                'rubberband',
+                '-p', f"{pitch_shift:.3f}",
+                cached_audio,
+                tuned_audio
+            ]
+            result = subprocess.run(rubberband_cmd, check=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise Exception(f"Rubberband failed: {result.stderr}")
+
+            # Create final video with audio and video combined
             ffmpeg_combine = [
                 'ffmpeg', '-y',
                 '-hwaccel', 'cuda',
-                '-hwaccel_device', '0',  # Specify GPU device
-                '-i', cached_video,
-                '-af', f"rubberband=pitch={pitch_shift:.3f}",  # Apply rubberband filter
+                '-i', cached_video,   # Video without audio
+                '-i', tuned_audio,    # Separately processed audio
                 '-c:v', 'h264_nvenc',
                 '-preset', 'p4',
-                '-gpu', '0',  # Specify GPU device
+                '-gpu', '0',
                 '-b:v', '5M',
                 '-maxrate', '8M',
                 '-bufsize', '10M',
-                '-tune', 'hq',
+                '-tune', 'hq', 
                 '-rc', 'vbr',
+                '-c:a', 'aac',        # Audio codec 
+                '-b:a', '192k',       # Audio quality
                 output_path
             ]
             result = encoder_queue.encode(ffmpeg_combine)
@@ -381,7 +399,7 @@ class AudioVideoProcessor:
                 raise Exception(f"FFmpeg combine failed: {result.stderr}")
 
             return output_path
-
+        
         except Exception as e:
             logging.error(f"Error creating tuned video for note {target_note}: {str(e)}")
             if os.path.exists(output_path):
@@ -389,7 +407,67 @@ class AudioVideoProcessor:
                     os.remove(output_path)
                 except:
                     pass
-                raise
+            raise
+        
+    # # In audio_processor.py
+    # def create_tuned_video(self, video_path, target_note, output_path, nvenc=True):
+    #     try:
+    #         # Validate input video exists
+    #         if not os.path.exists(video_path):
+    #             raise FileNotFoundError(f"Input video not found: {video_path}")
+
+    #         # Check if output directory exists
+    #         os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    #         # Get cached video (no audio needed anymore)
+    #         cached_video = self._cache_base_video(video_path)
+    #         if not cached_video or not os.path.exists(cached_video):
+    #             raise Exception("Failed to cache video")
+
+    #         # Add pitch analysis
+    #         current_pitch = self.analyze_pitch(video_path)  # Analyze directly from video
+    #         target_note = int(target_note)  # Ensure target note is integer
+    #         pitch_shift = target_note - current_pitch  # Calculate pitch shift
+
+    #         logging.info(f"Pitch analysis - Current: {current_pitch:.1f}, Target: {target_note}, Shift: {pitch_shift:.1f}")
+
+    #         # Skip processing if pitch shift is minimal
+    #         if abs(pitch_shift) < 0.1:
+    #             logging.info("Pitch shift too small, copying original video")
+    #             shutil.copy2(video_path, output_path)
+    #             return output_path
+
+    #         # Create final video with rubberband filter
+    #         ffmpeg_combine = [
+    #             'ffmpeg', '-y',
+    #             '-hwaccel', 'cuda',
+    #             '-hwaccel_device', '0',  # Specify GPU device
+    #             '-i', cached_video,
+    #             '-af', f"rubberband=pitch={pitch_shift:.3f}",  # Apply rubberband filter
+    #             '-c:v', 'h264_nvenc',
+    #             '-preset', 'p4',
+    #             '-gpu', '0',  # Specify GPU device
+    #             '-b:v', '5M',
+    #             '-maxrate', '8M',
+    #             '-bufsize', '10M',
+    #             '-tune', 'hq',
+    #             '-rc', 'vbr',
+    #             output_path
+    #         ]
+    #         result = encoder_queue.encode(ffmpeg_combine)
+    #         if result.returncode != 0:
+    #             raise Exception(f"FFmpeg combine failed: {result.stderr}")
+
+    #         return output_path
+
+    #     except Exception as e:
+    #         logging.error(f"Error creating tuned video for note {target_note}: {str(e)}")
+    #         if os.path.exists(output_path):
+    #             try:
+    #                 os.remove(output_path)
+    #             except:
+    #                 pass
+    #             raise
     
 
     # def create_tuned_video(self, video_path, target_note, output_path, nvenc=True):
