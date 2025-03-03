@@ -49,6 +49,8 @@ from drum_utils import (
 from processing_utils import encoder_queue, GPUManager
 from get_system_metrics import get_system_metrics
 from video_utils import run_ffmpeg_command, encode_video, validate_video
+from cuda_compositing import CudaVideoProcessor
+import traceback
 
 import mmap
 # from contextlib import ExitStack
@@ -802,9 +804,131 @@ class VideoComposer:
     #             except:
     #                 pass
 
+    # def _process_chunk(self, chunk_idx):
+    #     """Process chunk using GPU acceleration"""
+    #     from cuda_compositing import CudaVideoProcessor
+    #     active_clips = []
+
+    #     try:
+    #         with self.chunk_cache_lock:
+    #             cache_key = f"chunk_{chunk_idx}"
+    #             if cache_key in self.chunk_cache:
+    #                 return self.chunk_cache[cache_key]
+
+    #         # Calculate timing
+    #         start_time = chunk_idx * self.CHUNK_DURATION 
+    #         end_time = start_time + (
+    #             self.final_duration if chunk_idx == self.full_chunks
+    #             else self.CHUNK_DURATION
+    #         )
+    #         chunk_duration = end_time - start_time
+
+    #         # Initialize grid
+    #         rows, cols = self.get_track_layout()
+    #         grid = [[ColorClip(size=(1920//cols, 1080//rows), 
+    #                         color=(0,0,0),
+    #                         duration=chunk_duration)
+    #                 for _ in range(cols)] 
+    #                 for _ in range(rows)]
+                    
+    #         # Process tracks
+    #         for track_idx, track in enumerate(self.midi_data['tracks']):
+    #             chunk_notes = [
+    #                 note for note in track.get('notes', [])
+    #                 if start_time <= float(note['time']) < end_time
+    #             ]
+                
+    #             if not chunk_notes:
+    #                 continue
+
+    #             if is_drum_kit(track.get('instrument', {})):
+    #                 self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
+    #             else:
+    #                 self._process_instrument_chunk(
+    #                     track_idx, track, chunk_notes, grid, active_clips,
+    #                     start_time, end_time
+    #                 )
+
+    #         # Create final chunk using GPU acceleration
+    #         try:
+    #             cuda_processor = CudaVideoProcessor()
+    #             chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+                
+    #             # Choose compositing method based on option
+    #             use_alpha = True  # Set to False to use non-alpha method
+                
+    #             if use_alpha:
+    #                 # Process chunk with alpha compositing
+    #                 cuda_processor.process_chunk(
+    #                     grid=grid,
+    #                     rows=rows, 
+    #                     cols=cols,
+    #                     duration=chunk_duration,
+    #                     fps=self.FRAME_RATE,
+    #                     output_path=str(chunk_path),
+    #                     frame_size=(1080, 1920)
+    #                 )
+    #             else:
+    #                 # Process chunk without alpha compositing
+    #                 cuda_processor.process_grid_no_alpha(
+    #                     grid=grid,
+    #                     rows=rows, 
+    #                     cols=cols,
+    #                     duration=chunk_duration,
+    #                     fps=self.FRAME_RATE,
+    #                     output_path=str(chunk_path),
+    #                     frame_size=(1080, 1920)
+    #                 )
+
+    #             if os.path.exists(str(chunk_path)):
+    #                 result = str(chunk_path)
+    #                 with self.chunk_cache_lock:
+    #                     self.chunk_cache[cache_key] = result
+    #                 return result
+
+    #         except Exception as e:
+    #             logging.error(f"GPU chunk processing error: {e}", exc_info=True)
+    #             logging.warning("Falling back to CPU processing...")
+                
+    #             # Fallback to original method
+    #             with self.clip_pool.acquire():
+    #                 chunk = clips_array(grid).with_duration(chunk_duration)
+    #                 chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+                    
+    #                 ffmpeg_params = (
+    #                     self.encoder_params['ffmpeg_params'] 
+    #                     if self.gpu_manager.has_gpu
+    #                     else ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+    #                 )
+
+    #                 chunk.write_videofile(
+    #                     str(chunk_path),
+    #                     fps=self.FRAME_RATE,
+    #                     codec=self.encoder_params['codec'] if self.gpu_manager.has_gpu else 'libx264',
+    #                     preset=self.encoder_params['preset'] if self.gpu_manager.has_gpu else 'medium',
+    #                     ffmpeg_params=ffmpeg_params
+    #                 )
+
+    #                 if os.path.exists(str(chunk_path)):
+    #                     result = str(chunk_path)
+    #                     with self.chunk_cache_lock:
+    #                         self.chunk_cache[cache_key] = result
+    #                     return result
+
+    #     except Exception as e:
+    #         logging.error(f"Error processing chunk {chunk_idx}: {str(e)}", exc_info=True)
+    #         return None
+
+    #     finally:
+    #         for clip in active_clips:
+    #             try:
+    #                 clip.close()
+    #             except:
+    #                 pass
+
     def _process_chunk(self, chunk_idx):
         """Process chunk using GPU acceleration"""
-        from cuda_compositing import CudaVideoProcessor
+        clips = []
         active_clips = []
 
         try:
@@ -840,23 +964,25 @@ class VideoComposer:
                     continue
 
                 if is_drum_kit(track.get('instrument', {})):
-                    self._process_drum_chunk(track_idx, chunk_notes, grid, active_clips, start_time)
+                    self._process_drum_chunk(
+                        track_idx, chunk_notes, grid, active_clips, start_time
+                    )
                 else:
                     self._process_instrument_chunk(
                         track_idx, track, chunk_notes, grid, active_clips,
                         start_time, end_time
                     )
 
-            # Create final chunk using GPU acceleration
+            # Create final chunk using GPU acceleration without alpha compositing
             try:
                 cuda_processor = CudaVideoProcessor()
                 chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
                 
-                # Choose compositing method based on option
-                use_alpha = True  # Set to False to use non-alpha method
+                # Use non-alpha method (much faster)
+                use_alpha = False  # Set to False to avoid alpha compositing
                 
                 if use_alpha:
-                    # Process chunk with alpha compositing
+                    # Process with alpha compositing
                     cuda_processor.process_chunk(
                         grid=grid,
                         rows=rows, 
@@ -867,7 +993,7 @@ class VideoComposer:
                         frame_size=(1080, 1920)
                     )
                 else:
-                    # Process chunk without alpha compositing
+                    # Process without alpha compositing (faster)
                     cuda_processor.process_grid_no_alpha(
                         grid=grid,
                         rows=rows, 
@@ -885,14 +1011,18 @@ class VideoComposer:
                     return result
 
             except Exception as e:
-                logging.error(f"GPU chunk processing error: {e}", exc_info=True)
+                # Improved error logging with traceback
+                import traceback
+                logging.error(f"GPU chunk processing error: {e}")
+                logging.error(f"Traceback: {traceback.format_exc()}")
                 logging.warning("Falling back to CPU processing...")
                 
-                # Fallback to original method
+                # Fallback to original method if GPU fails
                 with self.clip_pool.acquire():
                     chunk = clips_array(grid).with_duration(chunk_duration)
                     chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
                     
+                    # Choose best encoder based on availability
                     ffmpeg_params = (
                         self.encoder_params['ffmpeg_params'] 
                         if self.gpu_manager.has_gpu
@@ -925,14 +1055,101 @@ class VideoComposer:
                     pass
 
 
-    # In video_composer.py
+    # # In video_composer.py
+    # def create_composition(self):
+    #     """Simplified composition approach with explicit timing"""
+    #     try:
+    #          # Calculate chunk lengths and store as instance attributes
+    #         self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
+    #         logging.info(f"Set full_chunks={self.full_chunks}, final_duration={self.final_duration}")
+    #         # Basic timing without profiler
+    #         import time
+    #         total_start = time.time()
+            
+    #         print(f"=== Starting Video Composition ({time.strftime('%H:%M:%S')}) ===")
+            
+    #         # 1. Process chunks sequentially - no locks needed
+    #         chunk_files = []
+    #         full_chunks, final_duration = self.calculate_chunk_lengths()
+    #         total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+            
+    #         print(f"Processing {total_chunks} chunks sequentially")
+            
+    #         for chunk_idx in range(total_chunks):
+    #             chunk_start = time.time()
+    #             print(f"\nProcessing chunk {chunk_idx+1}/{total_chunks} (Time: {time.strftime('%H:%M:%S')})")
+                
+    #             # Process single chunk
+    #             chunk_path = self._process_chunk(chunk_idx)
+    #             if chunk_path:
+    #                 chunk_files.append(chunk_path)
+    #                 print(f"Chunk {chunk_idx+1} completed in {time.time() - chunk_start:.1f}s")
+    #             else:
+    #                 print(f"Chunk {chunk_idx+1} failed")
+                    
+    #         # 2. Combine chunks using direct ffmpeg concatenation instead of MoviePy
+    #         if chunk_files:
+    #             print(f"\n=== Combining {len(chunk_files)} chunks ===")
+    #             combine_start = time.time()
+                
+    #             # Create concat file
+    #             concat_file = self.temp_dir / "concat.txt"
+    #             with open(concat_file, 'w') as f:
+    #                 for chunk in sorted(chunk_files):
+    #                     f.write(f"file '{chunk}'\n")
+                
+    #             # # Run ffmpeg directly
+    #             # ffmpeg_cmd = [
+    #             #     'ffmpeg', '-y',
+    #             #     '-f', 'concat',
+    #             #     '-safe', '0',
+    #             #     '-i', str(concat_file),
+    #             #     '-c', 'copy',
+    #             #     str(self.output_path)
+    #             # ]
+
+    #             ffmpeg_cmd = [
+    #                 'ffmpeg', '-y',
+    #                 '-f', 'concat',
+    #                 '-safe', '0',
+    #                 '-i', str(concat_file),
+    #                 # Replace direct copy with proper encoding
+    #                 '-c:v', 'libx264', 
+    #                 '-preset', 'medium',
+    #                 '-crf', '23',
+    #                 '-pix_fmt', 'yuv420p', # Fix color issues
+    #                 # Map audio from the first chunk if available
+    #                 '-c:a', 'aac',
+    #                 '-b:a', '192k',
+    #                 str(self.output_path)
+    #             ]
+                
+    #             print(f"Running FFmpeg: {' '.join(ffmpeg_cmd)}")
+    #             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                
+    #             if result.returncode == 0:
+    #                 print(f"Combination successful in {time.time() - combine_start:.1f}s")
+    #                 return str(self.output_path)
+    #             else:
+    #                 print(f"FFmpeg error: {result.stderr}")
+    #                 return None
+            
+    #         print(f"Total time: {time.time() - total_start:.1f}s")
+    #         return None
+            
+    #     except Exception as e:
+    #         import traceback
+    #         print(f"Composition error: {str(e)}")
+    #         traceback.print_exc()
+    #         return None
+
     def create_composition(self):
         """Simplified composition approach with explicit timing"""
         try:
-             # Calculate chunk lengths and store as instance attributes
+            # Calculate chunk lengths and store as instance attributes
             self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
             logging.info(f"Set full_chunks={self.full_chunks}, final_duration={self.final_duration}")
-            # Basic timing without profiler
+            
             import time
             total_start = time.time()
             
@@ -968,27 +1185,23 @@ class VideoComposer:
                     for chunk in sorted(chunk_files):
                         f.write(f"file '{chunk}'\n")
                 
-                # # Run ffmpeg directly
-                # ffmpeg_cmd = [
-                #     'ffmpeg', '-y',
-                #     '-f', 'concat',
-                #     '-safe', '0',
-                #     '-i', str(concat_file),
-                #     '-c', 'copy',
-                #     str(self.output_path)
-                # ]
-
+                # Optimized FFmpeg command with hardware acceleration
                 ffmpeg_cmd = [
                     'ffmpeg', '-y',
+                    '-hwaccel', 'cuda',  # Enable hardware acceleration
+                    '-hwaccel_device', '0',
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', str(concat_file),
-                    # Replace direct copy with proper encoding
-                    '-c:v', 'libx264', 
-                    '-preset', 'medium',
-                    '-crf', '23',
-                    '-pix_fmt', 'yuv420p', # Fix color issues
-                    # Map audio from the first chunk if available
+                    # Use hardware encoder for video
+                    '-c:v', 'h264_nvenc',
+                    '-preset', 'p4',
+                    '-tune', 'hq',
+                    '-gpu', '0',  # Specify GPU device
+                    '-rc', 'vbr_hq',
+                    '-cq', '20',
+                    '-pix_fmt', 'yuv420p',  # Standard compatible format
+                    # Copy audio without re-encoding
                     '-c:a', 'aac',
                     '-b:a', '192k',
                     str(self.output_path)
@@ -1002,7 +1215,30 @@ class VideoComposer:
                     return str(self.output_path)
                 else:
                     print(f"FFmpeg error: {result.stderr}")
-                    return None
+                    
+                    # Fallback to CPU if GPU concat fails
+                    print("Falling back to CPU for final concat...")
+                    ffmpeg_cmd = [
+                        'ffmpeg', '-y',
+                        '-f', 'concat',
+                        '-safe', '0',
+                        '-i', str(concat_file),
+                        '-c:v', 'libx264',
+                        '-preset', 'medium',
+                        '-crf', '23',
+                        '-pix_fmt', 'yuv420p',
+                        '-c:a', 'aac',
+                        '-b:a', '192k',
+                        str(self.output_path)
+                    ]
+                    
+                    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        print(f"CPU combination successful in {time.time() - combine_start:.1f}s")
+                        return str(self.output_path)
+                    else:
+                        print(f"CPU FFmpeg error: {result.stderr}")
+                        return None
             
             print(f"Total time: {time.time() - total_start:.1f}s")
             return None
