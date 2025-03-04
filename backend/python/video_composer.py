@@ -608,18 +608,25 @@ class VideoComposer:
 
     def _process_drum_chunk_gpu(self, track_idx, chunk_notes, grid_config, start_time, rows, cols):
         """Process drum chunk directly into grid_config using path registry"""
-        # Get drum track position (first row)
-        row = 0  # Drums usually in first row 
-        
+        drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+        if not drum_dir.exists():
+            return
+
         for note in chunk_notes:
             try:
                 midi_note = int(note['midi'])
-                drum_key = self._get_drum_key_for_note(midi_note)
-                if not drum_key:
+                drum_name = DRUM_NOTES.get(midi_note)
+                if not drum_name:
                     continue
-                    
-                # Calculate column position - can adjust based on your layout algorithm
-                col = midi_note % cols  # Simple column distribution
+
+                drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
+
+                if drum_key not in self.grid_positions:
+                    logging.warning(f"No grid position for {drum_key}, skipping")
+                    continue
+                
+                pos_data = self.grid_positions[drum_key]
+                row, col = int(pos_data['row']), int(pos_data['column'])
                 
                 # Get timing info
                 time = float(note['time']) - start_time
@@ -657,12 +664,31 @@ class VideoComposer:
                 logging.error(f"Error processing drum note: {e}")
                 continue
 
-    def _process_instrument_chunk_gpu(self, track_idx, track, chunk_notes, grid_config, 
-                                start_time, end_time, rows, cols):
-        """Process instrument chunk directly into grid_config using path registry"""
-        # Get instrument position (row, col)
-        row = (track_idx % (rows-1)) + 1  # Skip first row (drums)
-        col = min(track_idx // (rows-1), cols-1)  # Distribute across columns
+    def _process_instrument_chunk_gpu(self, track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols):
+        # Get instrument name for lookup
+        instrument_name = normalize_instrument_name(track['instrument']['name'])
+        
+        # Try multiple possible ID formats
+        possible_keys = [
+            f"track-{track_idx}",            # Format with prefix
+            f"track-{instrument_name}",      # Name with prefix
+            f"{track_idx}",                  # Bare index (what frontend actually uses)
+            str(track_idx),                  # Ensure string comparison
+            f"{instrument_name}"             # Bare name
+        ]
+        
+        # Find the first key that exists in grid_positions
+        track_key = next((key for key in possible_keys if key in self.grid_positions), None)
+        
+        if track_key:
+            pos_data = self.grid_positions[track_key]
+            row, col = int(pos_data['row']), int(pos_data['column'])
+            logging.info(f"Found grid position for {instrument_name}: row={row}, col={col}")
+        else:
+            # Fallback to default
+            row = (track_idx % (rows-1)) + 1
+            col = min(track_idx // (rows-1), cols-1)
+            logging.warning(f"No grid position for {instrument_name}, using default: row={row}, col={col}")
         
         # Group notes by time to handle chords
         time_groups = {}
