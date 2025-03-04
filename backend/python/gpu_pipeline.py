@@ -15,6 +15,8 @@ class GPUPipelineProcessor:
         # Pre-allocate reusable tensors
         self.frame_cache = {}
         self.registry = PathRegistry.get_instance()
+        self.CROSSFADE_DURATION = 0.5
+        self.CHUNK_DURATION = 4.0
         
     def load_video_frames_to_gpu(self, video_path, start_time=0, duration=None):
         """Load ALL frames from video file"""
@@ -161,6 +163,9 @@ class GPUPipelineProcessor:
                                 
                             # Place frame in the grid
                             output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
+
+        # Set chunk duration for audio processing
+        self.CHUNK_DURATION = duration
         
         # Mix audio and export video
         mixed_audio = self._mix_audio_tracks(audio_tracks, temp_dir, 
@@ -209,6 +214,7 @@ class GPUPipelineProcessor:
                 filter_parts.append(f'[{i}]acopy[a{i}]')
         
         # Create mix part of filter
+        filter_str = f'amix=inputs={len(audio_tracks)}:duration=longest:normalize=0,afade=t=in:st=0:d={self.CROSSFADE_DURATION},afade=t=out:st={self.CHUNK_DURATION-self.CROSSFADE_DURATION}:d={self.CROSSFADE_DURATION}'
         mix_inputs = ''.join(f'[a{i}]' for i in range(len(audio_tracks)))
         filter_parts.append(f'{mix_inputs}amix=inputs={len(audio_tracks)}:duration=longest[out]')
         
