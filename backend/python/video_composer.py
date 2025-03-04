@@ -171,8 +171,8 @@ class VideoComposer:
 
     FRAME_RATE = 30
     CHUNK_DURATION = 4
-    OVERLAP_DURATION = 0.3
-    CROSSFADE_DURATION = 0.25
+    OVERLAP_DURATION = 1
+    CROSSFADE_DURATION = 0.5
     VOLUME_MULTIPLIERS = {
         'drums': 0.2,
         'instruments': 1.5
@@ -1139,7 +1139,8 @@ class VideoComposer:
                 # Find notes in this time chunk
                 chunk_notes = [
                     note for note in track.get('notes', [])
-                    if start_time <= float(note['time']) < end_time
+                    if (start_time - self.OVERLAP_DURATION) <= float(note['time']) < end_time
+                    or (float(note['time']) < start_time and float(note['time']) + float(note['duration']) > start_time)
                 ]
                 
                 if not chunk_notes:
