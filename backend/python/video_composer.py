@@ -52,6 +52,9 @@ from video_utils import run_ffmpeg_command, encode_video, validate_video
 from cuda_compositing import CudaVideoProcessor
 import traceback
 
+from gpu_pipeline import GPUPipelineProcessor
+from path_registry import PathRegistry
+
 import mmap
 # from contextlib import ExitStack
 
@@ -76,7 +79,6 @@ def timing_block(name):
     finally:
         duration = time.perf_counter() - start
         logging.info(f"Operation [{name}] took {duration:.3f} seconds")
-
 
 class GPUStreamManager:
     def __init__(self):
@@ -226,7 +228,12 @@ class VideoComposer:
             self.chunk_cache_lock = RLock()  # Add dedicated cache lock
             self.max_cache_size = 1024 * 1024 * 100
             self.active_readers = set()  # Add reader tracking
-             # Log track information
+            # Initialize path registry
+            self.path_registry = PathRegistry()
+            
+            # After copying files, register them
+            self._register_video_paths()
+            # Log track information
             logging.info(f"Regular tracks: {len(self.tracks)}")
             logging.info(f"Drum tracks: {len(self.drum_tracks)}")
             for track in self.drum_tracks:
@@ -255,6 +262,22 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"VideoComposer init error: {str(e)}")
             raise
+
+    def _register_video_paths(self):
+        """Register paths for all videos"""
+        # Get singleton instance
+        registry = PathRegistry.get_instance()
+        
+        # Set registry file if needed
+        registry_file = self.processed_videos_dir / "path_registry.json"
+        
+        # Register from processed videos directory
+        registry.register_from_directory(self.processed_videos_dir)
+        registry.save_registry(str(registry_file))
+        
+        # Log registration stats
+        logging.info(f"Registered {len(registry.drum_paths)} drum videos")
+        logging.info(f"Registered {sum(len(notes) for notes in registry.instrument_paths.values())} instrument notes")
 
     def encode_video(self, cmd):
         logging.info(f"Encoding video with command: {' '.join(cmd)}")
@@ -583,131 +606,265 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Error adding drum clips: {e}")
 
-    def _process_drum_chunk(self, track_idx, chunk_notes, grid, active_clips, start_time, clip_buffer=None, mask_buffer=None):
-        """Process drum chunks with proper error handling and frame loading"""
-        drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
-        if not drum_dir.exists():
-            return
-
+    def _process_drum_chunk_gpu(self, track_idx, chunk_notes, grid_config, start_time, rows, cols):
+        """Process drum chunk directly into grid_config using path registry"""
+        # Get drum track position (first row)
+        row = 0  # Drums usually in first row 
+        
         for note in chunk_notes:
             try:
                 midi_note = int(note['midi'])
-                drum_name = DRUM_NOTES.get(midi_note)
-                if not drum_name:
+                drum_key = self._get_drum_key_for_note(midi_note)
+                if not drum_key:
                     continue
                     
-                drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
-                if drum_key not in self.grid_positions:
-                    continue
-                    
-                pos_data = self.grid_positions[drum_key]
-                row, col = int(pos_data['row']), int(pos_data['column'])
+                # Calculate column position - can adjust based on your layout algorithm
+                col = midi_note % cols  # Simple column distribution
                 
-                # Load video clip first
-                drum_file = drum_dir / f"{drum_key}.mp4"
-                if not drum_file.exists():
-                    logging.warning(f"Drum file not found: {drum_file}")
+                # Get timing info
+                time = float(note['time']) - start_time
+                duration = float(note.get('duration', 0.5))
+                
+                # Find video path through registry
+                video_path = self._find_drum_video(drum_key)
+                if not video_path:
                     continue
                     
-                with self.clip_pool.acquire():
-                    clip = VideoFileClip(str(drum_file))
-                    if clip is None:
-                        continue
+                # Add to grid config
+                if grid_config[row][col].get('empty', True):
+                    grid_config[row][col] = {
+                        'path': video_path,
+                        'start_time': 0,
+                        'duration': duration,
+                        'offset': time,
+                        'empty': False
+                    }
+                else:
+                    # If cell already has content, create a list of clips
+                    if 'clips' not in grid_config[row][col]:
+                        grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
                         
-                    active_clips.append(clip)
+                    grid_config[row][col]['clips'].append({
+                        'path': video_path,
+                        'start_time': 0,
+                        'duration': duration,
+                        'offset': time,
+                    })
                     
-                    # Get frame data directly from clip
-                    try:
-                        frame_data = clip.get_frame(0)
-                        if frame_data is None:
-                            continue
-                            
-                        if clip_buffer is not None and mask_buffer is not None:
-                            np.copyto(clip_buffer, frame_data)
-                            if hasattr(clip, 'mask') and clip.mask is not None:
-                                mask_data = clip.mask.get_frame(0)
-                                if mask_data is not None:
-                                    np.copyto(mask_buffer, mask_data)
-                                    
-                    except Exception as e:
-                        logging.error(f"Error getting frame data: {e}")
-                        continue
-                    
-                    # Process timing
-                    time = float(note['time']) - start_time
-                    duration = min(float(note['duration']), clip.duration)
-                    processed_clip = clip.subclipped(0, duration).with_start(time)
-                    
-                    # Add to grid
-                    if isinstance(grid[row][col], ColorClip):
-                        grid[row][col] = processed_clip
-                    else:
-                        grid[row][col] = CompositeVideoClip([grid[row][col], processed_clip])
-                        
-                    logging.info(f"Added {drum_key} at [{row}][{col}] t={time}")
+                logging.info(f"Added {drum_key} at [{row}][{col}] t={time}")
                     
             except Exception as e:
-                logging.error(f"Error processing drum note {midi_note if 'midi_note' in locals() else 'unknown'}: {e}")
+                logging.error(f"Error processing drum note: {e}")
                 continue
 
-    def _process_instrument_chunk(self, track_idx, track, chunk_notes, grid, active_clips, 
-                            start_time, end_time, clip_buffer=None, mask_buffer=None):
-        """Process instrument chunks with buffer support"""
-        instrument_name = normalize_instrument_name(track['instrument']['name'])
-        track_id = str(track_idx)
+    def _process_instrument_chunk_gpu(self, track_idx, track, chunk_notes, grid_config, 
+                                start_time, end_time, rows, cols):
+        """Process instrument chunk directly into grid_config using path registry"""
+        # Get instrument position (row, col)
+        row = (track_idx % (rows-1)) + 1  # Skip first row (drums)
+        col = min(track_idx // (rows-1), cols-1)  # Distribute across columns
         
-        if track_id not in self.grid_positions:
-            return
-                
-        pos_data = self.grid_positions[track_id]
-        row = int(pos_data['row'])
-        col = int(pos_data['column'])
-        
-        notes_dir = self.processed_videos_dir / f"{instrument_name}_notes"
-        if not notes_dir.exists():
-            logging.error(f"Notes directory not found: {notes_dir}")
-            return
-                
-        logging.info(f"Processing instrument {instrument_name} at position [{row}][{col}]")
-        
+        # Group notes by time to handle chords
+        time_groups = {}
         for note in chunk_notes:
-            midi_note = int(float(note['midi']))
-            note_file = notes_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+            time_pos = float(note['time'])
+            if time_pos not in time_groups:
+                time_groups[time_pos] = []
+            time_groups[time_pos].append(note)
+        
+        # Process each group of notes
+        for time_pos, notes in time_groups.items():
+            try:
+                # Get instrument info
+                instrument_name = track.get('instrument', {}).get('name', 'piano')
+                midi_notes = [int(note['midi']) for note in notes]
                 
-            if note_file.exists():
-                try:
-                    with self.clip_pool.acquire():
-                        clip = VideoFileClip(str(note_file))
-                        active_clips.append(clip)
-                        if hasattr(clip, 'reader') and clip.reader:
-                            self.active_readers.add(clip.reader)
-                        
-                        time = float(note['time']) - start_time
-                        duration = min(float(note['duration']), clip.duration)
-                        
-                        # Create the processed clip
-                        processed_clip = (clip
-                            .subclipped(0, duration)
-                            .with_start(time))
-                            
-                        # Add to grid
-                        if isinstance(grid[row][col], ColorClip):
-                            grid[row][col] = processed_clip
-                        else:
-                            grid[row][col] = CompositeVideoClip([grid[row][col], processed_clip])
-                            
-                        logging.info(f"Added note {midi_note} at t={time:.2f}s")
-                        
-                except Exception as e:
-                    logging.error(f"Error processing note {midi_note}: {e}")
+                # Find video path for the instrument note
+                video_path = self._find_instrument_video(instrument_name, midi_notes[0])
+                if not video_path:
                     continue
-            else:
-                logging.warning(f"Note file not found: {note_file}")
+                    
+                # Calculate timing
+                time = time_pos - start_time
+                duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+                
+                # Add to grid config
+                if grid_config[row][col].get('empty', True):
+                    grid_config[row][col] = {
+                        'path': video_path,
+                        'start_time': 0,
+                        'duration': duration,
+                        'offset': time,
+                        'empty': False
+                    }
+                else:
+                    # If cell already has content, create a list of clips
+                    if 'clips' not in grid_config[row][col]:
+                        grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
+                        
+                    grid_config[row][col]['clips'].append({
+                        'path': video_path,
+                        'start_time': 0,
+                        'duration': duration,
+                        'offset': time,
+                    })
+                    
+                logging.info(f"Added {instrument_name} note {midi_notes[0]} at [{row}][{col}] t={time}")
+                    
+            except Exception as e:
+                logging.error(f"Error processing instrument note: {e}")
+                continue
+
+    def _find_drum_video(self, drum_key):
+        """Find video for drum key using registry"""
+        path = PathRegistry.get_instance().get_drum_path(drum_key)
+        if path:
+            logging.info(f"Found drum video: {path}")
+            return path
+        
+        logging.warning(f"No video found for drum: {drum_key}")
+        return None
+
+    def _find_instrument_video(self, instrument, midi_note):
+        """Find video for instrument note using registry"""
+        path = PathRegistry.get_instance().get_instrument_path(instrument, midi_note)
+        if path:
+            logging.info(f"Found instrument video for {instrument}, note {midi_note}: {path}")
+            return path
+        
+        logging.warning(f"No video found for instrument: {instrument}, note: {midi_note}")
+        return None
+
+    def _get_drum_key_for_note(self, midi_note):
+        """Get drum name for MIDI note"""
+        from drum_utils import DRUM_NOTES
+        return DRUM_NOTES.get(midi_note)
+
+    # def _process_drum_chunk(self, track_idx, chunk_notes, grid, active_clips, start_time, clip_buffer=None, mask_buffer=None):
+    #     """Process drum chunks with proper error handling and frame loading"""
+    #     drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+    #     if not drum_dir.exists():
+    #         return
+
+    #     for note in chunk_notes:
+    #         try:
+    #             midi_note = int(note['midi'])
+    #             drum_name = DRUM_NOTES.get(midi_note)
+    #             if not drum_name:
+    #                 continue
+                    
+    #             drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
+    #             if drum_key not in self.grid_positions:
+    #                 continue
+                    
+    #             pos_data = self.grid_positions[drum_key]
+    #             row, col = int(pos_data['row']), int(pos_data['column'])
+                
+    #             # Load video clip first
+    #             drum_file = drum_dir / f"{drum_key}.mp4"
+    #             if not drum_file.exists():
+    #                 logging.warning(f"Drum file not found: {drum_file}")
+    #                 continue
+                    
+    #             with self.clip_pool.acquire():
+    #                 clip = VideoFileClip(str(drum_file))
+    #                 if clip is None:
+    #                     continue
+                        
+    #                 active_clips.append(clip)
+                    
+    #                 # Get frame data directly from clip
+    #                 try:
+    #                     frame_data = clip.get_frame(0)
+    #                     if frame_data is None:
+    #                         continue
+                            
+    #                     if clip_buffer is not None and mask_buffer is not None:
+    #                         np.copyto(clip_buffer, frame_data)
+    #                         if hasattr(clip, 'mask') and clip.mask is not None:
+    #                             mask_data = clip.mask.get_frame(0)
+    #                             if mask_data is not None:
+    #                                 np.copyto(mask_buffer, mask_data)
+                                    
+    #                 except Exception as e:
+    #                     logging.error(f"Error getting frame data: {e}")
+    #                     continue
+                    
+    #                 # Process timing
+    #                 time = float(note['time']) - start_time
+    #                 duration = min(float(note['duration']), clip.duration)
+    #                 processed_clip = clip.subclipped(0, duration).with_start(time)
+                    
+    #                 # Add to grid
+    #                 if isinstance(grid[row][col], ColorClip):
+    #                     grid[row][col] = processed_clip
+    #                 else:
+    #                     grid[row][col] = CompositeVideoClip([grid[row][col], processed_clip])
+                        
+    #                 logging.info(f"Added {drum_key} at [{row}][{col}] t={time}")
+                    
+    #         except Exception as e:
+    #             logging.error(f"Error processing drum note {midi_note if 'midi_note' in locals() else 'unknown'}: {e}")
+    #             continue
+
+    # def _process_instrument_chunk(self, track_idx, track, chunk_notes, grid, active_clips, 
+    #                         start_time, end_time, clip_buffer=None, mask_buffer=None):
+    #     """Process instrument chunks with buffer support"""
+    #     instrument_name = normalize_instrument_name(track['instrument']['name'])
+    #     track_id = str(track_idx)
+        
+    #     if track_id not in self.grid_positions:
+    #         return
+                
+    #     pos_data = self.grid_positions[track_id]
+    #     row = int(pos_data['row'])
+    #     col = int(pos_data['column'])
+        
+    #     notes_dir = self.processed_videos_dir / f"{instrument_name}_notes"
+    #     if not notes_dir.exists():
+    #         logging.error(f"Notes directory not found: {notes_dir}")
+    #         return
+                
+    #     logging.info(f"Processing instrument {instrument_name} at position [{row}][{col}]")
+        
+    #     for note in chunk_notes:
+    #         midi_note = int(float(note['midi']))
+    #         note_file = notes_dir / f"note_{midi_note}_{midi_to_note(midi_note)}.mp4"
+                
+    #         if note_file.exists():
+    #             try:
+    #                 with self.clip_pool.acquire():
+    #                     clip = VideoFileClip(str(note_file))
+    #                     active_clips.append(clip)
+    #                     if hasattr(clip, 'reader') and clip.reader:
+    #                         self.active_readers.add(clip.reader)
+                        
+    #                     time = float(note['time']) - start_time
+    #                     duration = min(float(note['duration']), clip.duration)
+                        
+    #                     # Create the processed clip
+    #                     processed_clip = (clip
+    #                         .subclipped(0, duration)
+    #                         .with_start(time))
+                            
+    #                     # Add to grid
+    #                     if isinstance(grid[row][col], ColorClip):
+    #                         grid[row][col] = processed_clip
+    #                     else:
+    #                         grid[row][col] = CompositeVideoClip([grid[row][col], processed_clip])
+                            
+    #                     logging.info(f"Added note {midi_note} at t={time:.2f}s")
+                        
+    #             except Exception as e:
+    #                 logging.error(f"Error processing note {midi_note}: {e}")
+    #                 continue
+    #         else:
+    #             logging.warning(f"Note file not found: {note_file}")
     
-    async def _process_chunk_async(self, chunk_idx):
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as pool:
-            return await loop.run_in_executor(pool, self._process_chunk, chunk_idx)
+    # async def _process_chunk_async(self, chunk_idx):
+    #     loop = asyncio.get_event_loop()
+    #     with ThreadPoolExecutor() as pool:
+    #         return await loop.run_in_executor(pool, self._process_chunk, chunk_idx)
 
 
     # def _process_chunk(self, chunk_idx):
@@ -927,10 +1084,7 @@ class VideoComposer:
     #                 pass
 
     def _process_chunk(self, chunk_idx):
-        """Process chunk using GPU acceleration"""
-        clips = []
-        active_clips = []
-
+        """Process chunk using pure GPU pipeline without MoviePy"""
         try:
             with self.chunk_cache_lock:
                 cache_key = f"chunk_{chunk_idx}"
@@ -945,16 +1099,18 @@ class VideoComposer:
             )
             chunk_duration = end_time - start_time
 
-            # Initialize grid
+            # Get grid layout
             rows, cols = self.get_track_layout()
-            grid = [[ColorClip(size=(1920//cols, 1080//rows), 
-                            color=(0,0,0),
-                            duration=chunk_duration)
-                    for _ in range(cols)] 
-                    for _ in range(rows)]
-                    
-            # Process tracks
+            
+            # Create grid configuration directly for GPU pipeline
+            grid_config = [
+                [{'empty': True} for _ in range(cols)] 
+                for _ in range(rows)
+            ]
+            
+            # Process tracks using information from the path registry
             for track_idx, track in enumerate(self.midi_data['tracks']):
+                # Find notes in this time chunk
                 chunk_notes = [
                     note for note in track.get('notes', [])
                     if start_time <= float(note['time']) < end_time
@@ -962,97 +1118,39 @@ class VideoComposer:
                 
                 if not chunk_notes:
                     continue
-
-                if is_drum_kit(track.get('instrument', {})):
-                    self._process_drum_chunk(
-                        track_idx, chunk_notes, grid, active_clips, start_time
-                    )
-                else:
-                    self._process_instrument_chunk(
-                        track_idx, track, chunk_notes, grid, active_clips,
-                        start_time, end_time
-                    )
-
-            # Create final chunk using GPU acceleration without alpha compositing
-            try:
-                cuda_processor = CudaVideoProcessor()
-                chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-                
-                # Use non-alpha method (much faster)
-                use_alpha = False  # Set to False to avoid alpha compositing
-                
-                if use_alpha:
-                    # Process with alpha compositing
-                    cuda_processor.process_chunk(
-                        grid=grid,
-                        rows=rows, 
-                        cols=cols,
-                        duration=chunk_duration,
-                        fps=self.FRAME_RATE,
-                        output_path=str(chunk_path),
-                        frame_size=(1080, 1920)
-                    )
-                else:
-                    # Process without alpha compositing (faster)
-                    cuda_processor.process_grid_no_alpha(
-                        grid=grid,
-                        rows=rows, 
-                        cols=cols,
-                        duration=chunk_duration,
-                        fps=self.FRAME_RATE,
-                        output_path=str(chunk_path),
-                        frame_size=(1080, 1920)
-                    )
-
-                if os.path.exists(str(chunk_path)):
-                    result = str(chunk_path)
-                    with self.chunk_cache_lock:
-                        self.chunk_cache[cache_key] = result
-                    return result
-
-            except Exception as e:
-                # Improved error logging with traceback
-                import traceback
-                logging.error(f"GPU chunk processing error: {e}")
-                logging.error(f"Traceback: {traceback.format_exc()}")
-                logging.warning("Falling back to CPU processing...")
-                
-                # Fallback to original method if GPU fails
-                with self.clip_pool.acquire():
-                    chunk = clips_array(grid).with_duration(chunk_duration)
-                    chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
                     
-                    # Choose best encoder based on availability
-                    ffmpeg_params = (
-                        self.encoder_params['ffmpeg_params'] 
-                        if self.gpu_manager.has_gpu
-                        else ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+                # Process drums or instruments directly
+                if is_drum_kit(track.get('instrument', {})):
+                    self._process_drum_chunk_gpu(
+                        track_idx, chunk_notes, grid_config, 
+                        start_time, rows, cols
+                    )
+                else:
+                    self._process_instrument_chunk_gpu(
+                        track_idx, track, chunk_notes, grid_config,
+                        start_time, end_time, rows, cols
                     )
 
-                    chunk.write_videofile(
-                        str(chunk_path),
-                        fps=self.FRAME_RATE,
-                        codec=self.encoder_params['codec'] if self.gpu_manager.has_gpu else 'libx264',
-                        preset=self.encoder_params['preset'] if self.gpu_manager.has_gpu else 'medium',
-                        ffmpeg_params=ffmpeg_params
-                    )
+            # Use GPU pipeline directly
+            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            pipeline = GPUPipelineProcessor()
+            pipeline.process_chunk_pure_gpu(
+                grid_config=grid_config,
+                output_path=str(chunk_path),
+                fps=self.FRAME_RATE,
+                duration=chunk_duration
+            )
 
-                    if os.path.exists(str(chunk_path)):
-                        result = str(chunk_path)
-                        with self.chunk_cache_lock:
-                            self.chunk_cache[cache_key] = result
-                        return result
-
+            if chunk_path.exists():
+                result = str(chunk_path)
+                with self.chunk_cache_lock:
+                    self.chunk_cache[cache_key] = result
+                return result
+                
         except Exception as e:
-            logging.error(f"Error processing chunk {chunk_idx}: {str(e)}", exc_info=True)
+            logging.error(f"GPU chunk processing error: {e}")
+            logging.error(f"Traceback: {traceback.format_exc()}")
             return None
-
-        finally:
-            for clip in active_clips:
-                try:
-                    clip.close()
-                except:
-                    pass
 
 
     # # In video_composer.py
@@ -1186,24 +1284,39 @@ class VideoComposer:
                         f.write(f"file '{chunk}'\n")
                 
                 # Optimized FFmpeg command with hardware acceleration
+                # ffmpeg_cmd = [
+                #     'ffmpeg', '-y',
+                #     '-hwaccel', 'cuda',  # Enable hardware acceleration
+                #     '-hwaccel_device', '0',
+                #     '-f', 'concat',
+                #     '-safe', '0',
+                #     '-i', str(concat_file),
+                #     # Use hardware encoder for video
+                #     '-c:v', 'h264_nvenc',
+                #     '-preset', 'p4',
+                #     '-tune', 'hq',
+                #     '-gpu', '0',  # Specify GPU device
+                #     '-rc', 'vbr_hq',
+                #     '-cq', '20',
+                #     '-pix_fmt', 'yuv420p',  # Standard compatible format
+                #     # Copy audio without re-encoding
+                #     '-c:a', 'aac',
+                #     '-b:a', '192k',
+                #     str(self.output_path)
+                # ]
                 ffmpeg_cmd = [
                     'ffmpeg', '-y',
-                    '-hwaccel', 'cuda',  # Enable hardware acceleration
+                    '-hwaccel', 'cuda',
                     '-hwaccel_device', '0',
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', str(concat_file),
-                    # Use hardware encoder for video
-                    '-c:v', 'h264_nvenc',
-                    '-preset', 'p4',
-                    '-tune', 'hq',
-                    '-gpu', '0',  # Specify GPU device
-                    '-rc', 'vbr_hq',
-                    '-cq', '20',
-                    '-pix_fmt', 'yuv420p',  # Standard compatible format
-                    # Copy audio without re-encoding
-                    '-c:a', 'aac',
-                    '-b:a', '192k',
+                    # Copy streams directly instead of re-encoding when possible
+                    '-c:v', 'copy',
+                    '-c:a', 'copy',
+                    # Add sync options to fix audio sync
+                    '-vsync', 'cfr',
+                    '-async', '1',
                     str(self.output_path)
                 ]
                 

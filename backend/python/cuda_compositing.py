@@ -860,209 +860,260 @@ class CudaVideoProcessor:
         # No alpha blending, just direct copy
         frame[y:y+h, x:x+w] = video_frame
         return frame
-            
+    
+
     def process_grid_no_alpha(self, grid, rows, cols, duration, fps, output_path, frame_size=(1080, 1920)):
-        """Process grid without alpha compositing (last clip wins)"""
-        h, w = frame_size
-        cell_h, cell_w = h // rows, w // cols
-        frame_count = int(duration * fps)
-        
-        # Extract audio from ALL clips that have audio
-        temp_dir = os.path.join(os.path.dirname(output_path), "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # Extract audio from all clips
-        audio_tracks = []
+        """Process grid without alpha compositing (pure GPU implementation)"""
+        # Convert MoviePy grid to our grid_config format
+        grid_config = []
         for row in range(rows):
+            grid_row = []
             for col in range(cols):
                 cell = grid[row][col]
-                if hasattr(cell, 'audio') and cell.audio is not None:
-                    try:
-                        # Use a unique filename to avoid conflicts
-                        unique_id = os.path.splitext(os.path.basename(output_path))[0]
-                        audio_path = os.path.join(temp_dir, f"audio_{unique_id}_{row}_{col}.aac")
-                        
-                        # Extract audio using cell's audio function
-                        cell.audio.write_audiofile(audio_path, codec='aac')
-                        
-                        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-                            audio_tracks.append(audio_path)
-                            logging.info(f"Extracted audio from clip at [{row},{col}]")
-                    except Exception as e:
-                        logging.warning(f"Audio extraction error: {e}")
-                        continue
-        
-        # Mix audio if we have multiple tracks
-        final_audio = None
-        if len(audio_tracks) > 1:
-            try:
-                import subprocess
-                mixed_audio = os.path.join(temp_dir, f"mixed_{os.path.basename(output_path)}.aac")
-                
-                # Create FFmpeg command for mixing
-                cmd = ['ffmpeg', '-y']
-                for track in audio_tracks:
-                    cmd.extend(['-i', track])
-                
-                # Add filter for mixing all inputs
-                cmd.extend([
-                    '-filter_complex', f'amix=inputs={len(audio_tracks)}:duration=longest',
-                    '-c:a', 'aac',
-                    '-b:a', '192k',
-                    mixed_audio
-                ])
-                
-                # Run FFmpeg to mix audio
-                result = subprocess.run(cmd, check=True, capture_output=True)
-                
-                if os.path.exists(mixed_audio) and os.path.getsize(mixed_audio) > 0:
-                    final_audio = mixed_audio
-                    logging.info(f"Mixed {len(audio_tracks)} audio tracks successfully")
+                if hasattr(cell, 'get_frame'):
+                    config = {
+                        'path': None,  # Initialize to None
+                        'start_time': cell.start if hasattr(cell, 'start') else 0,
+                        'duration': cell.duration if hasattr(cell, 'duration') else duration,
+                        'empty': False
+                    }
+                    
+                    # Try multiple ways to get the file path
+                    if hasattr(cell, 'filename') and cell.filename:
+                        config['path'] = cell.filename
+                        logging.info(f"Using filename from cell: {cell.filename}")
+                    elif hasattr(cell, 'source') and hasattr(cell.source, 'filename'):
+                        config['path'] = cell.source.filename
+                        logging.info(f"Using source filename: {cell.source.filename}")
+                    elif hasattr(cell, 'video_fp') and cell.video_fp:
+                        config['path'] = cell.video_fp
+                        logging.info(f"Using video_fp: {cell.video_fp}")
+                    # For VideoFileClip from MoviePy
+                    elif hasattr(cell, 'reader') and hasattr(cell.reader, 'filename'):
+                        config['path'] = cell.reader.filename
+                        logging.info(f"Using reader filename: {cell.reader.filename}")
+                    
+                    # As a last resort, check for custom attributes specific to your app
+                    elif hasattr(cell, '_video_path'):
+                        config['path'] = cell._video_path
+                        logging.info(f"Using _video_path: {cell._video_path}")
+                    
+                    if config['path'] is None:
+                        logging.warning(f"No path found for cell at [{row},{col}]. Adding debug info:")
+                        logging.warning(f"Cell type: {type(cell)}")
+                        logging.warning(f"Cell attributes: {dir(cell)}")
                 else:
-                    logging.warning("Failed to mix audio tracks, using first track")
-                    final_audio = audio_tracks[0]
-            except Exception as e:
-                logging.error(f"Error mixing audio: {e}")
-                # Fall back to first audio track if mixing fails
-                final_audio = audio_tracks[0] if audio_tracks else None
-        elif audio_tracks:
-            final_audio = audio_tracks[0]
-                
-        # Pre-allocate output tensor for all frames
-        output_frames = torch.zeros((frame_count, h, w, 3), dtype=torch.uint8, device=self.device)
+                    config = {'empty': True}
+                    
+                grid_row.append(config)
+            grid_config.append(grid_row)
+            
+        # Use pure GPU pipeline
+        pipeline = GPUPipelineProcessor()
+        return pipeline.process_chunk_pure_gpu(grid_config, output_path, fps, duration)
+            
+    # def process_grid_no_alpha(self, grid, rows, cols, duration, fps, output_path, frame_size=(1080, 1920)):
+    #     """Process grid without alpha compositing (last clip wins)"""
+    #     h, w = frame_size
+    #     cell_h, cell_w = h // rows, w // cols
+    #     frame_count = int(duration * fps)
         
-        try:
-            # Process all frames
-            for frame_idx in range(frame_count):
-                time_pos = frame_idx / fps
-                
-                # Initialize this frame with black background
-                frame = output_frames[frame_idx]
-                
-                # Process each cell in the grid
-                for row in range(rows):
-                    for col in range(cols):
-                        cell = grid[row][col]
-                        cell_region = frame[row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w]
+    #     # Extract audio from ALL clips that have audio
+    #     temp_dir = os.path.join(os.path.dirname(output_path), "temp")
+    #     os.makedirs(temp_dir, exist_ok=True)
+        
+    #     # Extract audio from all clips
+    #     audio_tracks = []
+    #     for row in range(rows):
+    #         for col in range(cols):
+    #             cell = grid[row][col]
+    #             if hasattr(cell, 'audio') and cell.audio is not None:
+    #                 try:
+    #                     # Use a unique filename to avoid conflicts
+    #                     unique_id = os.path.splitext(os.path.basename(output_path))[0]
+    #                     audio_path = os.path.join(temp_dir, f"audio_{unique_id}_{row}_{col}.aac")
                         
-                        # Handle composite clips with "last clip wins" approach
-                        if isinstance(cell, CompositeVideoClip):
-                            # Get clips in this cell - process in reverse order (last one wins)
-                            clips = reversed(cell.clips)
-                            for clip in clips:
-                                if hasattr(clip, 'start') and hasattr(clip, 'end'):
-                                    if time_pos >= clip.start and time_pos < clip.end:
-                                        try:
-                                            # Get clip frame
-                                            clip_time = time_pos - clip.start
-                                            frame_data = clip.get_frame(clip_time)
+    #                     # Extract audio using cell's audio function
+    #                     cell.audio.write_audiofile(audio_path, codec='aac')
+                        
+    #                     if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+    #                         audio_tracks.append(audio_path)
+    #                         logging.info(f"Extracted audio from clip at [{row},{col}]")
+    #                 except Exception as e:
+    #                     logging.warning(f"Audio extraction error: {e}")
+    #                     continue
+        
+    #     # Mix audio if we have multiple tracks
+    #     final_audio = None
+    #     if len(audio_tracks) > 1:
+    #         try:
+    #             import subprocess
+    #             mixed_audio = os.path.join(temp_dir, f"mixed_{os.path.basename(output_path)}.aac")
+                
+    #             # Create FFmpeg command for mixing
+    #             cmd = ['ffmpeg', '-y']
+    #             for track in audio_tracks:
+    #                 cmd.extend(['-i', track])
+                
+    #             # Add filter for mixing all inputs
+    #             cmd.extend([
+    #                 '-filter_complex', f'amix=inputs={len(audio_tracks)}:duration=longest',
+    #                 '-c:a', 'aac',
+    #                 '-b:a', '192k',
+    #                 mixed_audio
+    #             ])
+                
+    #             # Run FFmpeg to mix audio
+    #             result = subprocess.run(cmd, check=True, capture_output=True)
+                
+    #             if os.path.exists(mixed_audio) and os.path.getsize(mixed_audio) > 0:
+    #                 final_audio = mixed_audio
+    #                 logging.info(f"Mixed {len(audio_tracks)} audio tracks successfully")
+    #             else:
+    #                 logging.warning("Failed to mix audio tracks, using first track")
+    #                 final_audio = audio_tracks[0]
+    #         except Exception as e:
+    #             logging.error(f"Error mixing audio: {e}")
+    #             # Fall back to first audio track if mixing fails
+    #             final_audio = audio_tracks[0] if audio_tracks else None
+    #     elif audio_tracks:
+    #         final_audio = audio_tracks[0]
+                
+    #     # Pre-allocate output tensor for all frames
+    #     output_frames = torch.zeros((frame_count, h, w, 3), dtype=torch.uint8, device=self.device)
+        
+    #     try:
+    #         # Process all frames
+    #         for frame_idx in range(frame_count):
+    #             time_pos = frame_idx / fps
+                
+    #             # Initialize this frame with black background
+    #             frame = output_frames[frame_idx]
+                
+    #             # Process each cell in the grid
+    #             for row in range(rows):
+    #                 for col in range(cols):
+    #                     cell = grid[row][col]
+    #                     cell_region = frame[row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w]
+                        
+    #                     # Handle composite clips with "last clip wins" approach
+    #                     if isinstance(cell, CompositeVideoClip):
+    #                         # Get clips in this cell - process in reverse order (last one wins)
+    #                         clips = reversed(cell.clips)
+    #                         for clip in clips:
+    #                             if hasattr(clip, 'start') and hasattr(clip, 'end'):
+    #                                 if time_pos >= clip.start and time_pos < clip.end:
+    #                                     try:
+    #                                         # Get clip frame
+    #                                         clip_time = time_pos - clip.start
+    #                                         frame_data = clip.get_frame(clip_time)
                                             
-                                            if frame_data is not None:
-                                                frame_tensor = self.to_tensor(frame_data)
+    #                                         if frame_data is not None:
+    #                                             frame_tensor = self.to_tensor(frame_data)
                                                 
-                                                # Resize if needed
-                                                if frame_tensor.shape[0] != cell_h or frame_tensor.shape[1] != cell_w:
-                                                    frame_tensor = torch.nn.functional.interpolate(
-                                                        frame_tensor.permute(2,0,1).unsqueeze(0),
-                                                        size=(cell_h, cell_w),
-                                                        mode='bilinear'
-                                                    ).squeeze(0).permute(1,2,0).to(torch.uint8)
+    #                                             # Resize if needed
+    #                                             if frame_tensor.shape[0] != cell_h or frame_tensor.shape[1] != cell_w:
+    #                                                 frame_tensor = torch.nn.functional.interpolate(
+    #                                                     frame_tensor.permute(2,0,1).unsqueeze(0),
+    #                                                     size=(cell_h, cell_w),
+    #                                                     mode='bilinear'
+    #                                                 ).squeeze(0).permute(1,2,0).to(torch.uint8)
                                                 
-                                                # Direct copy - no alpha blending
-                                                cell_region.copy_(frame_tensor)
+    #                                             # Direct copy - no alpha blending
+    #                                             cell_region.copy_(frame_tensor)
                                                 
-                                                # We found and processed a clip for this time, stop looking
-                                                break
-                                        except Exception as e:
-                                            logging.error(f"Error processing clip in cell [{row},{col}]: {e}")
-                                            continue
-                        # Handle single clip
-                        elif hasattr(cell, 'get_frame'):
-                            try:
-                                if hasattr(cell, 'start') and hasattr(cell, 'end'):
-                                    if time_pos >= cell.start and time_pos < cell.end:
-                                        # Get frame directly
-                                        clip_time = time_pos - cell.start
-                                        frame_data = cell.get_frame(clip_time)
+    #                                             # We found and processed a clip for this time, stop looking
+    #                                             break
+    #                                     except Exception as e:
+    #                                         logging.error(f"Error processing clip in cell [{row},{col}]: {e}")
+    #                                         continue
+    #                     # Handle single clip
+    #                     elif hasattr(cell, 'get_frame'):
+    #                         try:
+    #                             if hasattr(cell, 'start') and hasattr(cell, 'end'):
+    #                                 if time_pos >= cell.start and time_pos < cell.end:
+    #                                     # Get frame directly
+    #                                     clip_time = time_pos - cell.start
+    #                                     frame_data = cell.get_frame(clip_time)
                                         
-                                        if frame_data is not None:
-                                            frame_tensor = self.to_tensor(frame_data)
+    #                                     if frame_data is not None:
+    #                                         frame_tensor = self.to_tensor(frame_data)
                                             
-                                            # Resize if needed
-                                            if frame_tensor.shape[0] != cell_h or frame_tensor.shape[1] != cell_w:
-                                                frame_tensor = torch.nn.functional.interpolate(
-                                                    frame_tensor.permute(2,0,1).unsqueeze(0),
-                                                    size=(cell_h, cell_w),
-                                                    mode='bilinear'
-                                                ).squeeze(0).permute(1,2,0).to(torch.uint8)
+    #                                         # Resize if needed
+    #                                         if frame_tensor.shape[0] != cell_h or frame_tensor.shape[1] != cell_w:
+    #                                             frame_tensor = torch.nn.functional.interpolate(
+    #                                                 frame_tensor.permute(2,0,1).unsqueeze(0),
+    #                                                 size=(cell_h, cell_w),
+    #                                                 mode='bilinear'
+    #                                             ).squeeze(0).permute(1,2,0).to(torch.uint8)
                                             
-                                            # Direct copy - no alpha blending
-                                            cell_region.copy_(frame_tensor)
-                            except Exception as e:
-                                logging.error(f"Error processing cell [{row},{col}]: {e}")
-                                continue
+    #                                         # Direct copy - no alpha blending
+    #                                         cell_region.copy_(frame_tensor)
+    #                         except Exception as e:
+    #                             logging.error(f"Error processing cell [{row},{col}]: {e}")
+    #                             continue
                         
-            # Write frames to video file
-            writer_args = {
-                'filename': output_path,
-                'size': (w, h),
-                'fps': fps,
-                'codec': 'h264_nvenc' if self.device.type == 'cuda' else 'libx264',
-                'preset': 'p4' if self.device.type == 'cuda' else 'medium',
-                'ffmpeg_params': [
-                    '-pix_fmt', 'yuv420p',
-                    '-vsync', 'cfr'
-                ]
-            }
+    #         # Write frames to video file
+    #         writer_args = {
+    #             'filename': output_path,
+    #             'size': (w, h),
+    #             'fps': fps,
+    #             'codec': 'h264_nvenc' if self.device.type == 'cuda' else 'libx264',
+    #             'preset': 'p4' if self.device.type == 'cuda' else 'medium',
+    #             'ffmpeg_params': [
+    #                 '-pix_fmt', 'yuv420p',
+    #                 '-vsync', 'cfr'
+    #             ]
+    #         }
             
-            # Add audio if available - using final_audio instead of first_chunk_audio
-            if final_audio and os.path.exists(final_audio):
-                writer_args['audiofile'] = final_audio
-                logging.info(f"Adding mixed audio to video: {final_audio}")
+    #         # Add audio if available - using final_audio instead of first_chunk_audio
+    #         if final_audio and os.path.exists(final_audio):
+    #             writer_args['audiofile'] = final_audio
+    #             logging.info(f"Adding mixed audio to video: {final_audio}")
                 
-            writer = FFMPEG_VideoWriter(**writer_args)
+    #         writer = FFMPEG_VideoWriter(**writer_args)
             
-            # Write frames in larger batches
-            batch_size = 30
-            for i in range(0, frame_count, batch_size):
-                batch_end = min(i + batch_size, frame_count)
-                for j in range(i, batch_end):
-                    writer.write_frame(self.to_numpy(output_frames[j]))
+    #         # Write frames in larger batches
+    #         batch_size = 30
+    #         for i in range(0, frame_count, batch_size):
+    #             batch_end = min(i + batch_size, frame_count)
+    #             for j in range(i, batch_end):
+    #                 writer.write_frame(self.to_numpy(output_frames[j]))
                 
-                if i % 90 == 0:
-                    logging.info(f"Written {i}/{frame_count} frames ({i/frame_count*100:.1f}%)")
+    #             if i % 90 == 0:
+    #                 logging.info(f"Written {i}/{frame_count} frames ({i/frame_count*100:.1f}%)")
                     
-            writer.close()
+    #         writer.close()
             
-            # Clean up audio files
-            for track in audio_tracks:
-                if os.path.exists(track):
-                    try:
-                        os.remove(track)
-                    except Exception:
-                        pass
+    #         # Clean up audio files
+    #         for track in audio_tracks:
+    #             if os.path.exists(track):
+    #                 try:
+    #                     os.remove(track)
+    #                 except Exception:
+    #                     pass
                         
-            if final_audio and final_audio not in audio_tracks and os.path.exists(final_audio):
-                try:
-                    os.remove(final_audio)
-                except Exception:
-                    pass
+    #         if final_audio and final_audio not in audio_tracks and os.path.exists(final_audio):
+    #             try:
+    #                 os.remove(final_audio)
+    #             except Exception:
+    #                 pass
                     
-            # Release GPU memory
-            del output_frames
-            torch.cuda.empty_cache()
+    #         # Release GPU memory
+    #         del output_frames
+    #         torch.cuda.empty_cache()
             
-            return output_path
+    #         return output_path
             
-        except Exception as e:
-            logging.error(f"Error in process_grid_no_alpha: {e}", exc_info=True)
-            # Clean up resources on error
-            if 'output_frames' in locals():
-                del output_frames
-            if 'writer' in locals():
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            torch.cuda.empty_cache()
-            raise
+    #     except Exception as e:
+    #         logging.error(f"Error in process_grid_no_alpha: {e}", exc_info=True)
+    #         # Clean up resources on error
+    #         if 'output_frames' in locals():
+    #             del output_frames
+    #         if 'writer' in locals():
+    #             try:
+    #                 writer.close()
+    #             except Exception:
+    #                 pass
+    #         torch.cuda.empty_cache()
+    #         raise

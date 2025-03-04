@@ -18,6 +18,7 @@ from processing_utils import ProgressTracker, encoder_queue, GPUManager
 from video_utils import run_ffmpeg_command, encode_video, validate_video
 from threading import RLock
 import mmap
+from path_registry import PathRegistry
 
 logging.basicConfig(
     level=logging.INFO,
