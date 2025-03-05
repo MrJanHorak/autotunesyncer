@@ -1,20 +1,10 @@
-import sys
 import subprocess
+import sys
 import logging
+from video_utils import run_ffmpeg_command, validate_video
+
 logging.basicConfig(level=logging.INFO)
 
-# def preprocess_video(input_path, output_path):
-#     cmd = [
-#         'ffmpeg', '-y',
-#         '-i', input_path,
-#         '-c:v', 'h264_nvenc',
-#         '-preset', 'p4',
-#         '-crf', '23',
-#         '-pix_fmt', 'yuv420p',
-#         '-movflags', '+faststart',
-#         output_path
-#     ]
-#     return subprocess.run(cmd, check=True, capture_output=True)
 def preprocess_video(input_path, output_path, target_size=None):
     """Convert video to standardized format with optional resizing"""
     try:
@@ -24,7 +14,6 @@ def preprocess_video(input_path, output_path, target_size=None):
         ]
         
         if target_size:
-            # Fix scale/pad syntax by splitting width and height
             width, height = target_size.split('x')
             scale_filter = (
                 f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
@@ -46,8 +35,8 @@ def preprocess_video(input_path, output_path, target_size=None):
         ])
         
         logging.info(f"Running ffmpeg command: {' '.join(cmd)}")
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return result
+        run_ffmpeg_command(cmd)
+        validate_video(output_path)
         
     except subprocess.CalledProcessError as e:
         logging.error(f"FFmpeg error: {e.stderr}")
