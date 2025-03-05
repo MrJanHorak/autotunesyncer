@@ -23,6 +23,7 @@ class GPUManager:
         if torch.cuda.is_available():
             self.streams = [torch.cuda.Stream() for _ in range(4)]
         self.current_stream = 0
+        self.stream_lock = threading.RLock()
         
         # Try to initialize CUDA
         try:
@@ -75,9 +76,11 @@ class GPUManager:
 
 
     def get_next_stream(self):
-        stream = self.streams[self.current_stream]
-        self.current_stream = (self.current_stream + 1) % len(self.streams)
-        return stream
+        """Get next available CUDA stream with proper locking"""
+        with self.stream_lock:  # Use fine-grained lock just for stream selection
+            stream = self.streams[self.current_stream]
+            self.current_stream = (self.current_stream + 1) % len(self.streams)
+            return stream
 
     def _get_next_stream(self):
         """Get next available CUDA stream in round-robin fashion"""
