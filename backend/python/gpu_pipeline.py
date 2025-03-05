@@ -100,19 +100,23 @@ class GPUPipelineProcessor:
                     # Get video path and timing
                     video_path = clip.get('path')
                     start_time = clip.get('start_time', 0)
-                    cell_duration = clip.get('duration', duration)
+                    
+                    # Use separate durations for video and audio if available
+                    video_duration = clip.get('video_duration', clip.get('duration', duration))
+                    audio_duration = clip.get('audio_duration', clip.get('duration', duration))
                     offset = clip.get('offset', 0)  # Time offset within chunk
                     
                     if not video_path or not os.path.exists(video_path):
                         continue
                         
-                    # Process audio - extract from video file
+                    # Process audio - extract from video file with correct duration
                     unique_id = f"{row}_{col}_{Path(video_path).stem}_{Path(output_path).stem}"
-                    self._extract_audio(video_path, temp_dir, audio_tracks, unique_id, float(offset))
+                    self._extract_audio(video_path, temp_dir, audio_tracks, unique_id, float(offset), 
+                                    duration=audio_duration)  # Pass audio duration here
                     
-                    # Load frames to GPU
+                    # Load frames with extended video duration
                     frames = self.load_video_frames_to_gpu(
-                        video_path, start_time, cell_duration)
+                        video_path, start_time, video_duration)  # Use video duration here
                     
                     if frames is not None:
                         frame_count = frames.shape[0]
@@ -313,16 +317,22 @@ class GPUPipelineProcessor:
         
         return None
 
-    def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0):
-        """Extract audio with proper timing offset"""
+    def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None):
+        """Extract audio with proper timing offset and duration"""
         try:
             # Extract base audio
             audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
             extract_cmd = [
                 'ffmpeg', '-y', '-i', video_path,
-                '-vn', '-acodec', 'pcm_s16le',
-                audio_path
+                '-vn', '-acodec', 'pcm_s16le'
             ]
+            
+            # Add duration parameter if specified
+            if duration:
+                extract_cmd.extend(['-t', str(duration)])
+                
+            extract_cmd.append(audio_path)
+            
             subprocess.run(extract_cmd, check=False, 
                         stdout=subprocess.PIPE, 
                         stderr=subprocess.PIPE)
@@ -529,3 +539,20 @@ class GPUPipelineProcessor:
                     
             # Log total processing time
             logging.info(f"Total frame writing process took {time.time() - start_time:.2f}s")
+
+
+    def _create_clip_with_extended_duration(clip_data):
+        # Get durations, falling back to legacy 'duration' field if needed
+        video_duration = clip_data.get('video_duration', clip_data.get('duration'))
+        audio_duration = clip_data.get('audio_duration', clip_data.get('duration'))
+        
+        # Create video with extended duration
+        video_clip = VideoFileClip(clip_data['path']).subclip(0, video_duration)
+        
+        # Extract and trim audio to match intended audio duration
+        audio_clip = video_clip.audio.subclip(0, audio_duration)
+        
+        # Replace audio with trimmed version
+        video_clip = video_clip.set_audio(audio_clip)
+        
+        return video_clip

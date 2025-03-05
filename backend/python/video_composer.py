@@ -173,6 +173,7 @@ class VideoComposer:
     CHUNK_DURATION = 4
     OVERLAP_DURATION = 1
     CROSSFADE_DURATION = 0.5
+    MIN_VIDEO_DURATION = 1.0
     VOLUME_MULTIPLIERS = {
         'drums': 0.2,
         'instruments': 1.5
@@ -630,19 +631,21 @@ class VideoComposer:
                 
                 # Get timing info
                 time = float(note['time']) - start_time
-                duration = float(note.get('duration', 0.5))
+                audio_duration = float(note.get('duration', 0.5))
+
+                video_duration = max(audio_duration, self.MIN_VIDEO_DURATION)
                 
                 # Find video path through registry
                 video_path = self._find_drum_video(drum_key)
                 if not video_path:
                     continue
                     
-                # Add to grid config
                 if grid_config[row][col].get('empty', True):
                     grid_config[row][col] = {
                         'path': video_path,
                         'start_time': 0,
-                        'duration': duration,
+                        'audio_duration': audio_duration,  # Original duration for audio
+                        'video_duration': video_duration,  # Extended duration for video
                         'offset': time,
                         'empty': False
                     }
@@ -654,11 +657,12 @@ class VideoComposer:
                     grid_config[row][col]['clips'].append({
                         'path': video_path,
                         'start_time': 0,
-                        'duration': duration,
+                        'audio_duration': audio_duration,
+                        'video_duration': video_duration,
                         'offset': time,
                     })
                     
-                logging.info(f"Added {drum_key} at [{row}][{col}] t={time}")
+                logging.info(f"Added {drum_key} at [{row}][{col}] t={time}, audio_dur={audio_duration:.2f}, video_dur={video_duration:.2f}")
                     
             except Exception as e:
                 logging.error(f"Error processing drum note: {e}")
@@ -698,8 +702,12 @@ class VideoComposer:
                 time_groups[time_pos] = []
             time_groups[time_pos].append(note)
         
+        # Sort time positions for look-ahead
+        sorted_times = sorted(time_groups.keys())
+        
         # Process each group of notes
-        for time_pos, notes in time_groups.items():
+        for i, time_pos in enumerate(sorted_times):
+            notes = time_groups[time_pos]
             try:
                 # Get instrument info
                 instrument_name = track.get('instrument', {}).get('name', 'piano')
@@ -712,14 +720,26 @@ class VideoComposer:
                     
                 # Calculate timing
                 time = time_pos - start_time
-                duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+                audio_duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+                
+                # Look ahead to next note on same instrument to avoid overlaps
+                next_note_time = float('inf')
+                if i < len(sorted_times) - 1:
+                    next_note_time = sorted_times[i+1]
+                
+                # Available time until next note or end of chunk
+                available_time = min(next_note_time - time_pos, end_time - time_pos)
+                
+                # Use minimum duration only if we have enough space
+                video_duration = min(max(audio_duration, self.MIN_VIDEO_DURATION), available_time)
                 
                 # Add to grid config
                 if grid_config[row][col].get('empty', True):
                     grid_config[row][col] = {
                         'path': video_path,
                         'start_time': 0,
-                        'duration': duration,
+                        'audio_duration': audio_duration,  # Original duration for audio
+                        'video_duration': video_duration,  # Extended when safe
                         'offset': time,
                         'empty': False
                     }
@@ -731,11 +751,12 @@ class VideoComposer:
                     grid_config[row][col]['clips'].append({
                         'path': video_path,
                         'start_time': 0,
-                        'duration': duration,
+                        'audio_duration': audio_duration,
+                        'video_duration': video_duration,
                         'offset': time,
                     })
                     
-                logging.info(f"Added {instrument_name} note {midi_notes[0]} at [{row}][{col}] t={time}")
+                logging.info(f"Added {instrument_name} note {midi_notes[0]} at [{row}][{col}] t={time}, audio_dur={audio_duration:.2f}, video_dur={video_duration:.2f}")
                     
             except Exception as e:
                 logging.error(f"Error processing instrument note: {e}")
@@ -814,14 +835,16 @@ class VideoComposer:
                         track_idx, chunk_notes, start_time, rows, cols
                     )
                     # Add to grid config and collect audio operations
-                    for op in drum_ops:
+                    for op in drum_ops:  # FIXED: Using drum_ops instead of instrument_ops
                         # Update grid config
                         row, col = op['position']
                         if grid_config[row][col].get('empty', True):
                             grid_config[row][col] = {
                                 'path': op['video_path'],
                                 'start_time': 0,
-                                'duration': op['duration'],
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backwards compatibility
                                 'offset': op['offset'],
                                 'empty': False
                             }
@@ -832,7 +855,9 @@ class VideoComposer:
                             grid_config[row][col]['clips'].append({
                                 'path': op['video_path'],
                                 'start_time': 0,
-                                'duration': op['duration'],
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backwards compatibility
                                 'offset': op['offset']
                             })
                         # Add to audio operations
@@ -849,7 +874,9 @@ class VideoComposer:
                             grid_config[row][col] = {
                                 'path': op['video_path'],
                                 'start_time': 0,
-                                'duration': op['duration'],
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backward compatibility
                                 'offset': op['offset'],
                                 'empty': False
                             }
@@ -860,7 +887,9 @@ class VideoComposer:
                             grid_config[row][col]['clips'].append({
                                 'path': op['video_path'],
                                 'start_time': 0,
-                                'duration': op['duration'],
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backward compatibility
                                 'offset': op['offset']
                             })
                         # Add to audio operations
@@ -921,25 +950,30 @@ class VideoComposer:
                 
                 # Get timing info
                 time_offset = float(note['time']) - start_time
-                duration = float(note.get('duration', 0.5))
+                audio_duration = float(note.get('duration', 0.5))
+                
+                # Use minimum video duration
+                video_duration = max(audio_duration, self.MIN_VIDEO_DURATION)
                 
                 # Find video path
                 video_path = self._find_drum_video(drum_key)
                 if not video_path:
                     continue
                     
-                # Add operation
+                # Add operation - SINGLE APPEND ONLY
                 operations.append({
                     'video_path': video_path,
                     'offset': time_offset,
-                    'duration': duration,
+                    'audio_duration': audio_duration,  # Original for audio
+                    'video_duration': video_duration,  # Extended for video
+                    'duration': audio_duration,  # Required for backward compatibility
                     'position': (row, col),
                     'velocity': float(note.get('velocity', 100))
                 })
                 
             except Exception as e:
                 logging.error(f"Error collecting drum operation: {e}")
-                
+                    
         return operations
 
     def _collect_instrument_operations(self, track_idx, track, chunk_notes, start_time, end_time, rows, cols):
@@ -970,8 +1004,12 @@ class VideoComposer:
                 time_groups[time_pos] = []
             time_groups[time_pos].append(note)
         
+        # Sort time positions for look-ahead
+        sorted_times = sorted(time_groups.keys())
+        
         # Process each group of notes
-        for time_pos, notes in time_groups.items():
+        for i, time_pos in enumerate(sorted_times):
+            notes = time_groups[time_pos]
             try:
                 midi_notes = [int(note['midi']) for note in notes]
                 
@@ -982,20 +1020,33 @@ class VideoComposer:
                     
                 # Calculate timing
                 time_offset = time_pos - start_time
-                duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+                audio_duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+                
+                # Look ahead to next note
+                next_note_time = float('inf')
+                if i < len(sorted_times) - 1:
+                    next_note_time = sorted_times[i+1]
+                
+                # Available time until next note or end of chunk
+                available_time = min(next_note_time - time_pos, end_time - time_pos)
+                
+                # Use minimum duration only if we have enough space
+                video_duration = min(max(audio_duration, self.MIN_VIDEO_DURATION), available_time)
                 
                 # Add operation
                 operations.append({
                     'video_path': video_path,
                     'offset': time_offset,
-                    'duration': duration,
+                    'audio_duration': audio_duration,
+                    'video_duration': video_duration,
+                    'duration': audio_duration,  # Keep for compatibility
                     'position': (row, col),
                     'velocity': float(notes[0].get('velocity', 100))
                 })
                 
             except Exception as e:
                 logging.error(f"Error collecting instrument operation: {e}")
-                
+                    
         return operations
 
 
