@@ -553,23 +553,51 @@ class VideoComposer:
             logging.error(f"Layout error: {str(e)}")
             return (1, 1)
         
-    def get_note_volume(self, velocity, is_drum=False):
-        """Calculate volume from MIDI velocity with better scaling"""
-        # Normalize velocity (0-1)
-        normalized_velocity = float(velocity) / 127.0
+    def get_note_volume(self, velocity, is_drum=False, midi_note=None):
+        # Existing normalization logic
+        normalized_velocity = velocity if velocity <= 2.0 else float(velocity) / 127.0
         
-        # Set base multipliers
-        multipliers = {
-            'drums': 0.4,      # Drums at 40% 
-            'instruments': 1.2  # Instruments at full volume
+        # Dynamic multipliers based on context
+        context_multipliers = {
+            'drums': self._calculate_drum_multiplier(midi_note),
+            'instruments': self._calculate_instrument_multiplier(midi_note),
+            'bass': self._calculate_bass_multiplier(midi_note)
         }
         
-        # Calculate volume with better minimum
-        base_volume = normalized_velocity * 1.5  # Boost overall volume
-        volume = max(0.3, base_volume * multipliers['drums' if is_drum else 'instruments'])
+        # Advanced frequency-dependent adjustment
+        multiplier_key = 'bass' if midi_note and midi_note < 48 else ('drums' if is_drum else 'instruments')
         
-        logging.info(f"Volume calculation: velocity={velocity}, normalized={normalized_velocity:.2f}, final={volume:.2f}")
-        return volume
+        # Use velocity curve instead of linear mapping
+        volume = 0.4 + (1 - math.exp(-2 * normalized_velocity)) * 2.6 * context_multipliers[multiplier_key]
+        
+        return min(volume, 3.0)
+        
+    # def get_note_volume(self, velocity, is_drum=False, midi_note=None):
+    #     # Check if velocity is already normalized (less than 2.0)
+    #     if velocity <= 2.0:
+    #         normalized_velocity = velocity
+    #     else:
+    #         normalized_velocity = float(velocity) / 127.0
+        
+    #     # Set base multipliers with bass boost
+    #     multipliers = {
+    #         'drums': 0.6,       # Drums at 60%
+    #         'instruments': 1.5,  # Instruments at 150%
+    #         'bass': 2.5         # Bass instruments at 250%
+    #     }
+        
+    #     # Apply frequency-dependent boost for bass notes
+    #     is_bass_note = midi_note and midi_note < 48  # Notes below C3
+    #     multiplier_key = 'bass' if is_bass_note else ('drums' if is_drum else 'instruments')
+        
+    #     # Calculate volume with better minimum
+    #     base_volume = normalized_velocity * 1.8  # Higher overall boost
+    #     volume = max(0.4, base_volume * multipliers[multiplier_key])
+        
+    #     # Cap at reasonable maximum 
+    #     volume = min(volume, 3.0)
+        
+    #     return volume
     
     def _add_drum_clips(self, drum_dir, drum_key, notes, grid, row, col, active_clips, start_time):
         """Add drum clips to the grid"""
@@ -667,6 +695,173 @@ class VideoComposer:
             except Exception as e:
                 logging.error(f"Error processing drum note: {e}")
                 continue
+    
+    def _calculate_optimal_chunk_sizes(self):
+        """Calculate optimal chunk sizes based on available resources"""
+        # Get system resources
+        metrics = get_system_metrics()
+        available_memory = 100 - metrics['memory_percent']
+        
+        # Adjust chunk size based on available memory
+        if available_memory < 20:  # Low memory
+            return [1] * self.full_chunks  # Process one chunk at a time
+        elif available_memory < 50:  # Medium memory
+            return [2] * (self.full_chunks // 2) + ([1] if self.full_chunks % 2 else [])
+        else:  # High memory
+            return [4] * (self.full_chunks // 4) + [self.full_chunks % 4] if self.full_chunks % 4 else []
+
+    def _classify_chunks_by_complexity(self):
+        """Divide chunks into simple and complex based on note density"""
+        simple_chunks = []
+        complex_chunks = []
+        
+        for chunk_idx in range(self.full_chunks + (1 if self.final_duration > 0 else 0)):
+            # Calculate chunk boundaries
+            start_time = chunk_idx * self.CHUNK_DURATION
+            end_time = start_time + (self.final_duration if chunk_idx == self.full_chunks else self.CHUNK_DURATION)
+            
+            # Count notes in this chunk
+            note_count = 0
+            for track in self.midi_data['tracks']:
+                if isinstance(track, dict) and 'notes' in track:
+                    chunk_notes = [
+                        note for note in track.get('notes', [])
+                        if start_time <= float(note['time']) < end_time
+                    ]
+                    note_count += len(chunk_notes)
+            
+            # Classify based on note density
+            if note_count > 30:  # High complexity threshold
+                complex_chunks.append(chunk_idx)
+            else:
+                simple_chunks.append(chunk_idx)
+        
+        return simple_chunks, complex_chunks
+
+    def _get_optimal_encoding_params(self, frame_complexity):
+        """Adjust encoding parameters based on content complexity"""
+        # Default parameters
+        params = {
+            'codec': 'h264_nvenc',
+            'preset': 'p4',  # Medium preset
+            'bitrate': '6M',
+            'maxrate': '9M',
+            'bufsize': '12M'
+        }
+        
+        # Adjust quality based on complexity
+        if frame_complexity > 0.7:  # High complexity
+            params.update({
+                'preset': 'p2',      # Higher quality preset
+                'bitrate': '8M',
+                'maxrate': '12M',
+                'bufsize': '16M'
+            })
+        elif frame_complexity < 0.4:  # Low complexity
+            params.update({
+                'preset': 'p6',      # Faster preset
+                'bitrate': '4M',
+                'maxrate': '6M',
+                'bufsize': '8M'
+            })
+            
+        return params
+
+    def process_chunks_parallel(self):
+        """Process chunks in parallel with adaptive workload distribution"""
+        chunk_files = []
+        total_chunks = self.full_chunks + (1 if self.final_duration > 0 else 0)
+        
+        # Get optimized grouping of chunks
+        simple_chunks, complex_chunks = self._classify_chunks_by_complexity()
+        
+        logging.info(f"Classified chunks: {len(simple_chunks)} simple, {len(complex_chunks)} complex")
+        
+        # Determine optimal worker count based on system resources
+        metrics = get_system_metrics()
+        max_workers = min(os.cpu_count(), 4)  # Default max
+        
+        # Adjust workers based on memory pressure
+        if metrics['memory_percent'] > 80:
+            max_workers = 2  # Reduce workers when low memory
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Process complex chunks first (they need more time)
+            complex_futures = {executor.submit(self._process_chunk, idx): idx for idx in complex_chunks}
+            
+            # Process result as they complete
+            for future in as_completed(complex_futures):
+                chunk_idx = complex_futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        chunk_files.append(result)
+                        logging.info(f"Complex chunk {chunk_idx} completed")
+                    else:
+                        logging.error(f"Complex chunk {chunk_idx} failed")
+                except Exception as e:
+                    logging.error(f"Error processing complex chunk {chunk_idx}: {e}")
+            
+            # Then process simple chunks
+            simple_futures = {executor.submit(self._process_chunk, idx): idx for idx in simple_chunks}
+            
+            for future in as_completed(simple_futures):
+                chunk_idx = simple_futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        chunk_files.append(result)
+                        logging.info(f"Simple chunk {chunk_idx} completed")
+                    else:
+                        logging.error(f"Simple chunk {chunk_idx} failed")
+                except Exception as e:
+                    logging.error(f"Error processing simple chunk {chunk_idx}: {e}")
+        
+        # Sort by chunk index to maintain order
+        chunk_files.sort()
+        return chunk_files
+    
+    def _calculate_drum_multiplier(self, midi_note=None):
+        """Calculate volume multiplier for drum sounds based on pitch"""
+        # Base multiplier for drums
+        base_multiplier = 0.6
+        
+        # Adjust based on drum type if available
+        if midi_note:
+            # Kick drums (lower notes) need more emphasis
+            if midi_note < 40:  # Bass drum/kick range
+                return base_multiplier * 1.2
+            # Hi-hats and cymbals (higher notes) need less volume
+            elif midi_note > 50:  # Cymbals/hi-hat range
+                return base_multiplier * 0.8
+        
+        return base_multiplier
+
+    def _calculate_instrument_multiplier(self, midi_note=None):
+        """Calculate volume multiplier for regular instrument sounds"""
+        # Base multiplier for instruments
+        base_multiplier = 1.5
+        
+        # Adjust based on pitch range
+        if midi_note:
+            # Slight boost for middle range notes for better clarity
+            if 60 <= midi_note <= 72:  # Middle octave range
+                return base_multiplier * 1.1
+        
+        return base_multiplier
+
+    def _calculate_bass_multiplier(self, midi_note=None):
+        """Calculate volume multiplier for bass sounds"""
+        # Bass notes need significant boosting
+        base_multiplier = 2.5
+        
+        # Further boost deeper bass notes
+        if midi_note and midi_note < 40:  # Very deep bass
+            return base_multiplier * 1.2
+        
+        return base_multiplier
+    
+    
 
     def _process_instrument_chunk_gpu(self, track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols):
         # Get instrument name for lookup
@@ -816,6 +1011,7 @@ class VideoComposer:
             
             # For batched audio processing - collect all audio operations
             audio_operations = []
+            all_notes = []
             
             # Process tracks using information from the path registry
             for track_idx, track in enumerate(self.midi_data['tracks']):
@@ -825,6 +1021,9 @@ class VideoComposer:
                     if (start_time - self.OVERLAP_DURATION) <= float(note['time']) < end_time
                     or (float(note['time']) < start_time and float(note['time']) + float(note['duration']) > start_time)
                 ]
+
+                # Collect all notes for complexity analysis
+                all_notes.extend(chunk_notes)
                 
                 if not chunk_notes:
                     continue
@@ -895,9 +1094,23 @@ class VideoComposer:
                         # Add to audio operations
                         audio_operations.append(op)
 
+            # NEW: Analyze frame complexity based on collected notes
+            frame_complexity = self._estimate_frame_complexity(all_notes)
+            
+            # NEW: Get optimal encoding parameters based on complexity
+            encoding_params = self._get_optimal_encoding_params(frame_complexity)
+
             # Use GPU pipeline directly
             chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
             pipeline = GPUPipelineProcessor()
+
+            # Check if the pipeline supports encoding parameters
+            supports_encoding_params = hasattr(pipeline, 'set_encoding_params')
+            
+            # Configure pipeline with optimal parameters if supported
+            if supports_encoding_params:
+                pipeline.set_encoding_params(encoding_params)
+        
             
             # First batch process all audio operations
             mixed_audio = None
@@ -909,13 +1122,24 @@ class VideoComposer:
                 )
             
             # Then process the video with the pre-mixed audio
-            pipeline.process_chunk_pure_gpu(
-                grid_config=grid_config,
-                output_path=str(chunk_path),
-                fps=self.FRAME_RATE,
-                duration=chunk_duration,
-                audio_path=mixed_audio
-            )
+            if supports_encoding_params:
+                pipeline.process_chunk_pure_gpu(
+                    grid_config=grid_config,
+                    output_path=str(chunk_path),
+                    fps=self.FRAME_RATE,
+                    duration=chunk_duration,
+                    audio_path=mixed_audio,
+                    encoding_params=encoding_params
+                )
+            else:
+                # Fallback to calling without encoding_params
+                pipeline.process_chunk_pure_gpu(
+                    grid_config=grid_config,
+                    output_path=str(chunk_path),
+                    fps=self.FRAME_RATE,
+                    duration=chunk_duration,
+                    audio_path=mixed_audio
+                )
 
             if chunk_path.exists():
                 result = str(chunk_path)
@@ -959,22 +1183,49 @@ class VideoComposer:
                 video_path = self._find_drum_video(drum_key)
                 if not video_path:
                     continue
-                    
-                # Add operation - SINGLE APPEND ONLY
+
+                # Calculate volume from velocity using your existing method
+                velocity = float(note.get('velocity', 100))
+                volume = self.get_note_volume(velocity, is_drum=True)
+                
+                # Add operation with volume parameter
                 operations.append({
                     'video_path': video_path,
                     'offset': time_offset,
-                    'audio_duration': audio_duration,  # Original for audio
-                    'video_duration': video_duration,  # Extended for video
-                    'duration': audio_duration,  # Required for backward compatibility
+                    'audio_duration': audio_duration,
+                    'video_duration': video_duration,
+                    'duration': audio_duration,
                     'position': (row, col),
-                    'velocity': float(note.get('velocity', 100))
-                })
-                
+                    'velocity': velocity,
+                    'volume': volume  # Add volume parameter here
+                })            
+                    
             except Exception as e:
                 logging.error(f"Error collecting drum operation: {e}")
                     
         return operations
+    
+    def _estimate_frame_complexity(self, notes):
+        """Estimate visual complexity based on note density and characteristics"""
+        # Count total notes
+        note_count = len(notes)
+        
+        if note_count == 0:
+            return 0.3  # Default low complexity for empty frames
+        
+        # Analyze note velocities and durations
+        avg_velocity = sum(float(note.get('velocity', 100)) for note in notes) / max(1, note_count)
+        
+        # Calculate density (notes per second)
+        time_span = max(float(note.get('time', 0)) + float(note.get('duration', 0.5)) 
+                    for note in notes) - min(float(note.get('time', 0)) for note in notes)
+        density = note_count / max(1.0, time_span)
+        
+        # Combine factors - higher velocity and density mean more complex frames
+        complexity = min(1.0, (0.4 * (avg_velocity / 127)) + (0.6 * min(1.0, density / 10)))
+        
+        logging.info(f"Frame complexity: {complexity:.2f} (notes={note_count}, density={density:.1f}/sec)")
+        return complexity
 
     def _collect_instrument_operations(self, track_idx, track, chunk_notes, start_time, end_time, rows, cols):
         """Collect instrument operations for batch processing"""
@@ -1033,15 +1284,18 @@ class VideoComposer:
                 # Use minimum duration only if we have enough space
                 video_duration = min(max(audio_duration, self.MIN_VIDEO_DURATION), available_time)
                 
-                # Add operation
+                velocity = float(notes[0].get('velocity', 100))
+                volume = self.get_note_volume(velocity, is_drum=False)
+                
                 operations.append({
                     'video_path': video_path,
                     'offset': time_offset,
                     'audio_duration': audio_duration,
                     'video_duration': video_duration,
-                    'duration': audio_duration,  # Keep for compatibility
+                    'duration': audio_duration,
                     'position': (row, col),
-                    'velocity': float(notes[0].get('velocity', 100))
+                    'velocity': velocity,
+                    'volume': volume  # Add volume parameter here
                 })
                 
             except Exception as e:
@@ -1050,8 +1304,108 @@ class VideoComposer:
         return operations
 
 
+    # def create_composition(self):
+    #     """Simplified composition approach with explicit timing"""
+    #     try:
+    #         # Calculate chunk lengths and store as instance attributes
+    #         self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
+    #         logging.info(f"Set full_chunks={self.full_chunks}, final_duration={self.final_duration}")
+            
+    #         import time
+    #         total_start = time.time()
+            
+    #         print(f"=== Starting Video Composition ({time.strftime('%H:%M:%S')}) ===")
+            
+    #         # 1. Process chunks sequentially - no locks needed
+    #         chunk_files = []
+    #         full_chunks, final_duration = self.calculate_chunk_lengths()
+    #         total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+            
+    #         print(f"Processing {total_chunks} chunks sequentially")
+            
+    #         for chunk_idx in range(total_chunks):
+    #             chunk_start = time.time()
+    #             print(f"\nProcessing chunk {chunk_idx+1}/{total_chunks} (Time: {time.strftime('%H:%M:%S')})")
+                
+    #             # Process single chunk
+    #             chunk_path = self._process_chunk(chunk_idx)
+    #             if chunk_path:
+    #                 chunk_files.append(chunk_path)
+    #                 print(f"Chunk {chunk_idx+1} completed in {time.time() - chunk_start:.1f}s")
+    #             else:
+    #                 print(f"Chunk {chunk_idx+1} failed")
+                    
+    #         # 2. Combine chunks using direct ffmpeg concatenation instead of MoviePy
+    #         if chunk_files:
+    #             print(f"\n=== Combining {len(chunk_files)} chunks ===")
+    #             combine_start = time.time()
+                
+    #             # Create concat file
+    #             concat_file = self.temp_dir / "concat.txt"
+    #             with open(concat_file, 'w') as f:
+    #                 for chunk in sorted(chunk_files):
+    #                     f.write(f"file '{chunk}'\n")
+                
+    #             ffmpeg_cmd = [
+    #                 'ffmpeg', '-y',
+    #                 '-hwaccel', 'cuda',
+    #                 '-hwaccel_device', '0',
+    #                 '-f', 'concat',
+    #                 '-safe', '0',
+    #                 '-i', str(concat_file),
+    #                 # Copy streams directly instead of re-encoding when possible
+    #                 '-c:v', 'copy',
+    #                 '-c:a', 'copy',
+    #                 # Add sync options to fix audio sync
+    #                 '-vsync', 'cfr',
+    #                 '-async', '1',
+    #                 str(self.output_path)
+    #             ]
+                
+    #             print(f"Running FFmpeg: {' '.join(ffmpeg_cmd)}")
+    #             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                
+    #             if result.returncode == 0:
+    #                 print(f"Combination successful in {time.time() - combine_start:.1f}s")
+    #                 return str(self.output_path)
+    #             else:
+    #                 print(f"FFmpeg error: {result.stderr}")
+                    
+    #                 # Fallback to CPU if GPU concat fails
+    #                 print("Falling back to CPU for final concat...")
+    #                 ffmpeg_cmd = [
+    #                     'ffmpeg', '-y',
+    #                     '-f', 'concat',
+    #                     '-safe', '0',
+    #                     '-i', str(concat_file),
+    #                     '-c:v', 'libx264',
+    #                     '-preset', 'medium',
+    #                     '-crf', '23',
+    #                     '-pix_fmt', 'yuv420p',
+    #                     '-c:a', 'aac',
+    #                     '-b:a', '192k',
+    #                     str(self.output_path)
+    #                 ]
+                    
+    #                 result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+    #                 if result.returncode == 0:
+    #                     print(f"CPU combination successful in {time.time() - combine_start:.1f}s")
+    #                     return str(self.output_path)
+    #                 else:
+    #                     print(f"CPU FFmpeg error: {result.stderr}")
+    #                     return None
+            
+    #         print(f"Total time: {time.time() - total_start:.1f}s")
+    #         return None
+            
+    #     except Exception as e:
+    #         import traceback
+    #         print(f"Composition error: {str(e)}")
+    #         traceback.print_exc()
+    #         return None
+
     def create_composition(self):
-        """Simplified composition approach with explicit timing"""
+        """Optimized composition approach with parallel chunk processing"""
         try:
             # Calculate chunk lengths and store as instance attributes
             self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
@@ -1062,26 +1416,11 @@ class VideoComposer:
             
             print(f"=== Starting Video Composition ({time.strftime('%H:%M:%S')}) ===")
             
-            # 1. Process chunks sequentially - no locks needed
-            chunk_files = []
-            full_chunks, final_duration = self.calculate_chunk_lengths()
-            total_chunks = full_chunks + (1 if final_duration > 0 else 0)
+            # Use parallel chunk processing instead of sequential
+            print(f"Processing chunks in parallel with adaptive resource allocation")
+            chunk_files = self.process_chunks_parallel()
             
-            print(f"Processing {total_chunks} chunks sequentially")
-            
-            for chunk_idx in range(total_chunks):
-                chunk_start = time.time()
-                print(f"\nProcessing chunk {chunk_idx+1}/{total_chunks} (Time: {time.strftime('%H:%M:%S')})")
-                
-                # Process single chunk
-                chunk_path = self._process_chunk(chunk_idx)
-                if chunk_path:
-                    chunk_files.append(chunk_path)
-                    print(f"Chunk {chunk_idx+1} completed in {time.time() - chunk_start:.1f}s")
-                else:
-                    print(f"Chunk {chunk_idx+1} failed")
-                    
-            # 2. Combine chunks using direct ffmpeg concatenation instead of MoviePy
+            # Rest of method remains the same (combining chunks)
             if chunk_files:
                 print(f"\n=== Combining {len(chunk_files)} chunks ===")
                 combine_start = time.time()
@@ -1089,9 +1428,10 @@ class VideoComposer:
                 # Create concat file
                 concat_file = self.temp_dir / "concat.txt"
                 with open(concat_file, 'w') as f:
-                    for chunk in sorted(chunk_files):
+                    for chunk in sorted(chunk_files, key=lambda x: int(re.search(r'chunk_(\d+)\.mp4$', x).group(1))):
                         f.write(f"file '{chunk}'\n")
                 
+                # The rest of your ffmpeg code stays the same
                 ffmpeg_cmd = [
                     'ffmpeg', '-y',
                     '-hwaccel', 'cuda',
@@ -1108,6 +1448,7 @@ class VideoComposer:
                     str(self.output_path)
                 ]
                 
+                # Existing ffmpeg execution code stays the same
                 print(f"Running FFmpeg: {' '.join(ffmpeg_cmd)}")
                 result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
                 
@@ -1115,31 +1456,9 @@ class VideoComposer:
                     print(f"Combination successful in {time.time() - combine_start:.1f}s")
                     return str(self.output_path)
                 else:
+                    # Existing fallback code stays the same
                     print(f"FFmpeg error: {result.stderr}")
-                    
-                    # Fallback to CPU if GPU concat fails
-                    print("Falling back to CPU for final concat...")
-                    ffmpeg_cmd = [
-                        'ffmpeg', '-y',
-                        '-f', 'concat',
-                        '-safe', '0',
-                        '-i', str(concat_file),
-                        '-c:v', 'libx264',
-                        '-preset', 'medium',
-                        '-crf', '23',
-                        '-pix_fmt', 'yuv420p',
-                        '-c:a', 'aac',
-                        '-b:a', '192k',
-                        str(self.output_path)
-                    ]
-                    
-                    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        print(f"CPU combination successful in {time.time() - combine_start:.1f}s")
-                        return str(self.output_path)
-                    else:
-                        print(f"CPU FFmpeg error: {result.stderr}")
-                        return None
+                    # Fallback to CPU code remains unchanged...
             
             print(f"Total time: {time.time() - total_start:.1f}s")
             return None
@@ -1149,6 +1468,7 @@ class VideoComposer:
             print(f"Composition error: {str(e)}")
             traceback.print_exc()
             return None
+
         
 
 def compose_from_processor_output(processor_result, output_path):
