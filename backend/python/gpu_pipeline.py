@@ -49,7 +49,7 @@ class GPUPipelineProcessor:
                 # Move to GPU
                 frame_tensor = torch.from_numpy(frame).to(self.device)
                 frames.append(frame_tensor)
-                
+
             cap.release()
             
             if not frames:
@@ -57,6 +57,7 @@ class GPUPipelineProcessor:
                 return None
                 
             frames_tensor = torch.stack(frames)
+            frames_tensor = frames_tensor.float()
             logging.info(f"Loaded {len(frames)} frames from {os.path.basename(video_path)}")
             return frames_tensor
             
@@ -148,6 +149,9 @@ class GPUPipelineProcessor:
                         # Calculate frame positions
                         offset_frames = int(offset * fps)
                         cell_frame_count = min(frames.shape[0], frame_count - offset_frames)
+
+                        # Convert to float32 before interpolation
+                        frames = frames.float()
                         
                         # Resize frames to cell size
                         if frames.shape[1:3] != (cell_h, cell_w):
@@ -156,7 +160,8 @@ class GPUPipelineProcessor:
                                 size=(cell_h, cell_w),
                                 mode='bilinear'
                             ).permute(0,2,3,1).to(torch.uint8)  # NCHW -> NHWC
-                        
+                        # Convert back to uint8 if needed for other operations
+                        frames = frames.byte()
                         # Copy frames to output tensor with proper offset
                         for i in range(min(frames.shape[0], int(duration * fps))):
     # Determine the position in the output timeline
@@ -214,6 +219,57 @@ class GPUPipelineProcessor:
         subprocess.run(cmd, check=True)
         shutil.move(temp_output, video_path)
 
+    # def batch_process_audio(self, audio_files, output_path):
+    #     """Process multiple audio operations in a single FFmpeg call"""
+    #     if not audio_files:
+    #         return None
+            
+    #     cmd = ['ffmpeg', '-y']
+    #     filter_parts = []
+        
+    #     # Add all inputs first
+    #     for i, audio_file in enumerate(audio_files):
+    #         # Fix: Check for either 'path' or 'video_path' key
+    #         path = audio_file.get('path')
+    #         if path is None:
+    #             path = audio_file.get('video_path')  # Try alternate key name
+                
+    #         if not path:
+    #             logging.warning(f"Skipping audio file with no path: {audio_file}")
+    #             continue
+                
+    #         cmd.extend(['-i', path])
+            
+    #         # Calculate offset in milliseconds
+    #         delay_ms = int(audio_file.get('offset', 0) * 1000)
+            
+    #         # Create input label and apply delay if needed
+    #         if delay_ms > 0:
+    #             filter_parts.append(f'[{i}]adelay={delay_ms}|{delay_ms}[a{i}]')
+    #         else:
+    #             filter_parts.append(f'[{i}]acopy[a{i}]')
+        
+    #     # Create mix part with proper crossfading
+    #     inputs = ''.join(f'[a{i}]' for i in range(len(audio_files)))
+    #     filter_parts.append(
+    #         f'{inputs}amix=inputs={len(audio_files)}:duration=longest:normalize=0,'
+    #         f'afade=t=in:st=0:d=0.5,'
+    #         f'afade=t=out:st=3.5:d=0.5'
+    #         '[aout]'
+    #     )
+        
+    #     # Complete the command
+    #     cmd.extend([
+    #         '-filter_complex', ';'.join(filter_parts),
+    #         '-map', '[aout]',
+    #         '-c:a', 'aac', '-b:a', '192k',
+    #         output_path
+    #     ])
+        
+    #     # Execute in a single call
+    #     subprocess.run(cmd, check=True)
+    #     return output_path
+
     def batch_process_audio(self, audio_files, output_path):
         """Process multiple audio operations in a single FFmpeg call"""
         if not audio_files:
@@ -238,16 +294,21 @@ class GPUPipelineProcessor:
             # Calculate offset in milliseconds
             delay_ms = int(audio_file.get('offset', 0) * 1000)
             
-            # Create input label and apply delay if needed
+            # Get volume parameter - this is the key addition
+            volume = float(audio_file.get('volume', 1.0))
+            
+            # Create input label and apply delay and volume if needed
             if delay_ms > 0:
-                filter_parts.append(f'[{i}]adelay={delay_ms}|{delay_ms}[a{i}]')
+                # Add volume control to the filter chain
+                filter_parts.append(f'[{i}]volume={volume},adelay={delay_ms}|{delay_ms}[a{i}]')
             else:
-                filter_parts.append(f'[{i}]acopy[a{i}]')
+                # Just apply volume when no delay is needed
+                filter_parts.append(f'[{i}]volume={volume}[a{i}]')
         
         # Create mix part with proper crossfading
         inputs = ''.join(f'[a{i}]' for i in range(len(audio_files)))
         filter_parts.append(
-            f'{inputs}amix=inputs={len(audio_files)}:duration=longest:normalize=0,'
+            f'{inputs}amix=inputs={len(audio_files)}:duration=longest:normalize=1,' # Changed normalize=0 to normalize=1
             f'afade=t=in:st=0:d=0.5,'
             f'afade=t=out:st=3.5:d=0.5'
             '[aout]'
@@ -317,14 +378,15 @@ class GPUPipelineProcessor:
         
         return None
 
-    def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None):
+    def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0):
         """Extract audio with proper timing offset and duration"""
         try:
-            # Extract base audio
+            # Extract base audio with volume adjustment
             audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
             extract_cmd = [
                 'ffmpeg', '-y', '-i', video_path,
-                '-vn', '-acodec', 'pcm_s16le'
+                '-vn', '-af', f'volume={volume}',  # Add volume filter
+                '-acodec', 'pcm_s16le'
             ]
             
             # Add duration parameter if specified
@@ -333,24 +395,35 @@ class GPUPipelineProcessor:
                 
             extract_cmd.append(audio_path)
             
-            subprocess.run(extract_cmd, check=False, 
-                        stdout=subprocess.PIPE, 
-                        stderr=subprocess.PIPE)
+            # subprocess.run(extract_cmd, check=False, 
+            #             stdout=subprocess.PIPE, 
+            #             stderr=subprocess.PIPE)
                         
-            if not os.path.exists(audio_path):
-                return False
+            # if not os.path.exists(audio_path):
+            #     return False
                 
-            # Add timing information
+            # # Add timing information
+            # audio_tracks.append({
+            #     'path': audio_path,
+            #     'offset': offset
+            # })
+            # return True
+
+            subprocess.run(extract_cmd, check=True)
+        
+            # Add to audio tracks list with proper offset
             audio_tracks.append({
                 'path': audio_path,
-                'offset': offset
+                'offset': offset,
+                'volume': volume  # Store volume for debugging
             })
-            return True
+
+            return audio_path
+            
                 
         except Exception as e:
             logging.error(f"Audio extraction error: {e}")
-            return False
-    
+            return None
 
     def get_video_path(self, video_type, *args):
         """Generic video path finder"""
