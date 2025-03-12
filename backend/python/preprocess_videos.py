@@ -41,6 +41,40 @@ def preprocess_video(input_path, output_path, target_size=None):
     except subprocess.CalledProcessError as e:
         logging.error(f"FFmpeg error: {e.stderr}")
         raise
+
+def normalize_track_indices(grid_arrangement):
+    """Normalize sparse track indices to sequential ones for optimal grid layout"""
+    if not grid_arrangement:
+        return {}
+    
+    # Separate numeric and non-numeric keys
+    numeric_indices = []
+    non_numeric_keys = []
+    
+    for key in grid_arrangement.keys():
+        try:
+            numeric_indices.append(int(key))
+        except ValueError:
+            non_numeric_keys.append(key)
+    
+    # Sort numeric indices
+    numeric_indices.sort()
+    
+    # Create mapping from original to normalized indices for numeric keys only
+    mapping = {str(old_idx): str(new_idx) for new_idx, old_idx in enumerate(numeric_indices)}
+    
+    # Map positions using the new indices, preserving non-numeric keys
+    normalized = {}
+    for old_idx, position in grid_arrangement.items():
+        if old_idx in non_numeric_keys:
+            # Keep non-numeric keys as-is (like 'drum_crash_cymbal')
+            normalized[old_idx] = position
+        else:
+            # Map numeric keys to new indices
+            new_idx = mapping.get(old_idx, old_idx)
+            normalized[new_idx] = position
+    
+    return normalized
     
 if __name__ == '__main__':
     input_path = sys.argv[1]

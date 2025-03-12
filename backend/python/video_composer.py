@@ -1,4 +1,5 @@
 import os
+import re 
 import gc
 import subprocess
 import sys
@@ -264,6 +265,23 @@ class VideoComposer:
             logging.error(f"VideoComposer init error: {str(e)}")
             raise
 
+    @staticmethod
+    def normalize_midi_timing(midi_data):
+        """Adjust all note timings to start at the same point"""
+        # Find earliest note time across all tracks
+        min_time = float('inf')
+        for track in midi_data['tracks']:
+            if track.get('notes'):
+                track_min = min(float(note.get('time', 0)) for note in track['notes'])
+                min_time = min(min_time, track_min)
+        
+        # Shift all notes to start at 0
+        for track in midi_data['tracks']:
+            for note in track.get('notes', []):
+                note['time'] = float(note['time']) - min_time
+        
+        return midi_data
+
     def _register_video_paths(self):
         """Register paths for all videos"""
         # Get singleton instance
@@ -318,29 +336,137 @@ class VideoComposer:
         self.temp_dir.mkdir(exist_ok=True, parents=True)
         logging.info(f"Resolved path: {self.processed_videos_dir}")
 
+    def debug_midi_track_timing(self, midi_data):
+        """Debug function to print detailed note timing for all tracks"""
+        logging.info("\n=== DETAILED MIDI NOTE TIMING ===")
+        
+        for track_idx, track in enumerate(midi_data['tracks']):
+            instrument = track.get('instrument', {}).get('name', f'Unknown-{track_idx}')
+            notes = track.get('notes', [])
+            
+            if not notes:
+                logging.info(f"Track {track_idx} ({instrument}): NO NOTES")
+                continue
+                
+            # Sort notes by time
+            sorted_notes = sorted(notes, key=lambda n: float(n.get('time', 0)))
+            first_time = float(sorted_notes[0].get('time', 0))
+            last_time = float(sorted_notes[-1].get('time', 0))
+            
+            logging.info(f"Track {track_idx} ({instrument}): {len(notes)} notes")
+            logging.info(f"  Time range: {first_time:.2f}s to {last_time:.2f}s")
+            # FIX: Use double quotes for inner dictionary keys
+            note_times = [f"{float(n.get('time', 0)):.2f}s" for n in sorted_notes[:5]]
+            logging.info(f"  First 5 notes: {', '.join(note_times)}")
+
+    def _analyze_midi_timing(self):
+        """Analyze and log detailed timing information for all tracks"""
+        logging.info("\n=== DETAILED MIDI TIMING ANALYSIS ===")
+        
+        # Analyze each track
+        for track_id, track in self.tracks.items():
+            instrument_name = track.get('instrument', {}).get('name', 'unknown')
+            notes = track.get('notes', [])
+            if not notes:
+                continue
+                
+            # Sort notes by time
+            sorted_notes = sorted(notes, key=lambda n: float(n.get('time', 0)))
+            
+            # Get time range statistics
+            first_note_time = float(sorted_notes[0].get('time', 0))
+            last_note_time = float(sorted_notes[-1].get('time', 0)) + float(sorted_notes[-1].get('duration', 0))
+            total_duration = last_note_time - first_note_time
+            note_count = len(notes)
+            
+            # Calculate which chunks these notes belong to
+            first_chunk = int(first_note_time / self.CHUNK_DURATION)
+            last_chunk = int(last_note_time / self.CHUNK_DURATION)
+            chunk_count = last_chunk - first_chunk + 1
+            
+            # Group notes by chunk
+            notes_by_chunk = {}
+            for chunk_idx in range(first_chunk, last_chunk + 1):
+                chunk_start = chunk_idx * self.CHUNK_DURATION
+                chunk_end = chunk_start + self.CHUNK_DURATION
+                
+                # Count notes in this chunk time range
+                chunk_notes = [
+                    note for note in sorted_notes
+                    if chunk_start <= float(note.get('time', 0)) < chunk_end
+                ]
+                notes_by_chunk[chunk_idx] = len(chunk_notes)
+            
+            # Log detailed timing info for this track
+            logging.info(f"\nTrack {track_id}: {instrument_name}")
+            logging.info(f"  Total notes: {note_count}")
+            logging.info(f"  Time range: {first_note_time:.2f}s to {last_note_time:.2f}s (duration: {total_duration:.2f}s)")
+            logging.info(f"  Chunks: {first_chunk} to {last_chunk} (spans {chunk_count} chunks)")
+            
+            # Log distribution of notes per chunk
+            chunk_log = "  Notes per chunk: "
+            for chunk_idx, count in sorted(notes_by_chunk.items()):
+                chunk_log += f"[{chunk_idx}:{count}] "
+            logging.info(chunk_log)
+            
+            # Log first 5 note times for verification
+            note_times = [float(note.get('time', 0)) for note in sorted_notes[:5]]
+            logging.info(f"  First 5 note times: {', '.join([f'{t:.2f}s' for t in note_times])}")
+            
+            # For piano track specifically, log more details
+            if 'piano' in instrument_name.lower():
+                logging.info(f"  === PIANO TRACK DETAILED ANALYSIS ===")
+                all_note_times = [float(note.get('time', 0)) for note in sorted_notes]
+                # Find any unusual gaps in timing
+                note_gaps = [all_note_times[i+1] - all_note_times[i] for i in range(len(all_note_times)-1)]
+                avg_gap = sum(note_gaps) / max(1, len(note_gaps))
+                max_gap = max(note_gaps) if note_gaps else 0
+                
+                logging.info(f"  Piano avg note gap: {avg_gap:.2f}s, max gap: {max_gap:.2f}s")
+                # Log all piano note times for detailed investigation
+                logging.info(f"  Piano note timestamps (first 20): {', '.join([f'{t:.2f}s' for t in all_note_times[:20]])}")
+
     def _process_midi_data(self, midi_data):
-        """Process MIDI data and organize tracks"""
+        """Process MIDI data with correct handling of duplicate instruments"""
         if not isinstance(midi_data, dict):
             raise ValueError(f"Expected dict for midi_data, got {type(midi_data)}")
             
         if 'tracks' not in midi_data:
             raise ValueError("Missing 'tracks' in midi_data")
+        
+        self.debug_midi_track_timing(midi_data)
+
+        # Add normalization here - before any track processing
+        logging.info("\n=== Normalizing MIDI Timing ===")
+        midi_data = VideoComposer.normalize_midi_timing(midi_data)
+        logging.info("MIDI timing normalized - all tracks now start from the same time reference")
+
+        self.debug_midi_track_timing(midi_data)
 
         tracks = midi_data['tracks']
         self.tracks = {}
         self.drum_tracks = []
         self.regular_tracks = []
         
-        logging.info("\n=== Processing Tracks ===")
+        logging.info(f"\n=== Processing Tracks ===")
+        logging.info(f"MIDI track structure: {type(tracks)}, {'dict keys' if isinstance(tracks, dict) else 'list length'}: {len(tracks)}")
         
-        # List all preprocessed files
+        # List all preprocessed files for drum processing
         upload_files = list(self.uploads_dir.glob('processed_*.mp4'))
         logging.info(f"\nPreprocessed files in ({self.uploads_dir}):")
         for file in upload_files:
             logging.info(f"Found preprocessed file: {file.name}")
 
+        # Process tracks - ensure we preserve all tracks including duplicates
         for idx, track in enumerate(tracks if isinstance(tracks, list) else tracks.values()):
+            # Always use the original track index as the track ID to prevent overwriting
             track_id = str(idx)
+            
+            # Store ID in track data itself for later lookup
+            if isinstance(track, dict):
+                track['id'] = track_id
+                track['original_index'] = idx  # Store original index for reference
+                
             normalized_track = self._normalize_track(track)
             
             # Check if it's a drum track
@@ -353,7 +479,7 @@ class VideoComposer:
             )
             
             if is_drum:
-                logging.info(f"\nProcessing drum track {track_id}")
+                logging.info(f"\nProcessing drum track {idx}/{track_id}")
                 drum_dir = self.processed_videos_dir / f"track_{idx}_drums"
                 drum_dir.mkdir(exist_ok=True)
                 
@@ -374,19 +500,129 @@ class VideoComposer:
                         if normalized_name in file.name.lower():
                             dest_file = drum_dir / f"{normalized_name}.mp4"
                             # Copy preprocessed file to drum directory
-                            shutil.copy2(str(file), str(dest_file))
-                            logging.info(f"Copied preprocessed drum file: {file.name} -> {dest_file}")
+                            try:
+                                shutil.copy2(str(file), str(dest_file))
+                                logging.info(f"Copied preprocessed drum file: {file.name} -> {dest_file}")
+                            except Exception as e:
+                                logging.error(f"Error copying drum file: {e}")
                             break
                     else:
                         logging.warning(f"No preprocessed file found for {normalized_name}")
                 
                 self.drum_tracks.append(normalized_track)
-                
             else:
                 self.regular_tracks.append(normalized_track)
+                # IMPORTANT: Use track_id (index) to store track, not instrument name
                 self.tracks[track_id] = normalized_track
+                logging.info(f"Added regular track {track_id}: {normalized_track.get('instrument', {}).get('name')}")
 
-        logging.info(f"\nProcessed {len(self.tracks)} regular tracks and {len(self.drum_tracks)} drum tracks")
+        logging.info(f"\nProcessed {len(self.regular_tracks)} regular tracks and {len(self.drum_tracks)} drum tracks")
+
+    def _process_single_track(self, track_id, track):
+        """Process a single track with consistent ID handling"""
+        normalized_track = self._normalize_track(track)
+        
+        # Check if it's a drum track
+        is_drum = (
+            normalized_track.get('isDrum') or 
+            normalized_track.get('instrument', {}).get('isDrum') or
+            normalized_track.get('channel') == 9 or
+            any(name in normalized_track.get('instrument', {}).get('name', '').lower() 
+                for name in ['drum', 'percussion', 'kit'])
+        )
+        
+        if is_drum:
+            self.drum_tracks.append(normalized_track)
+        else:
+            self.regular_tracks.append(normalized_track)
+            self.tracks[track_id] = normalized_track
+
+    # def _process_midi_data(self, midi_data):
+    #     """Process MIDI data and organize tracks"""
+    #     if not isinstance(midi_data, dict):
+    #         raise ValueError(f"Expected dict for midi_data, got {type(midi_data)}")
+            
+    #     if 'tracks' not in midi_data:
+    #         raise ValueError("Missing 'tracks' in midi_data")
+
+    #     tracks = midi_data['tracks']
+    #     self.tracks = {}
+    #     self.drum_tracks = []
+    #     self.regular_tracks = []
+        
+    #     logging.info("\n=== Processing Tracks ===")
+        
+    #     # List all preprocessed files
+    #     upload_files = list(self.uploads_dir.glob('processed_*.mp4'))
+    #     logging.info(f"\nPreprocessed files in ({self.uploads_dir}):")
+    #     for file in upload_files:
+    #         logging.info(f"Found preprocessed file: {file.name}")
+
+    #     # Check if tracks is a dict with actual IDs
+    #     if isinstance(tracks, dict):
+    #         track_items = tracks.items()
+    #     else:
+    #         # If it's a list, enumerate it
+    #         track_items = enumerate(tracks)
+            
+    #     for idx_or_id, track in track_items:
+    #         # Use the original ID if available (from dict keys), otherwise use index
+    #         track_id = str(idx_or_id)
+            
+    #         # Important: Store the ID in the track data for later reference
+    #         if isinstance(track, dict):
+    #             track['id'] = track_id
+                
+    #         normalized_track = self._normalize_track(track)
+
+    #     for idx, track in enumerate(tracks if isinstance(tracks, list) else tracks.values()):
+    #         track_id = str(idx)
+    #         normalized_track = self._normalize_track(track)
+            
+    #         # Check if it's a drum track
+    #         is_drum = (
+    #             normalized_track.get('isDrum') or 
+    #             normalized_track.get('instrument', {}).get('isDrum') or
+    #             normalized_track.get('channel') == 9 or
+    #             any(name in normalized_track.get('instrument', {}).get('name', '').lower() 
+    #                 for name in ['drum', 'percussion', 'kit'])
+    #         )
+            
+    #         if is_drum:
+    #             logging.info(f"\nProcessing drum track {track_id}")
+    #             drum_dir = self.processed_videos_dir / f"track_{idx}_drums"
+    #             drum_dir.mkdir(exist_ok=True)
+                
+    #             # Get unique drum types needed from notes
+    #             needed_drums = set()
+    #             for note in normalized_track.get('notes', []):
+    #                 midi_note = note.get('midi')
+    #                 drum_name = DRUM_NOTES.get(midi_note)
+    #                 if drum_name:
+    #                     needed_drums.add((midi_note, drum_name))
+                        
+    #             # Process each needed drum type
+    #             for midi_note, drum_name in needed_drums:
+    #                 normalized_name = f"drum_{drum_name.lower().replace(' ', '_')}"
+                    
+    #                 # Find preprocessed drum file
+    #                 for file in upload_files:
+    #                     if normalized_name in file.name.lower():
+    #                         dest_file = drum_dir / f"{normalized_name}.mp4"
+    #                         # Copy preprocessed file to drum directory
+    #                         shutil.copy2(str(file), str(dest_file))
+    #                         logging.info(f"Copied preprocessed drum file: {file.name} -> {dest_file}")
+    #                         break
+    #                 else:
+    #                     logging.warning(f"No preprocessed file found for {normalized_name}")
+                
+    #             self.drum_tracks.append(normalized_track)
+                
+    #         else:
+    #             self.regular_tracks.append(normalized_track)
+    #             self.tracks[track_id] = normalized_track
+
+    #     logging.info(f"\nProcessed {len(self.tracks)} regular tracks and {len(self.drum_tracks)} drum tracks")
 
 
     def _normalize_track(self, track):
@@ -452,6 +688,9 @@ class VideoComposer:
                 }
 
                 logging.info(f"Mapped track {track_id} to position row={pos_data['row']}, col={pos_data['column']}")
+
+            # Add this call to analyze MIDI timing data
+            self._analyze_midi_timing()
 
         except Exception as e:
             logging.error(f"Error setting up track configuration: {e}")
@@ -522,6 +761,8 @@ class VideoComposer:
     #     """Check if track has any valid notes"""
     #     notes = track.get('notes', [])
     #     return len(notes) > 0
+
+    
 
     def get_track_layout(self):
         """Get grid dimensions from frontend arrangement"""
@@ -863,17 +1104,121 @@ class VideoComposer:
     
     
 
+    # def _process_instrument_chunk_gpu(self, track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols):
+    #     # Get instrument name for lookup
+    #     instrument_name = normalize_instrument_name(track['instrument']['name'])
+        
+    #     # Try multiple possible ID formats
+    #     possible_keys = [
+    #         f"track-{track_idx}",            # Format with prefix
+    #         f"track-{instrument_name}",      # Name with prefix
+    #         f"{track_idx}",                  # Bare index (what frontend actually uses)
+    #         str(track_idx),                  # Ensure string comparison
+    #         f"{instrument_name}"             # Bare name
+    #     ]
+        
+    #     # Find the first key that exists in grid_positions
+    #     track_key = next((key for key in possible_keys if key in self.grid_positions), None)
+        
+    #     if track_key:
+    #         pos_data = self.grid_positions[track_key]
+    #         row, col = int(pos_data['row']), int(pos_data['column'])
+    #         logging.info(f"Found grid position for {instrument_name}: row={row}, col={col}")
+    #     else:
+    #         # Fallback to default
+    #         row = (track_idx % (rows-1)) + 1
+    #         col = min(track_idx // (rows-1), cols-1)
+    #         logging.warning(f"No grid position for {instrument_name}, using default: row={row}, col={col}")
+        
+    #     # Group notes by time to handle chords
+    #     time_groups = {}
+    #     for note in chunk_notes:
+    #         time_pos = float(note['time'])
+    #         if time_pos not in time_groups:
+    #             time_groups[time_pos] = []
+    #         time_groups[time_pos].append(note)
+        
+    #     # Sort time positions for look-ahead
+    #     sorted_times = sorted(time_groups.keys())
+        
+    #     # Process each group of notes
+    #     for i, time_pos in enumerate(sorted_times):
+    #         notes = time_groups[time_pos]
+    #         try:
+    #             # Get instrument info
+    #             instrument_name = track.get('instrument', {}).get('name', 'piano')
+    #             midi_notes = [int(note['midi']) for note in notes]
+                
+    #             # Find video path for the instrument note
+    #             video_path = self._find_instrument_video(instrument_name, midi_notes[0])
+    #             if not video_path:
+    #                 continue
+                    
+    #             # Calculate timing
+    #             time = time_pos - start_time
+    #             audio_duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+                
+    #             # Look ahead to next note on same instrument to avoid overlaps
+    #             next_note_time = float('inf')
+    #             if i < len(sorted_times) - 1:
+    #                 next_note_time = sorted_times[i+1]
+                
+    #             # Available time until next note or end of chunk
+    #             available_time = min(next_note_time - time_pos, end_time - time_pos)
+                
+    #             # Use minimum duration only if we have enough space
+    #             video_duration = min(max(audio_duration, self.MIN_VIDEO_DURATION), available_time)
+                
+    #             # Add to grid config
+    #             if grid_config[row][col].get('empty', True):
+    #                 grid_config[row][col] = {
+    #                     'path': video_path,
+    #                     'start_time': 0,
+    #                     'audio_duration': audio_duration,  # Original duration for audio
+    #                     'video_duration': video_duration,  # Extended when safe
+    #                     'offset': time,
+    #                     'empty': False
+    #                 }
+    #             else:
+    #                 # If cell already has content, create a list of clips
+    #                 if 'clips' not in grid_config[row][col]:
+    #                     grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
+                        
+    #                 grid_config[row][col]['clips'].append({
+    #                     'path': video_path,
+    #                     'start_time': 0,
+    #                     'audio_duration': audio_duration,
+    #                     'video_duration': video_duration,
+    #                     'offset': time,
+    #                 })
+                    
+    #             logging.info(f"Added {instrument_name} note {midi_notes[0]} at [{row}][{col}] t={time}, audio_dur={audio_duration:.2f}, video_dur={video_duration:.2f}")
+                    
+    #         except Exception as e:
+    #             logging.error(f"Error processing instrument note: {e}")
+    #             continue
+
     def _process_instrument_chunk_gpu(self, track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols):
+        """Process instrument chunk with proper track ID mapping"""
         # Get instrument name for lookup
         instrument_name = normalize_instrument_name(track['instrument']['name'])
         
-        # Try multiple possible ID formats
+        # Extract the actual track ID from the track data
+        track_id = track.get('id', str(track_idx))  # Look for ID in track data
+        
+        # Log the track information for debugging
+        logging.info(f"Processing instrument: {instrument_name} (ID: {track_id}, Index: {track_idx})")
+        
+        # Try multiple possible ID formats to find grid position
         possible_keys = [
-            f"track-{track_idx}",            # Format with prefix
-            f"track-{instrument_name}",      # Name with prefix
-            f"{track_idx}",                  # Bare index (what frontend actually uses)
-            str(track_idx),                  # Ensure string comparison
-            f"{instrument_name}"             # Bare name
+            track_id,                    # Actual track ID from MIDI data
+            str(track_id),               # Ensure string comparison
+            f"track-{track_id}",         # Format with ID prefix
+            f"{track_idx}",              # Array index as fallback
+            str(track_idx),              # String version of index
+            f"track-{track_idx}",        # Index with prefix
+            f"track-{instrument_name}",  # Name with prefix
+            f"{instrument_name}"         # Bare name
         ]
         
         # Find the first key that exists in grid_positions
@@ -882,80 +1227,68 @@ class VideoComposer:
         if track_key:
             pos_data = self.grid_positions[track_key]
             row, col = int(pos_data['row']), int(pos_data['column'])
-            logging.info(f"Found grid position for {instrument_name}: row={row}, col={col}")
+            logging.info(f"Found grid position for {instrument_name}/{track_id}: row={row}, col={col}, using key={track_key}")
         else:
-            # Fallback to default
+            # Fallback to default position
             row = (track_idx % (rows-1)) + 1
             col = min(track_idx // (rows-1), cols-1)
-            logging.warning(f"No grid position for {instrument_name}, using default: row={row}, col={col}")
+            logging.warning(f"No grid position for {instrument_name}/{track_id}, tried keys: {possible_keys}. Using default: row={row}, col={col}")
         
-        # Group notes by time to handle chords
-        time_groups = {}
+        # Rest of your existing code for processing instrument notes
+        registry = PathRegistry.get_instance()
+        
+        # Track instrumentation stats
+        note_count = 0
+        notes_placed = 0
+        
+        # Find suitable grid cell based on track index or grid arrangement
         for note in chunk_notes:
-            time_pos = float(note['time'])
-            if time_pos not in time_groups:
-                time_groups[time_pos] = []
-            time_groups[time_pos].append(note)
-        
-        # Sort time positions for look-ahead
-        sorted_times = sorted(time_groups.keys())
-        
-        # Process each group of notes
-        for i, time_pos in enumerate(sorted_times):
-            notes = time_groups[time_pos]
-            try:
-                # Get instrument info
-                instrument_name = track.get('instrument', {}).get('name', 'piano')
-                midi_notes = [int(note['midi']) for note in notes]
+            # Calculate timing
+            note_time = float(note['time']) - start_time
+            note_duration = float(note['duration'])  
+            
+            # Adjust timing if note starts before this chunk
+            if note_time < 0:
+                note_duration += note_time  # Reduce duration by overlap
+                note_time = 0
                 
-                # Find video path for the instrument note
-                video_path = self._find_instrument_video(instrument_name, midi_notes[0])
-                if not video_path:
-                    continue
-                    
-                # Calculate timing
-                time = time_pos - start_time
-                audio_duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
-                
-                # Look ahead to next note on same instrument to avoid overlaps
-                next_note_time = float('inf')
-                if i < len(sorted_times) - 1:
-                    next_note_time = sorted_times[i+1]
-                
-                # Available time until next note or end of chunk
-                available_time = min(next_note_time - time_pos, end_time - time_pos)
-                
-                # Use minimum duration only if we have enough space
-                video_duration = min(max(audio_duration, self.MIN_VIDEO_DURATION), available_time)
-                
-                # Add to grid config
-                if grid_config[row][col].get('empty', True):
-                    grid_config[row][col] = {
-                        'path': video_path,
-                        'start_time': 0,
-                        'audio_duration': audio_duration,  # Original duration for audio
-                        'video_duration': video_duration,  # Extended when safe
-                        'offset': time,
-                        'empty': False
-                    }
-                else:
-                    # If cell already has content, create a list of clips
-                    if 'clips' not in grid_config[row][col]:
-                        grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
-                        
-                    grid_config[row][col]['clips'].append({
-                        'path': video_path,
-                        'start_time': 0,
-                        'audio_duration': audio_duration,
-                        'video_duration': video_duration,
-                        'offset': time,
-                    })
-                    
-                logging.info(f"Added {instrument_name} note {midi_notes[0]} at [{row}][{col}] t={time}, audio_dur={audio_duration:.2f}, video_dur={video_duration:.2f}")
-                    
-            except Exception as e:
-                logging.error(f"Error processing instrument note: {e}")
+            # Skip if note is completely outside this chunk
+            if note_time < 0 or note_time >= (end_time - start_time):
                 continue
+                
+            # Find the note path
+            note_path = registry.get_instrument_path(instrument_name, note['name'])
+            if not note_path:
+                continue
+            
+            # Place the note in the grid
+            cell = grid_config[row][col]
+            if cell.get('empty', True):
+                # First note in this cell
+                grid_config[row][col] = {
+                    'path': note_path,
+                    'start_time': note_time,
+                    'duration': note_duration,
+                    'volume': float(note.get('velocity', 0.8)) / 127,
+                    'empty': False
+                }
+            else:
+                # Add to existing cell
+                if 'clips' not in grid_config[row][col]:
+                    grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
+                    
+                grid_config[row][col]['clips'].append({
+                    'path': note_path,
+                    'start_time': note_time,
+                    'duration': note_duration,
+                    'volume': float(note.get('velocity', 0.8)) / 127
+                })
+            
+            notes_placed += 1
+            
+        note_count = len(chunk_notes)
+        logging.debug(f"Processed {notes_placed}/{note_count} {instrument_name} notes in chunk {start_time:.1f}s - {end_time:.1f}s")
+
 
     def _find_drum_video(self, drum_key):
         """Find video for drum key using registry"""
@@ -1232,12 +1565,24 @@ class VideoComposer:
         operations = []
         instrument_name = normalize_instrument_name(track['instrument']['name'])
         
-        # Find position in grid
+        # Get the actual track ID from the track data or MIDI data if available
+        track_id = track.get('id', str(track_idx))  # Look for ID in track data
+        
+        # Find position in grid - try the actual ID first, then fallbacks
         possible_keys = [
-            f"track-{track_idx}", f"track-{instrument_name}", 
-            f"{track_idx}", str(track_idx), f"{instrument_name}"
+            track_id,                    # Actual track ID from MIDI data
+            f"{track_id}",               # String version
+            f"track-{track_id}",         # With prefix
+            f"track-{instrument_name}",  
+            f"{track_idx}",              # Array index as fallback
+            str(track_idx),
+            instrument_name
         ]
         track_key = next((key for key in possible_keys if key in self.grid_positions), None)
+        if track_key:
+            logging.info(f"Found track {track_id}/{instrument_name} with key {track_key} in grid positions")
+        else:
+            logging.warning(f"No grid position for track {track_id}/{instrument_name}, tried keys: {possible_keys}")
         
         if track_key:
             pos_data = self.grid_positions[track_key]
@@ -1530,23 +1875,26 @@ def compose_from_processor_output(processor_result, output_path):
            # Stop profiling
         profiler.disable()
         
-        # Create stats object and sort by cumulative time
-        stats = pstats.Stats(profiler)
-        stats.sort_stats(SortKey.CUMULATIVE)
+        # Use StringIO instead of direct file writes
+        import io
+        from pstats import SortKey
         
-        # Save profiling results to a log file
-        profile_log = Path(base_dir) / 'composition_profile.log'
-        with open(profile_log, 'w') as log:
-            stats.stream = log
-            stats.print_stats()
-            
-        # Also log top 20 time-consuming functions
+        # Capture stats output to string
+        s = io.StringIO()
+        stats = pstats.Stats(profiler, stream=s)
+        stats.sort_stats(SortKey.CUMULATIVE)
+        stats.print_stats(20)
+        
+        # Write the captured string data to file
+        profile_path = Path(base_dir) / 'composition_profile.log'
+        with open(profile_path, 'w') as f:
+            f.write(s.getvalue())
+        
+        # Log a simple reference message
         logging.info("\n=== Performance Profile ===")
-        logging.info("Top 20 time-consuming operations:")
-        stats.sort_stats(SortKey.TIME).print_stats(20)
+        logging.info(f"Full profile data written to {profile_path}")
 
         return result
-
     except Exception as e:
         logging.error(f"Error in video composition: {str(e)}")
         raise
