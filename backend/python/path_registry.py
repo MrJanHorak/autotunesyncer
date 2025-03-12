@@ -145,3 +145,17 @@ class PathRegistry:
                             logging.warning(f"Could not parse note number from {note_path}")
             except Exception as e:
                 logging.error(f"Error registering instrument: {e}")
+
+    def register_drum_path(self, drum_key, path):
+        """Register a path for a drum sound by key name"""
+        logging.info(f"Registered drum path: {drum_key.replace('drum_', '')} -> {path}")
+        
+        # Extract the drum name without 'drum_' prefix for consistent lookup
+        drum_name = drum_key.replace('drum_', '')
+        
+        # Initialize drum_paths if it doesn't exist
+        if not hasattr(self, 'drum_paths'):
+            self.drum_paths = {}
+            
+        self.drum_paths[drum_name] = path
+        return path

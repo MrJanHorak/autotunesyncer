@@ -164,15 +164,24 @@ class GPUPipelineProcessor:
                         frames = frames.byte()
                         # Copy frames to output tensor with proper offset
                         for i in range(min(frames.shape[0], int(duration * fps))):
-    # Determine the position in the output timeline
+                            # Determine the position in the output timeline
                             output_frame_idx = offset_frames + i
                             
-                            # Skip if we're past the end of the chunk
-                            if output_frame_idx >= output_frames.shape[0]:
-                                break
+                            # Skip if frame index is out of bounds (either negative or past the end)
+                            if output_frame_idx < 0 or output_frame_idx >= output_frames.shape[0]:
+                                logging.warning(f"Skipping out-of-bounds frame: output_frame_idx={output_frame_idx} (valid range: 0-{output_frames.shape[0]-1})")
+                                continue
                                 
-                            # Place frame in the grid
-                            output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
+                            # Check for valid source frame index as well
+                            if i < 0 or i >= frames.shape[0]:
+                                logging.warning(f"Skipping invalid source frame index: i={i}, frames.shape[0]={frames.shape[0]}")
+                                continue
+                                
+                            # Place frame in the grid with safe bounds
+                            try:
+                                output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
+                            except Exception as e:
+                                logging.error(f"Frame copy error: {e}, indices: output_frame={output_frame_idx}, i={i}, sizes: output={output_frames.shape}, input={frames.shape}")
 
         # Set chunk duration for audio processing
         self.CHUNK_DURATION = duration
