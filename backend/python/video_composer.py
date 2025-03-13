@@ -413,18 +413,18 @@ class VideoComposer:
             note_times = [float(note.get('time', 0)) for note in sorted_notes[:5]]
             logging.info(f"  First 5 note times: {', '.join([f'{t:.2f}s' for t in note_times])}")
             
-            # For piano track specifically, log more details
-            if 'piano' in instrument_name.lower():
-                logging.info(f"  === PIANO TRACK DETAILED ANALYSIS ===")
-                all_note_times = [float(note.get('time', 0)) for note in sorted_notes]
-                # Find any unusual gaps in timing
-                note_gaps = [all_note_times[i+1] - all_note_times[i] for i in range(len(all_note_times)-1)]
-                avg_gap = sum(note_gaps) / max(1, len(note_gaps))
-                max_gap = max(note_gaps) if note_gaps else 0
+            # # For piano track specifically, log more details
+            # if 'piano' in instrument_name.lower():
+            #     logging.info(f"  === PIANO TRACK DETAILED ANALYSIS ===")
+            #     all_note_times = [float(note.get('time', 0)) for note in sorted_notes]
+            #     # Find any unusual gaps in timing
+            #     note_gaps = [all_note_times[i+1] - all_note_times[i] for i in range(len(all_note_times)-1)]
+            #     avg_gap = sum(note_gaps) / max(1, len(note_gaps))
+            #     max_gap = max(note_gaps) if note_gaps else 0
                 
-                logging.info(f"  Piano avg note gap: {avg_gap:.2f}s, max gap: {max_gap:.2f}s")
-                # Log all piano note times for detailed investigation
-                logging.info(f"  Piano note timestamps (first 20): {', '.join([f'{t:.2f}s' for t in all_note_times[:20]])}")
+            #     logging.info(f"  Piano avg note gap: {avg_gap:.2f}s, max gap: {max_gap:.2f}s")
+            #     # Log all piano note times for detailed investigation
+            #     logging.info(f"  Piano note timestamps (first 20): {', '.join([f'{t:.2f}s' for t in all_note_times[:20]])}")
 
     def _process_midi_data(self, midi_data):
         """Process MIDI data with correct handling of duplicate instruments"""
@@ -1007,60 +1007,139 @@ class VideoComposer:
             })
             
         return params
-
+    
     def process_chunks_parallel(self):
-        """Process chunks in parallel with adaptive workload distribution"""
-        chunk_files = []
-        total_chunks = self.full_chunks + (1 if self.final_duration > 0 else 0)
+        """Process video chunks in parallel using thread pool executor"""
+        # Use a Queue for thread-safe result collection
+        from queue import Queue
+        result_queue = Queue()
         
-        # Get optimized grouping of chunks
-        simple_chunks, complex_chunks = self._classify_chunks_by_complexity()
+        # Define max_workers based on CPU count (missing variable)
+        max_workers = min(os.cpu_count() or 4, 4)  # Limit to 4 or CPU count
         
-        logging.info(f"Classified chunks: {len(simple_chunks)} simple, {len(complex_chunks)} complex")
+        # Calculate which chunks need complex vs. simple processing
+        # (These variables were missing in your code)
+        all_chunks = list(range(self.total_chunks))
         
-        # Determine optimal worker count based on system resources
-        metrics = get_system_metrics()
-        max_workers = min(os.cpu_count(), 4)  # Default max
+        # Determine complexity for each chunk
+        complex_chunks = []
+        simple_chunks = []
         
-        # Adjust workers based on memory pressure
-        if metrics['memory_percent'] > 80:
-            max_workers = 2  # Reduce workers when low memory
+        for chunk_idx in all_chunks:
+            # Check if chunk has complex elements (instruments, effects, etc.)
+            if self._is_complex_chunk(chunk_idx):
+                complex_chunks.append(chunk_idx)
+            else:
+                simple_chunks.append(chunk_idx)
         
+        logging.info(f"Processing {len(complex_chunks)} complex chunks and {len(simple_chunks)} simple chunks")
+        
+        # Define the method to process a chunk and put result in queue
+        def _process_chunk_with_queue(chunk_idx, result_queue):
+            try:
+                # Process the chunk using existing method
+                result = self._process_chunk(chunk_idx)
+                if result:
+                    result_queue.put(result)
+            except Exception as e:
+                logging.error(f"Error processing chunk {chunk_idx}: {str(e)}")
+                traceback.print_exc()
+        
+        # Process chunks using thread pool
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Process complex chunks first (they need more time)
-            complex_futures = {executor.submit(self._process_chunk, idx): idx for idx in complex_chunks}
-            
-            # Process result as they complete
-            for future in as_completed(complex_futures):
-                chunk_idx = complex_futures[future]
-                try:
-                    result = future.result()
-                    if result:
-                        chunk_files.append(result)
-                        logging.info(f"Complex chunk {chunk_idx} completed")
-                    else:
-                        logging.error(f"Complex chunk {chunk_idx} failed")
-                except Exception as e:
-                    logging.error(f"Error processing complex chunk {chunk_idx}: {e}")
+            # Process complex chunks first (they take longer)
+            for chunk_idx in complex_chunks:
+                executor.submit(_process_chunk_with_queue, chunk_idx, result_queue)
+                
+            # Small delay to prevent thread contention
+            time.sleep(0.05)
             
             # Then process simple chunks
-            simple_futures = {executor.submit(self._process_chunk, idx): idx for idx in simple_chunks}
-            
-            for future in as_completed(simple_futures):
-                chunk_idx = simple_futures[future]
-                try:
-                    result = future.result()
-                    if result:
-                        chunk_files.append(result)
-                        logging.info(f"Simple chunk {chunk_idx} completed")
-                    else:
-                        logging.error(f"Simple chunk {chunk_idx} failed")
-                except Exception as e:
-                    logging.error(f"Error processing simple chunk {chunk_idx}: {e}")
+            for chunk_idx in simple_chunks:
+                executor.submit(_process_chunk_with_queue, chunk_idx, result_queue)
         
-        # Sort by chunk index to maintain order
-        chunk_files.sort()
-        return chunk_files
+        # Collect results after all threads complete
+        chunk_files = []
+        while not result_queue.empty():
+            result = result_queue.get()
+            if result:
+                chunk_files.append(result)
+        
+        return sorted(chunk_files)
+
+    def _is_complex_chunk(self, chunk_idx):
+        """Determine if a chunk requires complex processing"""
+        # Fix: Use CHUNK_DURATION instead of chunk_duration
+        start_time = chunk_idx * self.CHUNK_DURATION
+        end_time = start_time + self.CHUNK_DURATION
+        
+        # Simple implementation that doesn't depend on _track_has_notes_in_timeframe
+        # Count notes in this time range across all tracks
+        note_count = 0
+        for track in self.midi_data['tracks']:
+            if 'notes' in track:
+                chunk_notes = [
+                    note for note in track['notes']
+                    if start_time <= float(note['time']) < end_time
+                ]
+                note_count += len(chunk_notes)
+        
+        # Complex if more than 20 notes
+        return note_count > 20
+
+    # def process_chunks_parallel(self):
+    #     """Process chunks in parallel with adaptive workload distribution"""
+    #     chunk_files = []
+    #     total_chunks = self.full_chunks + (1 if self.final_duration > 0 else 0)
+        
+    #     # Get optimized grouping of chunks
+    #     simple_chunks, complex_chunks = self._classify_chunks_by_complexity()
+        
+    #     logging.info(f"Classified chunks: {len(simple_chunks)} simple, {len(complex_chunks)} complex")
+        
+    #     # Determine optimal worker count based on system resources
+    #     metrics = get_system_metrics()
+    #     max_workers = min(os.cpu_count(), 4)  # Default max
+        
+    #     # Adjust workers based on memory pressure
+    #     if metrics['memory_percent'] > 80:
+    #         max_workers = 2  # Reduce workers when low memory
+        
+    #     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    #         # Process complex chunks first (they need more time)
+    #         complex_futures = {executor.submit(self._process_chunk, idx): idx for idx in complex_chunks}
+            
+    #         # Process result as they complete
+    #         for future in as_completed(complex_futures):
+    #             chunk_idx = complex_futures[future]
+    #             try:
+    #                 result = future.result()
+    #                 if result:
+    #                     chunk_files.append(result)
+    #                     logging.info(f"Complex chunk {chunk_idx} completed")
+    #                 else:
+    #                     logging.error(f"Complex chunk {chunk_idx} failed")
+    #             except Exception as e:
+    #                 logging.error(f"Error processing complex chunk {chunk_idx}: {e}")
+            
+    #         # Then process simple chunks
+    #         simple_futures = {executor.submit(self._process_chunk, idx): idx for idx in simple_chunks}
+            
+    #         for future in as_completed(simple_futures):
+    #             chunk_idx = simple_futures[future]
+    #             try:
+    #                 result = future.result()
+    #                 if result:
+    #                     chunk_files.append(result)
+    #                     logging.info(f"Simple chunk {chunk_idx} completed")
+    #                 else:
+    #                     logging.error(f"Simple chunk {chunk_idx} failed")
+    #             except Exception as e:
+    #                 logging.error(f"Error processing simple chunk {chunk_idx}: {e}")
+        
+    #     # Sort by chunk index to maintain order
+    #     chunk_files.sort()
+    #     return chunk_files
     
     def _calculate_drum_multiplier(self, midi_note=None):
         """Calculate volume multiplier for drum sounds based on pitch"""
@@ -1435,7 +1514,7 @@ class VideoComposer:
 
             # Use GPU pipeline directly
             chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-            pipeline = GPUPipelineProcessor()
+            pipeline = GPUPipelineProcessor(composer=self)
 
             # Check if the pipeline supports encoding parameters
             supports_encoding_params = hasattr(pipeline, 'set_encoding_params')
@@ -1486,7 +1565,7 @@ class VideoComposer:
             return None
         
     def _collect_drum_operations(self, track_idx, chunk_notes, start_time, rows, cols):
-        """Collect drum operations for batch processing"""
+        """Collect drum operations with proper cross-chunk audio continuity"""
         operations = []
         
         for note in chunk_notes:
@@ -1497,40 +1576,69 @@ class VideoComposer:
                     continue
                     
                 drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
-                
                 if drum_key not in self.grid_positions:
-                    logging.warning(f"No grid position for {drum_key}, skipping")
                     continue
                     
                 pos_data = self.grid_positions[drum_key]
                 row, col = int(pos_data['row']), int(pos_data['column'])
                 
-                # Get timing info
-                time_offset = float(note['time']) - start_time
-                audio_duration = float(note.get('duration', 0.5))
+                # Get original timing information 
+                original_time = float(note['time'])
+                original_duration = float(note.get('duration', 0.5))
+                note_end_time = original_time + original_duration
                 
-                # Use minimum video duration
-                video_duration = max(audio_duration, self.MIN_VIDEO_DURATION)
+                # For notes that started in previous chunks
+                if original_time < start_time:
+                    time_offset = 0  # Always start at beginning of chunk
+                    sample_offset = start_time - original_time  # How far into sample to start
+                    
+                    # Handle edge cases with minimum duration
+                    if sample_offset >= original_duration:
+                        # Use a very short tail for late continuations - prevents negative durations
+                        audio_duration = 0.2
+                        sample_offset = min(sample_offset, original_duration - 0.05)
+                    else:
+                        # Play the remaining portion of the sound
+                        audio_duration = original_duration - sample_offset
+                    
+                    is_continuation = True
+                else:
+                    time_offset = original_time - start_time
+                    audio_duration = original_duration
+                    sample_offset = 0  # Start from beginning of sample
+                    is_continuation = False
+                    
+                # For notes that extend into next chunk
+                chunk_end = start_time + self.CHUNK_DURATION
+                crosses_chunk = False
+                if note_end_time > chunk_end:
+                    crosses_chunk = True
+                    fade_out_duration = 0.2  # Short crossfade
+                else:
+                    fade_out_duration = 0.05  # Normal fade
+                    
+                # Ensure we have valid durations
+                audio_duration = max(0.1, audio_duration)  # Minimum reasonable duration
                 
                 # Find video path
                 video_path = self._find_drum_video(drum_key)
                 if not video_path:
                     continue
 
-                # Calculate volume from velocity using your existing method
-                velocity = float(note.get('velocity', 100))
-                volume = self.get_note_volume(velocity, is_drum=True)
-                
-                # Add operation with volume parameter
+                # Add operation with enhanced parameters
                 operations.append({
                     'video_path': video_path,
                     'offset': time_offset,
                     'audio_duration': audio_duration,
-                    'video_duration': video_duration,
-                    'duration': audio_duration,
+                    'sample_offset': sample_offset,
+                    'video_duration': min(max(audio_duration, self.MIN_VIDEO_DURATION), 
+                                        self.CHUNK_DURATION - time_offset),
                     'position': (row, col),
-                    'velocity': velocity,
-                    'volume': volume  # Add volume parameter here
+                    'volume': self.get_note_volume(float(note.get('velocity', 100)), is_drum=True, midi_note=midi_note),
+                    'fade_in': 0.05 if not is_continuation else 0.0, 
+                    'fade_out': fade_out_duration,
+                    'is_continuation': is_continuation,
+                    'crosses_chunk': crosses_chunk
                 })            
                     
             except Exception as e:
@@ -1538,6 +1646,32 @@ class VideoComposer:
                     
         return operations
     
+    def _extract_audio_with_offset(self, video_path, output_path, duration, sample_offset=0, volume=1.0):
+        """Extract audio from video with support for starting at an offset into the sample"""
+        try:
+            # Ensure positive duration to prevent FFmpeg errors
+            if duration <= 0.1:
+                logging.warning(f"Audio extraction with very short duration ({duration:.3f}s), using minimum")
+                duration = 0.1
+                
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),  # Ensure path is string
+                '-vn',  # No video
+                '-ss', f"{sample_offset:.3f}",  # Start at offset
+                '-af', f"volume={volume:.1f}",
+                '-acodec', 'pcm_s16le',
+                '-t', f"{duration:.3f}",
+                str(output_path)  # Ensure path is string
+            ]
+            
+            logging.debug(f"Audio extraction command: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Audio extraction error: {e.stderr if hasattr(e, 'stderr') else str(e)}")
+            return False
+        
     def _estimate_frame_complexity(self, notes):
         """Estimate visual complexity based on note density and characteristics"""
         # Count total notes
@@ -1617,6 +1751,12 @@ class VideoComposer:
                 # Calculate timing
                 time_offset = time_pos - start_time
                 audio_duration = min(float(notes[0].get('duration', 0.5)), end_time - time_pos)
+
+                # IMPORTANT: Add this check for negative durations
+                if audio_duration <= 0:
+                    logging.warning(f"Skipping instrument note with negative duration: {instrument_name}, " 
+                                f"midi={midi_notes[0]}, time={time_pos:.2f}")
+                    continue
                 
                 # Look ahead to next note
                 next_note_time = float('inf')
@@ -1755,7 +1895,10 @@ class VideoComposer:
             # Calculate chunk lengths and store as instance attributes
             self.full_chunks, self.final_duration = self.calculate_chunk_lengths()
             logging.info(f"Set full_chunks={self.full_chunks}, final_duration={self.final_duration}")
-            
+
+            # Add this line to set total_chunks attribute
+            self.total_chunks = self.full_chunks + (1 if self.final_duration > 0 else 0)
+
             import time
             total_start = time.time()
             
@@ -1777,6 +1920,21 @@ class VideoComposer:
                         f.write(f"file '{chunk}'\n")
                 
                 # The rest of your ffmpeg code stays the same
+                # ffmpeg_cmd = [
+                #     'ffmpeg', '-y',
+                #     '-hwaccel', 'cuda',
+                #     '-hwaccel_device', '0',
+                #     '-f', 'concat',
+                #     '-safe', '0',
+                #     '-i', str(concat_file),
+                #     # Copy streams directly instead of re-encoding when possible
+                #     '-c:v', 'copy',
+                #     '-c:a', 'copy',
+                #     # Add sync options to fix audio sync
+                #     '-vsync', 'cfr',
+                #     '-async', '1',
+                #     str(self.output_path)
+                # ]
                 ffmpeg_cmd = [
                     'ffmpeg', '-y',
                     '-hwaccel', 'cuda',
@@ -1784,12 +1942,13 @@ class VideoComposer:
                     '-f', 'concat',
                     '-safe', '0',
                     '-i', str(concat_file),
-                    # Copy streams directly instead of re-encoding when possible
-                    '-c:v', 'copy',
-                    '-c:a', 'copy',
-                    # Add sync options to fix audio sync
-                    '-vsync', 'cfr',
-                    '-async', '1',
+                    # Re-encode with strict sync parameters instead of copy
+                    '-c:v', 'h264_nvenc',
+                    '-preset', 'p4',
+                    '-vsync', 'cfr',  # Constant frame rate
+                    '-af', 'aresample=async=1000',  # Audio resampling for better sync
+                    '-avoid_negative_ts', '1',
+                    '-max_muxing_queue_size', '9999',
                     str(self.output_path)
                 ]
                 
