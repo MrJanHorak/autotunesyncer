@@ -11,13 +11,14 @@ import logging
 from path_registry import PathRegistry
 
 class GPUPipelineProcessor:
-    def __init__(self):
+    def __init__(self, composer = None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # Pre-allocate reusable tensors
         self.frame_cache = {}
         self.registry = PathRegistry.get_instance()
         self.CROSSFADE_DURATION = 0.5
         self.CHUNK_DURATION = 4.0
+        self.composer = composer
         
     def load_video_frames_to_gpu(self, video_path, start_time=0, duration=None):
         """Load ALL frames from video file"""
@@ -227,6 +228,27 @@ class GPUPipelineProcessor:
         ]
         subprocess.run(cmd, check=True)
         shutil.move(temp_output, video_path)
+
+    def process_audio_operation(self, op, temp_dir):
+        """Process a single audio operation using VideoComposer's extraction method"""
+        # Generate a unique output path for this audio sample
+        output_path = os.path.join(
+            temp_dir, 
+            f"audio_{op['position'][0]}_{op['position'][1]}_{os.path.basename(op['video_path']).split('.')[0]}.wav"
+        )
+        
+        # Extract audio using the composer's method
+        success = self.composer._extract_audio_with_offset(
+            op['video_path'],
+            output_path,
+            op['audio_duration'],
+            sample_offset=op.get('sample_offset', 0),
+            volume=op.get('volume', 1.0)
+        )
+        
+        if success:
+            return output_path
+        return None
 
     # def batch_process_audio(self, audio_files, output_path):
     #     """Process multiple audio operations in a single FFmpeg call"""
