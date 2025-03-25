@@ -386,7 +386,7 @@ class GPUPipelineProcessor:
                 filter_parts.append(f'[{i}]acopy[a{i}]')
         
         # Create mix part of filter
-        filter_str = f'amix=inputs={len(audio_tracks)}:duration=longest:normalize=0,afade=t=in:st=0:d={self.CROSSFADE_DURATION},afade=t=out:st={self.CHUNK_DURATION-self.CROSSFADE_DURATION}:d={self.CROSSFADE_DURATION}'
+        filter_str = f'amix=inputs={len(audio_tracks)}:duration=longest:normalize=0,afade=t=in:st=0:d=0.2,afade=t=out:st={self.CHUNK_DURATION-0.2}:d=0.2'
         mix_inputs = ''.join(f'[a{i}]' for i in range(len(audio_tracks)))
         filter_parts.append(f'{mix_inputs}amix=inputs={len(audio_tracks)}:duration=longest[out]')
         
@@ -409,22 +409,30 @@ class GPUPipelineProcessor:
         
         return None
 
-    def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0):
+    def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0, autotuned_audio_path=None):
         """Extract audio with proper timing offset and duration"""
         try:
-            # Extract base audio with volume adjustment
-            audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
-            extract_cmd = [
-                'ffmpeg', '-y', '-i', video_path,
-                '-vn', '-af', f'volume={volume}',  # Add volume filter
-                '-acodec', 'pcm_s16le'
-            ]
-            
-            # Add duration parameter if specified
-            if duration:
-                extract_cmd.extend(['-t', str(duration)])
+            # Use autotuned audio if available
+            if autotuned_audio_path and os.path.exists(autotuned_audio_path):
+                audio_path = autotuned_audio_path
+            else:
+                # Extract base audio with volume adjustment
+                audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
+                extract_cmd = [
+                    'ffmpeg', '-y', '-i', video_path,
+                    '-vn', '-af', f'volume={volume}',  # Add volume filter
+                    '-acodec', 'pcm_s16le'
+                ]
+
+                if duration and duration < 0.1:  # 100ms minimum
+                    logging.warning(f"Increasing too short audio duration from {duration} to 0.1")
+                    duration = 0.1
                 
-            extract_cmd.append(audio_path)
+                # Add duration parameter if specified
+                if duration:
+                    extract_cmd.extend(['-t', str(duration)])
+                    
+                extract_cmd.append(audio_path)
             
             # subprocess.run(extract_cmd, check=False, 
             #             stdout=subprocess.PIPE, 
