@@ -741,13 +741,51 @@ class VideoComposer:
             raise Exception(f"Validation failed: {result.stderr}")
         return result            
 
+    # def calculate_chunk_lengths(self):
+    #     """Calculate chunk lengths for composition"""
+    #     try:
+    #         # Get all track notes in one list
+    #         all_notes = []
+            
+    #         # Add regular track notes
+    #         for track in self.midi_data['tracks']:
+    #             if isinstance(track, dict) and 'notes' in track:
+    #                 all_notes.extend(track['notes'])
+            
+    #         if not all_notes:
+    #             raise ValueError("No notes found in any tracks")
+            
+    #         # Find last note end time
+    #         last_note_time = 0
+    #         for note in all_notes:
+    #             if isinstance(note, dict):
+    #                 note_end = float(note['time']) + float(note['duration'])
+    #                 last_note_time = max(last_note_time, note_end)
+            
+    #         # Calculate chunks based on exact duration needed
+    #         full_chunks = math.floor(last_note_time / self.CHUNK_DURATION)
+    #         final_chunk = last_note_time % self.CHUNK_DURATION
+            
+    #         # Only include final chunk if there's actual content
+    #         if final_chunk < 0.1:  # If less than 0.1s remaining, ignore final chunk
+    #             final_chunk = 0
+                
+    #         logging.info(f"Total duration: {last_note_time:.2f}s")
+    #         logging.info(f"Full chunks: {full_chunks}")
+    #         logging.info(f"Final chunk: {final_chunk:.2f}s")
+            
+    #         return full_chunks, final_chunk
+                
+    #     except Exception as e:
+    #         logging.error(f"Error calculating chunks: {str(e)}")
+    #         return 0, 0
+
     def calculate_chunk_lengths(self):
-        """Calculate chunk lengths for composition"""
+        """Calculate chunk lengths based on actual MIDI content"""
         try:
             # Get all track notes in one list
             all_notes = []
             
-            # Add regular track notes
             for track in self.midi_data['tracks']:
                 if isinstance(track, dict) and 'notes' in track:
                     all_notes.extend(track['notes'])
@@ -755,30 +793,97 @@ class VideoComposer:
             if not all_notes:
                 raise ValueError("No notes found in any tracks")
             
-            # Find last note end time
+            # Find last note end time and first note start time
             last_note_time = 0
+            first_note_time = float('inf')
+            
             for note in all_notes:
-                if isinstance(note, dict):
-                    note_end = float(note['time']) + float(note['duration'])
-                    last_note_time = max(last_note_time, note_end)
+                note_time = float(note['time'])
+                first_note_time = min(first_note_time, note_time)
+                note_end = note_time + float(note['duration'])
+                last_note_time = max(last_note_time, note_end)
             
-            # Calculate chunks based on exact duration needed
-            full_chunks = math.floor(last_note_time / self.CHUNK_DURATION)
-            final_chunk = last_note_time % self.CHUNK_DURATION
+            # Calculate actual MIDI duration
+            midi_duration = last_note_time - first_note_time
             
-            # Only include final chunk if there's actual content
-            if final_chunk < 0.1:  # If less than 0.1s remaining, ignore final chunk
+            # Add a small buffer for reverb/release tail
+            midi_duration += 2.0  # 2 seconds of tail
+            
+            # Basic sanity check: MIDI files are rarely over 10 minutes
+            if midi_duration > 600:  # 10 minutes
+                logging.warning(f"Suspiciously long MIDI duration: {midi_duration:.2f}s")
+                
+                # If MIDI has header with duration, use that instead
+                if 'header' in self.midi_data and 'length' in self.midi_data['header']:
+                    header_duration = float(self.midi_data['header']['length'])
+                    if header_duration > 0 and header_duration < midi_duration:
+                        logging.info(f"Using MIDI header duration: {header_duration:.2f}s")
+                        midi_duration = header_duration
+            
+            # Calculate chunks based on the determined duration
+            full_chunks = math.floor(midi_duration / self.CHUNK_DURATION)
+            final_chunk = midi_duration % self.CHUNK_DURATION
+            
+            # Only include final chunk if there's meaningful content
+            if final_chunk < 0.5:  # If less than 0.5s remaining, ignore final chunk
                 final_chunk = 0
                 
-            logging.info(f"Total duration: {last_note_time:.2f}s")
-            logging.info(f"Full chunks: {full_chunks}")
-            logging.info(f"Final chunk: {final_chunk:.2f}s")
+            logging.info(f"First note time: {first_note_time:.2f}s")
+            logging.info(f"Last note time: {last_note_time:.2f}s")
+            logging.info(f"Total MIDI duration: {midi_duration:.2f}s")
+            logging.info(f"Full chunks: {full_chunks}, Final chunk: {final_chunk:.2f}s")
+            logging.info(f"Expected video duration: {(full_chunks * self.CHUNK_DURATION + final_chunk):.2f}s")
+            
+            # Store total chunks as a class variable
+            self.total_chunks = full_chunks + (1 if final_chunk > 0 else 0)
+            self.midi_duration = midi_duration
             
             return full_chunks, final_chunk
-                
+        
         except Exception as e:
             logging.error(f"Error calculating chunks: {str(e)}")
             return 0, 0
+        
+    def _verify_and_fix_chunks(self):
+        """Verify all expected chunks exist and create placeholders if needed"""
+        logging.info(f"Verifying all {self.total_chunks} chunks are present")
+        
+        missing_chunks = []
+        
+        for chunk_idx in range(self.total_chunks):
+            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            if not chunk_path.exists():
+                missing_chunks.append(chunk_idx)
+        
+        if missing_chunks:
+            logging.warning(f"Found {len(missing_chunks)} missing chunks: {missing_chunks}")
+            
+            # Create placeholder chunks to maintain timing
+            for chunk_idx in missing_chunks:
+                self._create_placeholder_chunk(chunk_idx)
+                logging.info(f"Created placeholder for chunk {chunk_idx}")
+
+    def _create_placeholder_chunk(self, chunk_idx):
+        """Create a placeholder chunk with silence"""
+        chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+        
+        # Create a video with black background and silent audio
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi', '-i', 'color=black:s=1920x1080:r=30',
+            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+            '-t', str(self.CHUNK_DURATION),
+            '-c:v', 'h264_nvenc', '-preset', 'p4',
+            '-c:a', 'aac', '-b:a', '128k',
+            str(chunk_path)
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error creating placeholder chunk: {e}")
+            return False
         
     # def has_valid_notes(self, track):
     #     """Check if track has any valid notes"""
@@ -1300,9 +1405,33 @@ class VideoComposer:
     #             logging.error(f"Error processing instrument note: {e}")
     #             continue
 
+    # def _autotune_audio(self, video_path, midi_note):
+    #     """Autotunes audio from video to match midi note"""
+    #     cache_key = (video_path, midi_note)
+    #     if cache_key in self.autotune_cache:
+    #         return self.autotune_cache[cache_key]
+        
+    #     try:
+    #         # Extract audio from video
+    #         audio_path = os.path.join(self.temp_dir, f"audio_{midi_note}.wav")
+    #         cmd = ['ffmpeg', '-y', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '44100', audio_path]
+    #         subprocess.run(cmd, check=True, capture_output=True)
+
+    #         # Autotune audio
+    #         autotuned_audio_path = os.path.join(self.temp_dir, f"autotuned_{midi_note}.wav")
+    #         autotune_script = os.path.join(os.path.dirname(__file__), 'autotune.py')  # Adjust path as needed
+    #         cmd = ['python', autotune_script, audio_path, autotuned_audio_path, str(midi_note)]
+    #         subprocess.run(cmd, check=True, capture_output=True)
+
+    #         self.autotune_cache[cache_key] = autotuned_audio_path
+    #         return autotuned_audio_path
+    #     except Exception as e:
+    #         logging.error(f"Autotune error: {e}")
+    #         return None
+
     def _autotune_audio(self, video_path, midi_note):
         """Autotunes audio from video to match midi note"""
-        cache_key = (video_path, midi_note)
+        cache_key = (str(video_path), midi_note)
         if cache_key in self.autotune_cache:
             return self.autotune_cache[cache_key]
         
@@ -1312,9 +1441,26 @@ class VideoComposer:
             cmd = ['ffmpeg', '-y', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '44100', audio_path]
             subprocess.run(cmd, check=True, capture_output=True)
 
+            # Get current pitch of the audio
+            current_pitch = self._analyze_pitch(audio_path)
+            if current_pitch is None:
+                logging.warning(f"Could not determine pitch for {audio_path}, skipping autotune")
+                return None
+
+            # Calculate required pitch shift
+            target_pitch = midi_note
+            pitch_shift = target_pitch - current_pitch
+            
+            logging.info(f"Pitch analysis - Current: {current_pitch}, Target: {target_pitch}, Shift: {pitch_shift}")
+            
+            # Limit pitch shift to reasonable range to avoid extreme artifacts
+            if abs(pitch_shift) > 12:  # More than an octave
+                logging.warning(f"Limiting extreme pitch shift from {pitch_shift} to {math.copysign(12, pitch_shift)}")
+                pitch_shift = math.copysign(12, pitch_shift)  # Keep sign but limit magnitude
+            
             # Autotune audio
             autotuned_audio_path = os.path.join(self.temp_dir, f"autotuned_{midi_note}.wav")
-            autotune_script = os.path.join(os.path.dirname(__file__), 'autotune.py')  # Adjust path as needed
+            autotune_script = os.path.join(os.path.dirname(__file__), 'autotune.py')
             cmd = ['python', autotune_script, audio_path, autotuned_audio_path, str(midi_note)]
             subprocess.run(cmd, check=True, capture_output=True)
 
@@ -2100,6 +2246,7 @@ class VideoComposer:
             # Use parallel chunk processing instead of sequential
             print(f"Processing chunks in parallel with adaptive resource allocation")
             chunk_files = self.process_chunks_parallel()
+            self._verify_and_fix_chunks()
             
             # Rest of method remains the same (combining chunks)
             if chunk_files:
