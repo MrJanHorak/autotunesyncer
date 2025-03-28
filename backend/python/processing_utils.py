@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from typing import Optional, Dict, Union
 import psutil
@@ -170,12 +171,14 @@ class ProgressTracker:
 
 # Replace your current EncoderQueue with:
 class EncoderQueue:
-    def __init__(self, max_concurrent=2):
+    def __init__(self, num_workers=4, queue_size=32, max_concurrent=None):  # Increase queue size
+        self.queue = Queue(maxsize=queue_size)
+        self.pool = ThreadPoolExecutor(max_workers=num_workers)
+        self.futures = []
         self.lock = RLock()
         cpu_count = os.cpu_count() or 2
-        self.max_concurrent = max_concurrent
-        self.queue = Queue()
-        self.semaphore = threading.Semaphore(max_concurrent)
+        self.max_concurrent = max_concurrent if max_concurrent is not None else cpu_count
+        self.semaphore = threading.Semaphore(self.max_concurrent)
         
     def encode(self, ffmpeg_command):
         with self.semaphore:

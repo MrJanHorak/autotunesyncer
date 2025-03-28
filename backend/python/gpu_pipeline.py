@@ -20,6 +20,52 @@ class GPUPipelineProcessor:
         self.CHUNK_DURATION = 4.0
         self.composer = composer
         
+    # def load_video_frames_to_gpu(self, video_path, start_time=0, duration=None):
+    #     """Load ALL frames from video file"""
+    #     try:
+    #         cap = cv2.VideoCapture(video_path)
+    #         if not cap.isOpened():
+    #             logging.error(f"Failed to open video: {video_path}")
+    #             return None
+                
+    #         # Get video properties
+    #         fps = cap.get(cv2.CAP_PROP_FPS)
+    #         if fps <= 0:
+    #             fps = 30.0
+                
+    #         # Determine number of frames to read
+    #         if duration is not None:
+    #             frames_to_read = int(duration * fps)
+    #         else:
+    #             frames_to_read = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                
+    #         frames = []
+    #         for _ in range(frames_to_read):
+    #             ret, frame = cap.read()
+    #             if not ret:
+    #                 break
+                    
+    #             # Convert to RGB
+    #             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #             # Move to GPU
+    #             frame_tensor = torch.from_numpy(frame).to(self.device)
+    #             frames.append(frame_tensor)
+
+    #         cap.release()
+            
+    #         if not frames:
+    #             logging.error(f"No frames read from {video_path}")
+    #             return None
+                
+    #         frames_tensor = torch.stack(frames)
+    #         frames_tensor = frames_tensor.float()
+    #         logging.info(f"Loaded {len(frames)} frames from {os.path.basename(video_path)}")
+    #         return frames_tensor
+            
+    #     except Exception as e:
+    #         logging.error(f"Error loading video: {str(e)}")
+    #         return None
+
     def load_video_frames_to_gpu(self, video_path, start_time=0, duration=None):
         """Load ALL frames from video file"""
         try:
@@ -61,7 +107,7 @@ class GPUPipelineProcessor:
             frames_tensor = frames_tensor.float()
             logging.info(f"Loaded {len(frames)} frames from {os.path.basename(video_path)}")
             return frames_tensor
-            
+                
         except Exception as e:
             logging.error(f"Error loading video: {str(e)}")
             return None
@@ -90,35 +136,35 @@ class GPUPipelineProcessor:
                 cell_config = grid_config[row][col]
                 if not cell_config or cell_config.get('empty', True):
                     continue
-                    
+
                 # Handle multiple clips in a cell (composites)
                 clips_to_process = []
                 if 'clips' in cell_config:
                     clips_to_process = cell_config['clips']
                 else:
                     clips_to_process = [cell_config]
-                    
+
                 for clip in clips_to_process:
                     # Get video path and timing
                     video_path = clip.get('path')
                     start_time = clip.get('start_time', 0)
-                    
-                    # Use separate durations for video and audio if available
-                    video_duration = clip.get('video_duration', clip.get('duration', duration))
-                    audio_duration = clip.get('audio_duration', clip.get('duration', duration))
+
+                    # Use a SINGLE duration for both audio and video
+                    clip_duration = clip.get('duration', duration) # Use base duration
                     offset = clip.get('offset', 0)  # Time offset within chunk
-                    
+
                     if not video_path or not os.path.exists(video_path):
                         continue
-                        
+
                     # Process audio - extract from video file with correct duration
                     unique_id = f"{row}_{col}_{Path(video_path).stem}_{Path(output_path).stem}"
-                    self._extract_audio(video_path, temp_dir, audio_tracks, unique_id, float(offset), 
-                                    duration=audio_duration)  # Pass audio duration here
-                    
+                    self._extract_audio(video_path, temp_dir, audio_tracks, unique_id, float(offset),
+                                    duration=clip_duration)  # Pass audio duration here
+
                     # Load frames with extended video duration
                     frames = self.load_video_frames_to_gpu(
-                        video_path, start_time, video_duration)  # Use video duration here
+                        video_path, start_time, clip_duration)  # Use video duration here
+
                     
                     if frames is not None:
                         frame_count = frames.shape[0]
@@ -149,6 +195,8 @@ class GPUPipelineProcessor:
                     if frames is not None:
                         # Calculate frame positions
                         offset_frames = int(offset * fps)
+                        # Ensure offset_frames is not negative
+                        offset_frames = max(0, offset_frames)
                         cell_frame_count = min(frames.shape[0], frame_count - offset_frames)
 
                         # Convert to float32 before interpolation
@@ -164,25 +212,45 @@ class GPUPipelineProcessor:
                         # Convert back to uint8 if needed for other operations
                         frames = frames.byte()
                         # Copy frames to output tensor with proper offset
+
                         for i in range(min(frames.shape[0], int(duration * fps))):
                             # Determine the position in the output timeline
                             output_frame_idx = offset_frames + i
-                            
+
                             # Skip if frame index is out of bounds (either negative or past the end)
                             if output_frame_idx < 0 or output_frame_idx >= output_frames.shape[0]:
                                 logging.warning(f"Skipping out-of-bounds frame: output_frame_idx={output_frame_idx} (valid range: 0-{output_frames.shape[0]-1})")
                                 continue
-                                
+
                             # Check for valid source frame index as well
                             if i < 0 or i >= frames.shape[0]:
                                 logging.warning(f"Skipping invalid source frame index: i={i}, frames.shape[0]={frames.shape[0]}")
                                 continue
-                                
+
                             # Place frame in the grid with safe bounds
                             try:
                                 output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
                             except Exception as e:
                                 logging.error(f"Frame copy error: {e}, indices: output_frame={output_frame_idx}, i={i}, sizes: output={output_frames.shape}, input={frames.shape}")
+                        # for i in range(min(frames.shape[0], int(duration * fps))):
+                        #     # Determine the position in the output timeline
+                        #     output_frame_idx = offset_frames + i
+                            
+                        #     # Skip if frame index is out of bounds (either negative or past the end)
+                        #     if output_frame_idx < 0 or output_frame_idx >= output_frames.shape[0]:
+                        #         logging.warning(f"Skipping out-of-bounds frame: output_frame_idx={output_frame_idx} (valid range: 0-{output_frames.shape[0]-1})")
+                        #         continue
+                                
+                        #     # Check for valid source frame index as well
+                        #     if i < 0 or i >= frames.shape[0]:
+                        #         logging.warning(f"Skipping invalid source frame index: i={i}, frames.shape[0]={frames.shape[0]}")
+                        #         continue
+                                
+                        #     # Place frame in the grid with safe bounds
+                        #     try:
+                        #         output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
+                        #     except Exception as e:
+                        #         logging.error(f"Frame copy error: {e}, indices: output_frame={output_frame_idx}, i={i}, sizes: output={output_frames.shape}, input={frames.shape}")
 
         # Set chunk duration for audio processing
         self.CHUNK_DURATION = duration
@@ -408,6 +476,7 @@ class GPUPipelineProcessor:
             logging.error(f"Audio mixing error: {e}")
         
         return None
+        
 
     def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0, autotuned_audio_path=None):
         """Extract audio with proper timing offset and duration"""
@@ -423,10 +492,6 @@ class GPUPipelineProcessor:
                     '-vn', '-af', f'volume={volume}',  # Add volume filter
                     '-acodec', 'pcm_s16le'
                 ]
-
-                if duration and duration < 0.1:  # 100ms minimum
-                    logging.warning(f"Increasing too short audio duration from {duration} to 0.1")
-                    duration = 0.1
                 
                 # Add duration parameter if specified
                 if duration:
@@ -434,35 +499,129 @@ class GPUPipelineProcessor:
                     
                 extract_cmd.append(audio_path)
             
-            # subprocess.run(extract_cmd, check=False, 
-            #             stdout=subprocess.PIPE, 
-            #             stderr=subprocess.PIPE)
-                        
-            # if not os.path.exists(audio_path):
-            #     return False
-                
-            # # Add timing information
-            # audio_tracks.append({
-            #     'path': audio_path,
-            #     'offset': offset
-            # })
-            # return True
-
-            subprocess.run(extract_cmd, check=True)
-        
-            # Add to audio tracks list with proper offset
-            audio_tracks.append({
-                'path': audio_path,
-                'offset': offset,
-                'volume': volume  # Store volume for debugging
-            })
-
-            return audio_path
-            
+            try:
+                subprocess.run(extract_cmd, check=True, 
+                            stdout=subprocess.PIPE, 
+                            stderr=subprocess.PIPE)
+                            
+                if not os.path.exists(audio_path):
+                    return False
+                    
+                # Add timing information
+                audio_tracks.append({
+                    'path': audio_path,
+                    'offset': offset
+                })
+                return True
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Audio extraction failed: {e.stderr.decode()}")
+                return False
                 
         except Exception as e:
             logging.error(f"Audio extraction error: {e}")
             return None
+    
+    # def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0, autotuned_audio_path=None):
+    #     """Extract audio with proper timing offset and duration"""
+    #     try:
+    #         # Use autotuned audio if available
+    #         if autotuned_audio_path and os.path.exists(autotuned_audio_path):
+    #             audio_path = autotuned_audio_path
+    #         else:
+    #             # Extract base audio with volume adjustment
+    #             audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
+    #             extract_cmd = [
+    #                 'ffmpeg', '-y', '-i', video_path,
+    #                 '-vn', '-af', f'volume={volume}',  # Add volume filter
+    #                 '-acodec', 'pcm_s16le'
+    #             ]
+
+    #             if duration and duration < 0.1:  # 100ms minimum
+    #                 logging.warning(f"Increasing too short audio duration from {duration} to 0.1")
+    #                 duration = 0.1
+                
+    #             # Add duration parameter if specified
+    #             if duration:
+    #                 extract_cmd.extend(['-t', str(duration)])
+                    
+    #             extract_cmd.append(audio_path)
+            
+    #         try:
+    #             subprocess.run(extract_cmd, check=True, 
+    #                         stdout=subprocess.PIPE, 
+    #                         stderr=subprocess.PIPE)
+                            
+    #             if not os.path.exists(audio_path):
+    #                 return False
+                    
+    #             # Add timing information
+    #             audio_tracks.append({
+    #                 'path': audio_path,
+    #                 'offset': offset
+    #             })
+    #             return True
+    #         except subprocess.CalledProcessError as e:
+    #             logging.error(f"Audio extraction failed: {e.stderr.decode()}")
+    #             return False
+                
+    #     except Exception as e:
+    #         logging.error(f"Audio extraction error: {e}")
+    #         return None
+
+    # def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0, autotuned_audio_path=None):
+    #     """Extract audio with proper timing offset and duration"""
+    #     try:
+    #         # Use autotuned audio if available
+    #         if autotuned_audio_path and os.path.exists(autotuned_audio_path):
+    #             audio_path = autotuned_audio_path
+    #         else:
+    #             # Extract base audio with volume adjustment
+    #             audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
+    #             extract_cmd = [
+    #                 'ffmpeg', '-y', '-i', video_path,
+    #                 '-vn', '-af', f'volume={volume}',  # Add volume filter
+    #                 '-acodec', 'pcm_s16le'
+    #             ]
+
+    #             if duration and duration < 0.1:  # 100ms minimum
+    #                 logging.warning(f"Increasing too short audio duration from {duration} to 0.1")
+    #                 duration = 0.1
+                
+    #             # Add duration parameter if specified
+    #             if duration:
+    #                 extract_cmd.extend(['-t', str(duration)])
+                    
+    #             extract_cmd.append(audio_path)
+            
+    #         # subprocess.run(extract_cmd, check=False, 
+    #         #             stdout=subprocess.PIPE, 
+    #         #             stderr=subprocess.PIPE)
+                        
+    #         # if not os.path.exists(audio_path):
+    #         #     return False
+                
+    #         # # Add timing information
+    #         # audio_tracks.append({
+    #         #     'path': audio_path,
+    #         #     'offset': offset
+    #         # })
+    #         # return True
+
+    #         subprocess.run(extract_cmd, check=True)
+        
+    #         # Add to audio tracks list with proper offset
+    #         audio_tracks.append({
+    #             'path': audio_path,
+    #             'offset': offset,
+    #             'volume': volume  # Store volume for debugging
+    #         })
+
+    #         return audio_path
+            
+                
+    #     except Exception as e:
+    #         logging.error(f"Audio extraction error: {e}")
+    #         return None
 
     def get_video_path(self, video_type, *args):
         """Generic video path finder"""
