@@ -373,46 +373,41 @@ class GPUPipelineProcessor:
         """Process multiple audio operations in a single FFmpeg call"""
         if not audio_files:
             return None
-            
+
         cmd = ['ffmpeg', '-y']
         filter_parts = []
-        
+
         # Add all inputs first
         for i, audio_file in enumerate(audio_files):
             # Fix: Check for either 'path' or 'video_path' key
             path = audio_file.get('path')
             if path is None:
                 path = audio_file.get('video_path')  # Try alternate key name
-                
+
             if not path:
                 logging.warning(f"Skipping audio file with no path: {audio_file}")
                 continue
-                
+
             cmd.extend(['-i', path])
-            
+
             # Calculate offset in milliseconds
             delay_ms = int(audio_file.get('offset', 0) * 1000)
-            
-            # Get volume parameter - this is the key addition
-            volume = float(audio_file.get('volume', 1.0))
-            
-            # Create input label and apply delay and volume if needed
+
+            # Create input label and apply delay if needed
             if delay_ms > 0:
-                # Add volume control to the filter chain
-                filter_parts.append(f'[{i}]volume={volume},adelay={delay_ms}|{delay_ms}[a{i}]')
+                filter_parts.append(f'[{i}]adelay={delay_ms}|{delay_ms}[a{i}]')
             else:
-                # Just apply volume when no delay is needed
-                filter_parts.append(f'[{i}]volume={volume}[a{i}]')
-        
+                filter_parts.append(f'[{i}]acopy[a{i}]')
+
         # Create mix part with proper crossfading
         inputs = ''.join(f'[a{i}]' for i in range(len(audio_files)))
         filter_parts.append(
-            f'{inputs}amix=inputs={len(audio_files)}:duration=longest:normalize=1,' # Changed normalize=0 to normalize=1
+            f'{inputs}amix=inputs={len(audio_files)}:duration=longest:normalize=0,'
             f'afade=t=in:st=0:d=0.5,'
             f'afade=t=out:st=3.5:d=0.5'
             '[aout]'
         )
-        
+
         # Complete the command
         cmd.extend([
             '-filter_complex', ';'.join(filter_parts),
@@ -420,7 +415,7 @@ class GPUPipelineProcessor:
             '-c:a', 'aac', '-b:a', '192k',
             output_path
         ])
-        
+
         # Execute in a single call
         subprocess.run(cmd, check=True)
         return output_path

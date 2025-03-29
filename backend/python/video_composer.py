@@ -7,15 +7,18 @@ import sys
 import logging
 import traceback
 import os.path
-from pathlib import Path
 import math
 import shutil
 import tempfile
 import cProfile
 import pstats
 import threading
-from threading import RLock
 import asyncio
+import time
+import numpy as np
+import torch
+import aubio
+import syncio
 from pstats import SortKey
 from tqdm import tqdm
 import time
@@ -1510,6 +1513,40 @@ class VideoComposer:
     #         logging.error(f"Autotune error: {e}")
     #         return None
 
+    def _analyze_pitch(self, video_path):
+        """Analyze pitch of audio in video file"""
+        try:
+            # Extract audio from video
+            audio_path = os.path.join(self.temp_dir, "temp_audio.wav")
+            cmd = [
+                'ffmpeg', '-y', '-i', video_path,
+                '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
+                audio_path
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+
+            # Analyze pitch using aubio
+            s = aubio.source(audio_path, rate=44100, channels=1)
+            pitch_o = aubio.pitch("yin", 44100, 1024, s.samplerate)
+            pitch_o.set_unit("midi")
+            pitch_o.set_tolerance(0.8)
+
+            pitches = []
+            while True:
+                samples, read = s()
+                pitch = pitch_o(samples)[0]
+                pitches.append(pitch)
+                if read < 1024:
+                    break
+
+            # Calculate average pitch
+            avg_pitch = sum(pitches) / len(pitches)
+            return avg_pitch
+
+        except Exception as e:
+            logging.error(f"Pitch analysis error: {e}")
+            return None
+
     def _autotune_audio(self, video_path, midi_note):
         """Autotunes audio from video to match midi note"""
         cache_key = (str(video_path), midi_note)
@@ -1815,14 +1852,30 @@ class VideoComposer:
 
 
     def _find_drum_video(self, drum_key):
-        """Find video for drum key using registry"""
-        path = PathRegistry.get_instance().get_drum_path(drum_key)
-        if path:
-            logging.info(f"Found drum video: {path}")
-            return path
-        
-        logging.warning(f"No video found for drum: {drum_key}")
-        return None
+        """Find drum video in track directory"""
+        try:
+            # Iterate through drum tracks to find the correct index
+            for track_idx, track in enumerate(self.drum_tracks):
+                # Construct the drum directory path
+                drum_dir = self.processed_videos_dir / f"track_{track_idx}_drums"
+                if not drum_dir.exists():
+                    continue  # Try next drum track
+
+                # Construct the drum file path
+                drum_file = drum_dir / f"{drum_key.replace('drum_', '')}.mp4"
+                if not drum_file.exists():
+                    continue  # Try next drum track
+
+                # If we found the file, return its path
+                return str(drum_file)
+
+            # If no drum file was found, log a warning and return None
+            logging.warning(f"Drum file not found for {drum_key} in any drum track")
+            return None
+
+        except Exception as e:
+            logging.error(f"Error finding drum video: {e}")
+            return None
 
     def _find_instrument_video(self, instrument, midi_note):
         """Find video for instrument note using registry"""
@@ -1880,24 +1933,26 @@ class VideoComposer:
     def _process_chunk(self, chunk_idx):
         """Process chunk using pure GPU pipeline with batched audio processing"""
         try:
-            logging.info(f"Starting processing for chunk {chunk_idx}")  # Add logging
+            logging.info(f"Starting processing of chunk {chunk_idx}")
             # Quick cache check with minimal lock time
             cache_key = f"chunk_{chunk_idx}"
             with self.chunk_cache_lock:
                 if cache_key in self.chunk_cache:
-                    logging.info(f"Chunk {chunk_idx} found in cache")  # Add logging
+                    logging.info(f"Chunk {chunk_idx} found in cache")
                     return self.chunk_cache[cache_key]
 
             # Calculate timing
-            start_time = chunk_idx * self.CHUNK_DURATION
+            start_time = chunk_idx * self.CHUNK_DURATION 
             end_time = start_time + (
                 self.final_duration if chunk_idx == self.full_chunks
                 else self.CHUNK_DURATION
             )
             chunk_duration = end_time - start_time
+            logging.info(f"Chunk {chunk_idx} timing: start={start_time}, end={end_time}, duration={chunk_duration}")
 
             # Get grid layout
             rows, cols = self.get_track_layout()
+            logging.info(f"Chunk {chunk_idx} grid layout: rows={rows}, cols={cols}")
             
             # Create grid configuration directly for GPU pipeline
             grid_config = [
@@ -1914,38 +1969,217 @@ class VideoComposer:
                 # Find notes in this time chunk with proper overlap handling
                 chunk_notes = [
                     note for note in track.get('notes', [])
-                    if start_time <= float(note['time']) < end_time
+                    if (start_time - self.OVERLAP_DURATION) <= float(note['time']) < end_time
+                    or (float(note['time']) < start_time and float(note['time']) + float(note['duration']) > start_time)
                 ]
-                
-                # Process instrument tracks
-                if not is_drum_kit(track) and self.has_valid_notes(track):
-                    self._process_instrument_chunk_gpu(track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols)
-                
-                # Process drum tracks
-                elif is_drum_kit(track):
-                    self._process_drum_chunk_gpu(track_idx, chunk_notes, grid_config, start_time, rows, cols)
 
-            # Create output path
-            chunk_path = self.processed_videos_dir / f"chunk_{chunk_idx}.mp4"
+                # Collect all notes for complexity analysis
+                all_notes.extend(chunk_notes)
+                logging.info(f"Track {track_idx} has {len(chunk_notes)} notes in chunk {chunk_idx}")
+                
+                if not chunk_notes:
+                    continue
+                    
+                # Collect video and audio operations for the grid
+                if is_drum_kit(track.get('instrument', {})):
+                    # ADD MISSING CODE HERE
+                    self._process_drum_chunk_gpu(track_idx, chunk_notes, grid_config, start_time, rows, cols)
+                    drum_ops = self._collect_drum_operations(
+                        track_idx, chunk_notes, start_time, rows, cols
+                    )
+                    # Add to grid config and collect audio operations
+                    for op in drum_ops:  # FIXED: Using drum_ops instead of instrument_ops
+                        # Update grid config
+                        row, col = op['position']
+                        if grid_config[row][col].get('empty', True):
+                            grid_config[row][col] = {
+                                'path': op['video_path'],
+                                'start_time': 0,
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backwards compatibility
+                                'offset': op['offset'],
+                                'empty': False
+                            }
+                        else:
+                            # If cell has content, create a clips list
+                            if 'clips' not in grid_config[row][col]:
+                                grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
+                            grid_config[row][col]['clips'].append({
+                                'path': op['video_path'],
+                                'start_time': 0,
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backwards compatibility
+                                'offset': op['offset']
+                            })
+                        # Add to audio operations
+                        audio_operations.append(op)
+                else:
+                    self._process_instrument_chunk_gpu(track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols)
+                    instrument_ops = self._collect_instrument_operations(
+                        track_idx, track, chunk_notes, start_time, end_time, rows, cols
+                    )
+                    # Add to grid config and collect audio operations
+                    for op in instrument_ops:
+                        # Update grid config
+                        row, col = op['position']
+                        if grid_config[row][col].get('empty', True):
+                            grid_config[row][col] = {
+                                'path': op['video_path'],
+                                'start_time': 0,
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backward compatibility
+                                'offset': op['offset'],
+                                'empty': False
+                            }
+                        else:
+                            # If cell has content, create a clips list
+                            if 'clips' not in grid_config[row][col]:
+                                grid_config[row][col]['clips'] = [dict(grid_config[row][col])]
+                            grid_config[row][col]['clips'].append({
+                                'path': op['video_path'],
+                                'start_time': 0,
+                                'audio_duration': op.get('audio_duration', op['duration']),
+                                'video_duration': op.get('video_duration', op['duration']),
+                                'duration': op['duration'],  # Keep for backward compatibility
+                                'offset': op['offset']
+                            })
+                        # Add to audio operations
+                        audio_operations.append(op)
+
+            # NEW: Analyze frame complexity based on collected notes
+            frame_complexity = self._estimate_frame_complexity(all_notes)
             
-            # Process chunk using pure GPU pipeline
-            gpu_pipeline = GPUPipelineProcessor(composer=self)
-            gpu_pipeline.process_chunk_pure_gpu(grid_config, str(chunk_path), duration=chunk_duration)
+            # NEW: Get optimal encoding parameters based on complexity
+            encoding_params = self._get_optimal_encoding_params(frame_complexity)
+
+            # Use GPU pipeline directly
+            chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+            pipeline = GPUPipelineProcessor(composer=self)
+
+            # Check if the pipeline supports encoding parameters
+            supports_encoding_params = hasattr(pipeline, 'set_encoding_params')
             
+            # Configure pipeline with optimal parameters if supported
+            if supports_encoding_params:
+                pipeline.set_encoding_params(encoding_params)
+        
+            
+            # First batch process all audio operations
+            mixed_audio = None
+            if audio_operations:
+                audio_output = self.temp_dir / f"mixed_audio_{chunk_idx}.aac"
+                mixed_audio = pipeline.batch_process_audio(
+                    audio_operations, 
+                    str(audio_output)
+                )
+            
+            # Then process the video with the pre-mixed audio
+            if supports_encoding_params:
+                pipeline.process_chunk_pure_gpu(
+                    grid_config=grid_config,
+                    output_path=str(chunk_path),
+                    fps=self.FRAME_RATE,
+                    duration=chunk_duration,
+                    audio_path=mixed_audio,
+                    encoding_params=encoding_params
+                )
+            else:
+                # Fallback to calling without encoding_params
+                pipeline.process_chunk_pure_gpu(
+                    grid_config=grid_config,
+                    output_path=str(chunk_path),
+                    fps=self.FRAME_RATE,
+                    duration=chunk_duration,
+                    audio_path=mixed_audio
+                )
+
             if chunk_path.exists():
                 result = str(chunk_path)
-                with self.chunk_cache_lock:
+                with self.chunk_cache_lock:  # Minimal lock time
                     self.chunk_cache[cache_key] = result
-                logging.info(f"Chunk {chunk_idx} processed successfully and cached")  # Add logging
+                logging.info(f"Chunk {chunk_idx} processed successfully, cached, and returning")
                 return result
             else:
-                logging.error(f"Chunk {chunk_idx} processing failed: output file not found")  # Add logging
-                return None
-
+                logging.warning(f"Chunk {chunk_idx} processing failed, chunk file not found")
+                
         except Exception as e:
             logging.error(f"GPU chunk processing error: {e}")
             logging.error(f"Traceback: {traceback.format_exc()}")
-            return None    #             rows, cols = self.get_track_layout()
+            return None    
+
+
+    # def _process_chunk(self, chunk_idx):
+    #     """Process chunk using pure GPU pipeline with batched audio processing"""
+    #     try:
+    #         logging.info(f"Starting processing for chunk {chunk_idx}")  # Add logging
+    #         # Quick cache check with minimal lock time
+    #         cache_key = f"chunk_{chunk_idx}"
+    #         with self.chunk_cache_lock:
+    #             if cache_key in self.chunk_cache:
+    #                 logging.info(f"Chunk {chunk_idx} found in cache")  # Add logging
+    #                 return self.chunk_cache[cache_key]
+
+    #         # Calculate timing
+    #         start_time = chunk_idx * self.CHUNK_DURATION
+    #         end_time = start_time + (
+    #             self.final_duration if chunk_idx == self.full_chunks
+    #             else self.CHUNK_DURATION
+    #         )
+    #         chunk_duration = end_time - start_time
+
+    #         # Get grid layout
+    #         rows, cols = self.get_track_layout()
+            
+    #         # Create grid configuration directly for GPU pipeline
+    #         grid_config = [
+    #             [{'empty': True} for _ in range(cols)] 
+    #             for _ in range(rows)
+    #         ]
+            
+    #         # For batched audio processing - collect all audio operations
+    #         audio_operations = []
+    #         all_notes = []
+            
+    #         # Process tracks using information from the path registry
+    #         for track_idx, track in enumerate(self.midi_data['tracks']):
+    #             # Find notes in this time chunk with proper overlap handling
+    #             chunk_notes = [
+    #                 note for note in track.get('notes', [])
+    #                 if start_time <= float(note['time']) < end_time
+    #             ]
+                
+    #             # Process instrument tracks
+    #             if not is_drum_kit(track) and self.has_valid_notes(track):
+    #                 self._process_instrument_chunk_gpu(track_idx, track, chunk_notes, grid_config, start_time, end_time, rows, cols)
+                
+    #             # Process drum tracks
+    #             elif is_drum_kit(track):
+    #                 self._process_drum_chunk_gpu(track_idx, chunk_notes, grid_config, start_time, rows, cols)
+
+    #         # Create output path
+    #         chunk_path = self.processed_videos_dir / f"chunk_{chunk_idx}.mp4"
+            
+    #         # Process chunk using pure GPU pipeline
+    #         gpu_pipeline = GPUPipelineProcessor(composer=self)
+    #         gpu_pipeline.process_chunk_pure_gpu(grid_config, str(chunk_path), duration=chunk_duration)
+            
+    #         if chunk_path.exists():
+    #             result = str(chunk_path)
+    #             with self.chunk_cache_lock:
+    #                 self.chunk_cache[cache_key] = result
+    #             logging.info(f"Chunk {chunk_idx} processed successfully and cached")  # Add logging
+    #             return result
+    #         else:
+    #             logging.error(f"Chunk {chunk_idx} processing failed: output file not found")  # Add logging
+    #             return None
+
+    #     except Exception as e:
+    #         logging.error(f"GPU chunk processing error: {e}")
+    #         logging.error(f"Traceback: {traceback.format_exc()}")
+    #         return None    #             rows, cols = self.get_track_layout()
 
     #             # Create grid configuration
     #             grid_config = [[{'empty': True} for _ in range(cols)] for _ in range(rows)]
