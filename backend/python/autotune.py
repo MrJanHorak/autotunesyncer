@@ -2,9 +2,38 @@ import sys
 import os
 import warnings
 import shutil
+import time
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Tuple, Optional, Dict
+import threading
+import psutil
 
-# Import configured GPU state
-from gpu_setup import gpu_available, tf
+# Add current directory to path for local imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# Import configured GPU state with error handling
+try:
+    from gpu_setup import gpu_available, tf, is_gpu_available, get_tensorflow
+    logging.info("GPU setup module loaded successfully")
+except ImportError:
+    logging.warning("GPU setup not available, using CPU fallback")
+    gpu_available = False
+    tf = None
+    def is_gpu_available():
+        return False
+    def get_tensorflow():
+        return None
+except Exception as e:
+    logging.warning(f"Error loading GPU setup: {e}")
+    gpu_available = False
+    tf = None
+    def is_gpu_available():
+        return False
+    def get_tensorflow():
+        return None
 
 # Rest of imports
 import numpy as np
@@ -12,24 +41,229 @@ import librosa
 import soundfile as sf
 from scipy import signal
 from scipy.interpolate import interp1d
+from scipy.io import wavfile
 
+# Optional dependencies with fallbacks
+try:
+    import crepe
+    CREPE_AVAILABLE = True
+except ImportError:
+    print("Warning: CREPE not available, using librosa for pitch detection")
+    CREPE_AVAILABLE = False
+    crepe = None
+
+try:
+    import pyrubberband as pyrb
+    PYRUBBERBAND_AVAILABLE = True
+except ImportError:
+    print("Warning: pyrubberband not available, using librosa for pitch shifting")
+    PYRUBBERBAND_AVAILABLE = False
+    pyrb = None
+
+# Enhanced logging for parallel processing
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Thread-safe processing tracking
+autotune_lock = threading.RLock()
+processing_stats = {
+    'total_frames': 0,
+    'gpu_frames': 0,
+    'cpu_frames': 0,
+    'processing_time': 0.0
+}
+
+# Enhanced versions of existing functions
 def setup_gpu():
     """Verify GPU setup"""
     if not gpu_available or tf is None:
         return False
     try:
-        with tf.device('/GPU:0'):
-            a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
-            b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
-            c = tf.matmul(a, b)
-        print("GPU test computation successful")
-        return True
+        if tf is not None:
+            with tf.device('/GPU:0'):
+                a = tf.constant([[1.0, 2.0], [3.0, 4.0]])
+                b = tf.constant([[1.0, 1.0], [1.0, 1.0]])
+                c = tf.matmul(a, b)
+            logging.info("GPU test computation successful")
+            return True
     except Exception as e:
-        print(f"GPU test failed: {e}")
+        logging.warning(f"GPU test failed: {e}")
         return False
 
-# Initialize GPU
-setup_gpu()
+class ParallelAutotuneProcessor:
+    """Enhanced autotune processor with parallel processing capabilities"""
+    
+    def __init__(self, max_workers: Optional[int] = None):
+        self.max_workers = max_workers or min(4, psutil.cpu_count(logical=False))
+        self.gpu_available = setup_gpu()
+        
+    def process_audio_segments_parallel(self, audio_segments: List[Tuple[np.ndarray, float]], 
+                                      target_pitches: List[float], sr: int) -> List[np.ndarray]:
+        """Process multiple audio segments in parallel"""
+        start_time = time.perf_counter()
+        
+        if len(audio_segments) <= 1:
+            # Single segment, no need for parallelization
+            if audio_segments:
+                result = [autotune_audio_enhanced(audio_segments[0][0], target_pitches[0], sr)]
+            else:
+                result = []
+        else:
+            # Parallel processing for multiple segments
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_segment = {}
+                
+                for i, (segment, start_time_seg) in enumerate(audio_segments):
+                    target_pitch = target_pitches[i] if i < len(target_pitches) else target_pitches[0]
+                    
+                    future = executor.submit(
+                        autotune_audio_enhanced,
+                        segment,
+                        target_pitch,
+                        sr
+                    )
+                    future_to_segment[future] = i
+                
+                # Collect results in order
+                results = [None] * len(audio_segments)
+                for future in as_completed(future_to_segment):
+                    idx = future_to_segment[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as e:
+                        logging.error(f"Autotune processing failed for segment {idx}: {e}")
+                        # Fallback to original audio
+                        results[idx] = audio_segments[idx][0]
+                
+                result = results
+        
+        total_time = time.perf_counter() - start_time
+        with autotune_lock:
+            processing_stats['processing_time'] += total_time
+        
+        logging.info(f"Parallel autotune processing completed in {total_time:.2f}s for {len(audio_segments)} segments")
+        return result
+
+# Global processor instance
+parallel_processor = ParallelAutotuneProcessor()
+
+def autotune_audio_enhanced(audio_data: np.ndarray, target_pitch: float, sr: int) -> np.ndarray:
+    """Enhanced autotune processing with GPU acceleration and fallback"""
+    with autotune_lock:
+        processing_stats['total_frames'] += 1
+    
+    try:
+        # Try GPU-accelerated processing first
+        if gpu_available and tf is not None:
+            try:
+                with autotune_lock:
+                    processing_stats['gpu_frames'] += 1
+                return autotune_audio_gpu(audio_data, target_pitch, sr)
+            except Exception as e:
+                logging.warning(f"GPU autotune failed, falling back to CPU: {e}")
+        
+        # CPU fallback
+        with autotune_lock:
+            processing_stats['cpu_frames'] += 1
+        return autotune_audio_cpu(audio_data, target_pitch, sr)
+        
+    except Exception as e:
+        logging.error(f"Autotune processing failed: {e}")
+        return audio_data  # Return original audio on failure
+
+def autotune_audio_gpu(audio_data: np.ndarray, target_pitch: float, sr: int) -> np.ndarray:
+    """GPU-accelerated autotune processing"""
+    if not gpu_available or tf is None:
+        raise RuntimeError("GPU not available")
+    
+    if not CREPE_AVAILABLE:
+        raise RuntimeError("CREPE not available for GPU processing")
+    
+    try:
+        # Ensure audio is mono
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        
+        # Use GPU for pitch detection
+        with tf.device('/GPU:0'):
+            time_vals, frequency, confidence, _ = crepe.predict(
+                audio_data,
+                sr,
+                step_size=10,  # ms
+                viterbi=True,
+                model_capacity='full',
+                verbose=0
+            )
+        
+        # Process pitch correction
+        return apply_pitch_correction(audio_data, frequency, target_pitch, sr, confidence)
+        
+    except Exception as e:
+        logging.error(f"GPU autotune processing failed: {e}")
+        raise
+
+def autotune_audio_cpu(audio_data: np.ndarray, target_pitch: float, sr: int) -> np.ndarray:
+    """CPU fallback autotune processing"""
+    try:
+        # Use librosa for CPU-based pitch detection
+        if len(audio_data.shape) > 1:
+            audio_data = np.mean(audio_data, axis=1)
+        
+        # Pitch detection using librosa
+        frequency, _, confidence = librosa.pyin(
+            audio_data,
+            fmin=librosa.note_to_hz('C2'),
+            fmax=librosa.note_to_hz('C7'),
+            sr=sr,
+            frame_length=2048
+        )
+        
+        # Fill NaN values with 0
+        frequency = np.nan_to_num(frequency, nan=0.0)
+        confidence = np.nan_to_num(confidence, nan=0.0)
+        
+        return apply_pitch_correction(audio_data, frequency, target_pitch, sr, confidence)
+        
+    except Exception as e:
+        logging.error(f"CPU autotune processing failed: {e}")
+        return audio_data
+
+def apply_pitch_correction(audio_data: np.ndarray, detected_pitch: np.ndarray, 
+                         target_pitch: float, sr: int, confidence: np.ndarray) -> np.ndarray:
+    """Apply pitch correction using detected pitch data"""
+    try:
+        # Calculate pitch shift ratios
+        valid_pitch_mask = (detected_pitch > 0) & (confidence > 0.5)
+        
+        if not np.any(valid_pitch_mask):
+            return audio_data  # No valid pitch detected
+        
+        # Calculate semitone shift
+        pitch_ratios = np.ones_like(detected_pitch)
+        pitch_ratios[valid_pitch_mask] = target_pitch / detected_pitch[valid_pitch_mask]
+        
+        # Smooth pitch ratios to avoid artifacts
+        pitch_ratios = signal.medfilt(pitch_ratios, kernel_size=5)
+        
+        # Apply pitch shifting using librosa
+        shifted_audio = librosa.effects.pitch_shift(
+            audio_data, 
+            sr=sr, 
+            n_steps=12 * np.log2(np.mean(pitch_ratios[valid_pitch_mask]))
+        )
+        
+        return shifted_audio
+        
+    except Exception as e:
+        logging.error(f"Pitch correction failed: {e}")
+        return audio_data
+
+def get_autotune_stats() -> Dict:
+    """Get autotune processing statistics"""
+    with autotune_lock:
+        return processing_stats.copy()
 
 def check_rubberband():
     """Check if rubberband-cli is available"""
@@ -106,8 +340,7 @@ def autotune_frame(frame, current_pitch, target_pitch, sr):
     
     # Try methods in order of preference
     try:
-        if check_rubberband():
-            import pyrubberband as pyrb
+        if check_rubberband() and PYRUBBERBAND_AVAILABLE:
             return pyrb.pitch_shift(frame, sr, shift)
     except Exception as e:
         print(f"Rubberband failed: {e}, trying librosa")
