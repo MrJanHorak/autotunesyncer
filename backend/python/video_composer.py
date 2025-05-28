@@ -17,10 +17,42 @@ import asyncio
 import time
 import numpy as np
 import torch
-import aubio
+from pathlib import Path
+from threading import RLock
+
+# Optional audio analysis
+try:
+    import aubio
+    AUBIO_AVAILABLE = True
+except ImportError:
+    aubio = None
+    AUBIO_AVAILABLE = False
+    logging.warning("aubio not available, some audio analysis features disabled")
+
 import syncio
 from pstats import SortKey
-from tqdm import tqdm
+
+# Optional tqdm for progress bars
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    # Fallback tqdm implementation
+    class tqdm:
+        def __init__(self, iterable=None, total=None, **kwargs):
+            self.iterable = iterable
+            self.total = total
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def __iter__(self):
+            return iter(self.iterable) if self.iterable else iter([])
+        def update(self, n=1):
+            pass
+    TQDM_AVAILABLE = False
+    logging.warning("tqdm not available, progress bars disabled")
+
 import time
 from contextlib import contextmanager
 from cachetools import LRUCache
@@ -43,7 +75,20 @@ import weakref
 
 from contextlib import contextmanager
 
-from utils import normalize_instrument_name, midi_to_note
+try:
+    from utils import normalize_instrument_name, midi_to_note
+except ImportError:
+    # Fallback implementation
+    def normalize_instrument_name(name):
+        """Match frontend's normalizeInstrumentName"""
+        return name.lower().replace(' ', '_')
+    
+    def midi_to_note(midi_num):
+        """Convert MIDI note number to note name"""
+        notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        note_name = notes[midi_num % 12]
+        octave = (midi_num // 12) - 1
+        return f"{note_name}{octave}"
 from drum_utils import (
     DRUM_NOTES,
     # process_drum_track,

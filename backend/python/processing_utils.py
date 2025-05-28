@@ -21,20 +21,28 @@ class GPUManager:
         self.handle = None
         self.pynvml_available = False
         self.streams = []
-        if torch.cuda.is_available():
-            self.streams = [torch.cuda.Stream() for _ in range(4)]
         self.current_stream = 0
         self.stream_lock = threading.RLock()
         
-        # Try to initialize CUDA
+        # Use enhanced GPU detection
         try:
-            self.has_gpu = torch.cuda.is_available() and torch.version.cuda is not None
-            if self.has_gpu:
+            from gpu_setup import gpu_available, torch_cuda_available
+            self.has_gpu = gpu_available and torch_cuda_available
+            if self.has_gpu and torch.cuda.is_available():
+                self.streams = [torch.cuda.Stream() for _ in range(4)]
                 self._init_streams()
-        except:
-            self.has_gpu = False
-            logging.warning("CUDA initialization failed, falling back to CPU")
-            
+                logging.info(f"✓ GPU Manager initialized with {len(self.streams)} CUDA streams")
+        except ImportError:
+            # Fallback to direct torch detection
+            try:
+                self.has_gpu = torch.cuda.is_available() and torch.version.cuda is not None
+                if self.has_gpu:
+                    self.streams = [torch.cuda.Stream() for _ in range(4)]
+                    self._init_streams()
+            except:
+                self.has_gpu = False
+                logging.warning("CUDA initialization failed, falling back to CPU")
+        
         self._init_gpu()
     
     def _init_gpu(self) -> bool:
