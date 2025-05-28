@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+  #!/usr/bin/env python3
 """
 Enhanced Processor Adapter
 Bridges the legacy video processing API with the new enhanced video processor

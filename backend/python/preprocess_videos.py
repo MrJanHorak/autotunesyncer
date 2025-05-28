@@ -91,13 +91,8 @@ class VideoPreprocessor:
                 
                 logging.info(f"Enhanced preprocessing: {os.path.basename(input_path)}")
                 
-                # Use encoder queue for better resource management
-                if hasattr(encoder_queue, 'encode'):
-                    result = encoder_queue.encode(cmd)
-                    if result.returncode != 0:
-                        raise subprocess.CalledProcessError(result.returncode, cmd, result.stderr)
-                else:
-                    run_ffmpeg_command(cmd)
+                # Always use run_ffmpeg_command which has CUDA fallback logic
+                run_ffmpeg_command(cmd)
                 
                 # Validate output
                 validate_video(output_path)
@@ -294,7 +289,11 @@ def preprocess_video(input_path, output_path, target_size=None):
         ]
         
         if target_size:
-            width, height = target_size.split('x')
+            # Handle both tuple (width, height) and string "widthxheight" formats
+            if isinstance(target_size, tuple):
+                width, height = target_size
+            else:
+                width, height = target_size.split('x')
             scale_filter = (
                 f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
                 f'pad=w={width}:h={height}:x=(ow-iw)/2:y=(oh-ih)/2:color=black'
@@ -302,12 +301,8 @@ def preprocess_video(input_path, output_path, target_size=None):
             cmd.extend(['-vf', scale_filter])
             
         cmd.extend([
-            '-c:v', 'h264_nvenc',
-            '-rc', 'vbr',
-            '-rc-lookahead', '32',
-            '-gpu', '0',
-            '-tune', 'hq',
-            '-profile:v', 'high',
+            '-c:v', 'libx264',
+            '-preset', 'medium',
             '-crf', '23',
             '-pix_fmt', 'yuv420p',
             '-movflags', '+faststart',

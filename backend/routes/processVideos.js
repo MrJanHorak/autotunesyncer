@@ -131,9 +131,7 @@ router.post(
         ...Object.values(gridArrangement).map((pos) => pos.column)
       );
       const targetWidth = Math.floor(1920 / (maxCol + 1));
-      const targetHeight = Math.floor(1080 / (maxRow + 1));
-
-      // Process each video
+      const targetHeight = Math.floor(1080 / (maxRow + 1)); // Process each video
       for (const file of videoFiles) {
         const instrumentName = path.parse(file.originalname).name;
         const originalPath = file.path;
@@ -150,8 +148,13 @@ router.post(
             `${targetWidth}x${targetHeight}`
           );
 
-          // videos[instrumentName] = processedPath;
-          videos[instrumentName] = path.resolve(processedPath);
+          // Structure data to match Python processor expectations
+          videos[instrumentName] = {
+            path: path.resolve(processedPath),
+            isDrum: instrumentName.toLowerCase().includes('drum'),
+            notes: [], // Will be populated from MIDI data
+            layout: { x: 0, y: 0, width: targetWidth, height: targetHeight },
+          };
           console.log(`Processed ${instrumentName}: ${processedPath}`);
 
           // Cleanup original
