@@ -39,6 +39,9 @@ def performance_monitor(operation_name):
 def get_optimized_ffmpeg_params(use_gpu=True, preset="fast", quality="high"):
     """Get optimized FFmpeg parameters based on system capabilities"""
     
+    # Force CPU mode since CUDA is failing - disable GPU until issues are resolved
+    use_gpu = False
+    
     if use_gpu and gpu_manager.has_gpu:
         # NVENC hardware acceleration
         params = {
@@ -163,22 +166,62 @@ def run_ffmpeg_command(cmd):
             if '-threads' not in cmd:
                 cpu_count = psutil.cpu_count(logical=False)
                 optimized_cmd.extend(['-threads', str(min(cpu_count, 8))])
-            
-            # Use GPU context if available
-            if gpu_manager.has_gpu:
-                with gpu_manager.gpu_context():
-                    result = subprocess.run(
+              # Use GPU context if available, with fallback to CPU
+            try:
+                if gpu_manager.has_gpu:
+                    with gpu_manager.gpu_context():
+                        result = subprocess.run(
+                            optimized_cmd, 
+                            check=True, 
+                            capture_output=True, 
+                            text=True,
+                            timeout=300  # 5 minute timeout
+                        )
+                else:                    result = subprocess.run(
                         optimized_cmd, 
                         check=True, 
-                        capture_output=True, 
+                        capture_output=True,
                         text=True,
-                        timeout=300  # 5 minute timeout
+                        timeout=300
                     )
-            else:
+            except Exception as gpu_error:
+                # Fallback to CPU if GPU fails
+                logging.warning(f"GPU processing failed: {gpu_error}, falling back to CPU")
+                  # Create CPU-safe command by removing all GPU-specific parameters
+                cpu_cmd = []
+                skip_next = False
+                
+                for i, arg in enumerate(optimized_cmd):
+                    if skip_next:
+                        skip_next = False
+                        continue
+                        
+                    # Skip GPU-specific parameters and their values
+                    if arg in ['-hwaccel', '-hwaccel_device', '-hwaccel_output_format', '-gpu', '-surfaces', 
+                              '-tune', '-rc', '-cq', '-b:v', '-maxrate', '-bufsize']:
+                        skip_next = True
+                        continue
+                    elif arg in ['cuda', 'h264_nvenc', 'hevc_nvenc']:
+                        # Replace GPU encoders with CPU equivalents
+                        if arg == 'h264_nvenc':
+                            cpu_cmd.append('libx264')
+                        elif arg == 'hevc_nvenc':
+                            cpu_cmd.append('libx265')
+                        elif arg == 'cuda':
+                            continue  # Skip cuda value for hwaccel
+                    elif arg == 'p4':
+                        # Replace GPU preset with CPU preset
+                        cpu_cmd.append('fast')
+                    elif arg in ['hq', 'vbr']:
+                        # Skip GPU-specific tune/rate control values
+                        continue
+                    else:
+                        cpu_cmd.append(arg)
+                
                 result = subprocess.run(
-                    optimized_cmd, 
+                    cpu_cmd, 
                     check=True, 
-                    capture_output=True, 
+                    capture_output=True,
                     text=True,
                     timeout=300
                 )

@@ -748,13 +748,12 @@ class VideoComposer:
             logging.info(f"Grid arrangement received: {grid_arrangement}")
             
             if not grid_arrangement:
-                raise ValueError("No grid arrangement provided")
-
-            # Store positions and validate
+                raise ValueError("No grid arrangement provided")            # Store positions and validate
             self.grid_positions = {}
             for track_id, pos_data in grid_arrangement.items():
-                # Validate position data
-                if not all(k in pos_data for k in ['row', 'column', 'position']):
+                # Validate position data - check for required keys
+                required_keys = ['row', 'column']
+                if not all(k in pos_data for k in required_keys):
                     logging.error(f"Invalid position data for {track_id}: {pos_data}")
                     continue
                 
@@ -1790,8 +1789,7 @@ class VideoComposer:
         
         # Extract the actual track ID from the track data
         track_id = track.get('id', str(track_idx))  # Look for ID in track data
-        
-        # Log the track information for debugging
+          # Log the track information for debugging
         logging.info(f"Processing instrument: {instrument_name} (ID: {track_id}, Index: {track_idx})")
         
         # Use the track ID directly to find grid position
@@ -1800,9 +1798,22 @@ class VideoComposer:
             row, col = int(pos_data['row']), int(pos_data['column'])
             logging.info(f"Found grid position for {instrument_name} (ID: {track_id}): row={row}, col={col}")
         else:
-            # Fallback to default
-            row = (track_idx % (rows-1)) + 1
-            col = min(track_idx // (rows-1), cols-1)
+            # Fallback to default - handle edge cases for small grids
+            if rows <= 1 and cols <= 1:
+                # Single cell grid
+                row, col = 0, 0
+            elif rows <= 1:
+                # Single row, multiple columns
+                row = 0
+                col = min(track_idx, cols-1)
+            elif cols <= 1:
+                # Single column, multiple rows
+                row = min(track_idx, rows-1)
+                col = 0
+            else:
+                # Normal grid layout - use rows instead of (rows-1) to avoid division by zero
+                row = track_idx % rows
+                col = min(track_idx // rows, cols-1)
             logging.warning(f"No grid position for {instrument_name} (ID: {track_id}), using default: row={row}, col={col}")
         
         # Rest of your existing code for processing instrument notes
@@ -2649,8 +2660,25 @@ class VideoComposer:
             pos_data = self.grid_positions[track_key]
             row, col = int(pos_data['row']), int(pos_data['column'])
         else:
-            row = (track_idx % (rows-1)) + 1
-            col = min(track_idx // (rows-1), cols-1)
+            # Safe fallback calculation with edge case handling
+            if rows <= 1 and cols <= 1:
+                # Single cell grid
+                row, col = 0, 0
+            elif rows <= 1:
+                # Single row, multiple columns
+                row = 0
+                col = min(track_idx, cols-1)
+            elif cols <= 1:
+                # Single column, multiple rows
+                row = min(track_idx, rows-1)
+                col = 0
+            else:
+                # Normal grid layout - use rows, not rows-1
+                row = track_idx % rows
+                col = track_idx // rows
+                # Keep within bounds
+                row = min(row, rows-1)
+                col = min(col, cols-1)
             logging.warning(f"No grid position for {instrument_name}, using default: row={row}, col={col}")
         
         # Group notes by time to handle chords
