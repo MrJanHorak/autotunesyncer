@@ -196,15 +196,31 @@ class EnhancedVideoProcessor:
         """Process a single video track with optimizations"""
         try:
             logger.info(f"Processing track: {track_id}")
-            
-            # Handle video data
+              # Handle video data
             if 'path' in track_data and Path(track_data['path']).exists():
                 input_path = track_data['path']
             elif 'videoData' in track_data:
                 # Handle video buffer data - save to temp file
                 temp_path = output_dir / f"temp_{track_id}_input.mp4"
+                video_data = track_data['videoData']
+                
+                # Handle both raw bytes and base64-encoded strings
+                if isinstance(video_data, str):
+                    # Assume base64-encoded string
+                    import base64
+                    try:
+                        video_data = base64.b64decode(video_data)
+                    except Exception as e:
+                        logger.error(f"Failed to decode base64 video data for track {track_id}: {e}")
+                        return None
+                elif not isinstance(video_data, bytes):
+                    logger.error(f"Invalid video data type for track {track_id}: {type(video_data)}")
+                    return None
+                
                 with open(temp_path, 'wb') as f:
-                    f.write(track_data['videoData'])
+                    f.write(video_data)
+                input_path = str(temp_path)
+                self.temp_files.append(temp_path)
                 input_path = str(temp_path)
                 self.temp_files.append(temp_path)
             else:

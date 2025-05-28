@@ -1,0 +1,30 @@
+{
+  "tracks": {
+    "track_0": {
+      "instrument": {
+        "name": "piano"
+      },
+      "notes": [
+        {
+          "time": 0.0,
+          "duration": 1.0,
+          "midi": 60,
+          "velocity": 100
+        },
+        {
+          "time": 1.0,
+          "duration": 1.0,
+          "midi": 64,
+          "velocity": 100
+        }
+      ],
+      "isDrum": false
+    }
+  },
+  "videos": {
+    "track_0": "test_output_preprocessed2.mp4"
+  },
+  "output": "test_final_composition.mp4",
+  "background": "backend/backgrounds/solidBlack19201080.jpg",
+  "layout": "1x1"
+}

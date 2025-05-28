@@ -47,10 +47,28 @@ videoProcessingQueue.process('compose', 4, async (job) => {
     // Prepare data for Python processor
     const tempDir = join(process.cwd(), 'backend', 'temp');
     const midiJsonPath = join(tempDir, `midi_${sessionId}.json`);
-    const videoFilesJsonPath = join(tempDir, `videos_${sessionId}.json`);
-
-    // Combine processed tracks and drums
+    const videoFilesJsonPath = join(tempDir, `videos_${sessionId}.json`); // Combine processed tracks and drums
     const allVideoFiles = { ...processedTracks, ...processedDrums };
+
+    // Transform video files to match expected Python format
+    const transformedVideoFiles = {};
+    Object.entries(allVideoFiles).forEach(([key, value]) => {
+      transformedVideoFiles[key] = {
+        // Use 'videoData' key instead of 'video' to match Python expectations
+        videoData: value.video,
+        isDrum: value.isDrum || false,
+        drumName: value.drumName,
+        notes: value.notes || [],
+        layout: value.layout || {
+          x: 0,
+          y: 0,
+          width: 960,
+          height: 720,
+        },
+        index: value.index,
+        processedAt: value.processedAt,
+      };
+    });
 
     await job.progress(20, {
       stage: 'data_preparation',
@@ -66,7 +84,7 @@ videoProcessingQueue.process('compose', 4, async (job) => {
           processingMetadata: {
             sessionId,
             timestamp: Date.now(),
-            trackCount: Object.keys(allVideoFiles).length,
+            trackCount: Object.keys(transformedVideoFiles).length,
             performanceMetrics,
           },
         },
@@ -75,7 +93,10 @@ videoProcessingQueue.process('compose', 4, async (job) => {
       )
     );
 
-    writeFileSync(videoFilesJsonPath, JSON.stringify(allVideoFiles, null, 2));
+    writeFileSync(
+      videoFilesJsonPath,
+      JSON.stringify(transformedVideoFiles, null, 2)
+    );
 
     await job.progress(30, {
       stage: 'processing_start',
@@ -92,7 +113,7 @@ videoProcessingQueue.process('compose', 4, async (job) => {
       '--memory-limit',
       '4',
       '--parallel-tracks',
-      Math.min(4, Object.keys(allVideoFiles).length).toString(),
+      Math.min(4, Object.keys(transformedVideoFiles).length).toString(),
     ];
 
     const pythonProcess = spawn('python', pythonArgs, {

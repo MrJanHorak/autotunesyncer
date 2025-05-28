@@ -82,8 +82,6 @@ class GPUManager:
         if self.has_gpu:
             self.streams = [torch.cuda.Stream() for _ in range(4)]
             logging.info(f"Initialized {len(self.streams)} CUDA streams")
-
-
     def get_next_stream(self):
         """Get next available CUDA stream with proper locking"""
         with self.stream_lock:  # Use fine-grained lock just for stream selection
@@ -129,26 +127,27 @@ class GPUManager:
             }
         except:
             return None
-
+    
     @contextmanager
     def gpu_context(self):
         """Context manager for GPU operations with proper cleanup"""
-        if not self.has_gpu:
-            yield None
-            return
-
         stream = None
+        
         try:
-            stream = self._get_next_stream()
-            if stream:
-                with torch.cuda.stream(stream):
-                    yield stream
+            if self.has_gpu:
+                stream = self._get_next_stream()
+                if stream:
+                    with torch.cuda.stream(stream):
+                        yield stream
+                else:
+                    yield None
             else:
                 yield None
                 
         except Exception as e:
             logging.warning(f"GPU context error: {e}, falling back to CPU")
-            yield None
+            # Let the calling code handle fallback, don't try to yield again
+            raise
             
         finally:
             if stream and torch.cuda.is_available():
