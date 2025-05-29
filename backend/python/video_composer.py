@@ -121,6 +121,16 @@ logging.basicConfig(
     force=True
 )
 
+# Configure stream handler to handle Unicode properly on Windows
+for handler in logging.getLogger().handlers:
+    if isinstance(handler, logging.StreamHandler):
+        # Ensure proper encoding for Windows console
+        if hasattr(handler.stream, 'reconfigure'):
+            try:
+                handler.stream.reconfigure(encoding='utf-8', errors='replace')
+            except:
+                pass
+
 @contextmanager
 def timing_block(name):
     """Context manager to measure execution time"""

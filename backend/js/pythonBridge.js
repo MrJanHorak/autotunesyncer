@@ -9,36 +9,38 @@ const __dirname = path.dirname(__filename);
 export const runPythonProcessor = async (configPath) => {
   return new Promise((resolve, reject) => {
     let midiJsonPath, videoJsonPath, outputPath;
-    
+
     try {
       // Read the config file
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      
+
       // Create separate JSON files for MIDI data and video files
       const tempDir = path.dirname(configPath);
       const baseName = path.basename(configPath, '.json');
-      
+
       midiJsonPath = path.join(tempDir, `${baseName}-midi.json`);
       videoJsonPath = path.join(tempDir, `${baseName}-videos.json`);
-      outputPath = path.join(tempDir, `${baseName}-output.mp4`);
-      
-      // Write MIDI data
-      fs.writeFileSync(midiJsonPath, JSON.stringify(config.tracks));
-      
-      // Write video files data
-      fs.writeFileSync(videoJsonPath, JSON.stringify(config.videos));
-      
+      outputPath = path.join(tempDir, `${baseName}-output.mp4`); // Write MIDI data - ensure proper format with tracks wrapper
+      const midiData = {
+        tracks: config.tracks || [],
+      };
+      fs.writeFileSync(midiJsonPath, JSON.stringify(midiData));
+
+      // Write video files data - ensure proper format
+      const videoFiles = config.videos || {};
+      fs.writeFileSync(videoJsonPath, JSON.stringify(videoFiles));
+
       // Use the enhanced video processor
       const pythonScript = path.join(__dirname, '../utils/video_processor.py');
-
       const process = spawn('python', [
         pythonScript,
+        '--midi-json',
         midiJsonPath,
+        '--video-files-json',
         videoJsonPath,
+        '--output-path',
         outputPath,
         '--performance-mode',
-        '--parallel-tracks',
-        '4',
         '--memory-limit',
         '4',
       ]);
@@ -66,7 +68,7 @@ export const runPythonProcessor = async (configPath) => {
         } catch (cleanupError) {
           console.warn('Cleanup error:', cleanupError.message);
         }
-        
+
         if (code !== 0) {
           reject(
             new Error(
@@ -79,7 +81,7 @@ export const runPythonProcessor = async (configPath) => {
             resolve({
               success: true,
               outputPath: outputPath,
-              message: output.trim()
+              message: output.trim(),
             });
           } catch (e) {
             reject(
@@ -90,12 +92,13 @@ export const runPythonProcessor = async (configPath) => {
           }
         }
       });
-      
     } catch (error) {
       // Cleanup on error
       try {
-        if (midiJsonPath && fs.existsSync(midiJsonPath)) fs.unlinkSync(midiJsonPath);
-        if (videoJsonPath && fs.existsSync(videoJsonPath)) fs.unlinkSync(videoJsonPath);
+        if (midiJsonPath && fs.existsSync(midiJsonPath))
+          fs.unlinkSync(midiJsonPath);
+        if (videoJsonPath && fs.existsSync(videoJsonPath))
+          fs.unlinkSync(videoJsonPath);
       } catch (cleanupError) {
         console.warn('Cleanup error:', cleanupError.message);
       }

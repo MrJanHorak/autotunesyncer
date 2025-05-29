@@ -31,7 +31,7 @@ def detect_pytorch_cuda():
             cuda_version = torch.version.cuda
             torch_cuda_available = True
             
-            logging.info(f"✓ PyTorch CUDA detected: {device_name}")
+            logging.info(f"[CUDA] PyTorch CUDA detected: {device_name}")
             logging.info(f"  CUDA version: {cuda_version}")
             logging.info(f"  Available devices: {device_count}")
             
@@ -68,7 +68,7 @@ def detect_nvidia_smi():
                     gpu_info.append(line.strip())
             
             if gpu_info:
-                logging.info("✓ NVIDIA GPU detected via nvidia-smi:")
+                logging.info("[NVIDIA] GPU detected via nvidia-smi:")
                 for info in gpu_info:
                     logging.info(f"  {info}")
                 return True
@@ -88,7 +88,7 @@ def detect_tensorflow_gpu():
         import tensorflow as tf_module
         gpus = tf_module.config.experimental.list_physical_devices('GPU')
         if gpus:
-            logging.info(f"✓ TensorFlow GPU detected: {len(gpus)} devices")
+            logging.info(f"[TensorFlow] GPU detected: {len(gpus)} devices")
             for i, gpu in enumerate(gpus):
                 logging.info(f"  Device {i}: {gpu}")
             return True, tf_module
@@ -118,7 +118,7 @@ def is_gpu_available():
     gpu_available = pytorch_available or nvidia_available or tf_available
     
     if gpu_available:
-        logging.info("✓ GPU acceleration ENABLED")
+        logging.info("[GPU] GPU acceleration ENABLED")
         if pytorch_available:
             logging.info("  Primary backend: PyTorch CUDA")
         elif tf_available:
@@ -168,7 +168,7 @@ def setup_gpu_memory_optimization():
             torch.cuda.empty_cache()
             # Set memory fraction to avoid OOM
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
-            logging.info("✓ PyTorch GPU memory optimization enabled")
+            logging.info("[PyTorch] GPU memory optimization enabled")
         
         # TensorFlow memory optimization
         if tf is not None:
@@ -176,7 +176,7 @@ def setup_gpu_memory_optimization():
             if gpus:
                 for gpu in gpus:
                     tf.config.experimental.set_memory_growth(gpu, True)
-                logging.info("✓ TensorFlow GPU memory growth enabled")
+                logging.info("[TensorFlow] GPU memory growth enabled")
         
         return True
         
