@@ -31,7 +31,7 @@ class GPUManager:
             if self.has_gpu and torch.cuda.is_available():
                 self.streams = [torch.cuda.Stream() for _ in range(4)]
                 self._init_streams()
-                logging.info(f"✓ GPU Manager initialized with {len(self.streams)} CUDA streams")
+                logging.info(f"[GPU] GPU Manager initialized with {len(self.streams)} CUDA streams")
         except ImportError:
             # Fallback to direct torch detection
             try:

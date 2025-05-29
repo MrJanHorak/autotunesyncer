@@ -7,8 +7,6 @@ Uses the efficient chunk-based VideoComposer architecture instead of note-by-not
 import sys
 import os
 import logging
-import json
-import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -17,25 +15,11 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.video_composer_wrapper import VideoComposerWrapper
 
-# Configure logging without Unicode characters to prevent Windows CP1252 encoding errors
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-# Configure stream handler to handle Unicode properly on Windows
-for handler in logging.getLogger().handlers:
-    if isinstance(handler, logging.StreamHandler):
-        # Ensure proper encoding for Windows console
-        if hasattr(handler.stream, 'reconfigure'):
-            try:
-                handler.stream.reconfigure(encoding='utf-8', errors='replace')
-            except:
-                pass
-
 logger = logging.getLogger(__name__)
 
 class EnhancedVideoProcessor:
@@ -65,23 +49,24 @@ class EnhancedVideoProcessor:
         # Also delegate to wrapper
         self.composer_wrapper.report_progress(progress, message)
     
-    def validate_input_files(self, midi_json_path: str, video_files_json_path: str) -> bool:
-        """Validate that input files exist and are readable"""
+    def validate_input_files(self, midi_path: str, video_files_path: str) -> bool:
+        """Validate input files exist and are readable"""
         try:
-            if not os.path.exists(midi_json_path):
-                logger.error(f"MIDI JSON file not found: {midi_json_path}")
+            if not Path(midi_path).exists():
+                logger.error(f"MIDI file not found: {midi_path}")
                 return False
-                
-            if not os.path.exists(video_files_json_path):
-                logger.error(f"Video files JSON not found: {video_files_json_path}")
+            
+            if not Path(video_files_path).exists():
+                logger.error(f"Video files JSON not found: {video_files_path}")
                 return False
-                
-            # Try to load JSON files
-            with open(midi_json_path, 'r') as f:
+            
+            # Validate JSON format
+            import json
+            with open(midi_path) as f:
                 json.load(f)
-            with open(video_files_json_path, 'r') as f:
+            with open(video_files_path) as f:
                 json.load(f)
-                
+            
             return True
         except Exception as e:
             logger.error(f"Input validation failed: {e}")
@@ -93,7 +78,7 @@ class EnhancedVideoProcessor:
         This replaces the problematic note-by-note processing with efficient chunking
         """
         try:
-            logger.info("Using efficient chunk-based processing instead of note-by-note")
+            logger.info("🚀 Using efficient chunk-based processing instead of note-by-note")
             logger.info(f"Processing {len(midi_data.get('tracks', []))} tracks with chunked approach")
             
             # Count total notes for comparison
@@ -102,17 +87,17 @@ class EnhancedVideoProcessor:
                 if isinstance(track, dict) and 'notes' in track:
                     total_notes += len(track.get('notes', []))
             
-            logger.info(f"Total notes to process: {total_notes}")
-            logger.info("Instead of processing each note individually, using 4-second chunks")
+            logger.info(f"📊 Total notes to process: {total_notes}")
+            logger.info("💡 Instead of processing each note individually, using 4-second chunks")
             
             # Delegate to the efficient VideoComposerWrapper
             success = self.composer_wrapper.process_videos(midi_data, video_files, output_path)
             
             if success:
-                logger.info("SUCCESS: Chunk-based processing completed successfully!")
+                logger.info("✅ Chunk-based processing completed successfully!")
                 return True
             else:
-                logger.error("ERROR: Chunk-based processing failed")
+                logger.error("❌ Chunk-based processing failed")
                 return False
                 
         except Exception as e:
@@ -125,7 +110,7 @@ class EnhancedVideoProcessor:
         """
         Combine videos using chunk-based approach instead of complex FFmpeg filters
         """
-        logger.info("Using chunk-based combination instead of complex FFmpeg filters")
+        logger.info("🔄 Using chunk-based combination instead of complex FFmpeg filters")
         return self.composer_wrapper.combine_videos(processed_videos, midi_data, output_path)
     
     def process_video_with_notes(self, midi_data: Dict, video_files: Dict, output_path: str) -> bool:
@@ -136,7 +121,7 @@ class EnhancedVideoProcessor:
         """Clean up temporary files"""
         try:
             self.composer_wrapper.cleanup()
-            logger.info("Cleanup completed")
+            logger.info("🧹 Cleanup completed")
         except Exception as e:
             logger.warning(f"Cleanup warning: {e}")
     
@@ -144,42 +129,54 @@ class EnhancedVideoProcessor:
         """Alias for cleanup_temp_files"""
         self.cleanup_temp_files()
     
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """Return performance summary of the chunk-based processing"""
-        return {
-            'processing_method': 'chunk-based',
-            'architecture': 'VideoComposer with GPU acceleration',
-            'chunking': '4-second segments',
-            'parallel_processing': True,
-            'gpu_acceleration': True,
-            'note_handling': 'pre-processed in chunks'
-        }
+    def get_performance_summary(self):
+        """Get performance summary from the wrapper"""
+        try:
+            return {
+                'processing_method': 'chunk-based',
+                'architecture': 'VideoComposer with GPU acceleration',
+                'chunking': '4-second segments',
+                'parallel_processing': True,
+                'gpu_acceleration': True,
+                'note_handling': 'pre-processed in chunks'
+            }
+        except Exception:
+            return {'error': 'Performance data not available'}
 
+# Compatibility function for existing code
 def main():
-    """Main function for command-line usage"""
-    parser = argparse.ArgumentParser(description='Enhanced Video Processor with Chunk-based Architecture')
-    parser.add_argument('--midi-json', required=True, help='Path to MIDI JSON file')
-    parser.add_argument('--video-files-json', required=True, help='Path to video files JSON')
-    parser.add_argument('--output-path', required=True, help='Output video path')
-    parser.add_argument('--performance-mode', action='store_true', default=True, help='Enable performance mode')
-    parser.add_argument('--memory-limit', type=int, default=4, help='Memory limit in GB')
+    """Main entry point with argument parsing"""
+    import argparse
+    import json
+    
+    parser = argparse.ArgumentParser(description='Enhanced Video Processor (Chunk-Based)')
+    parser.add_argument('midi_json', help='Path to MIDI data JSON file')
+    parser.add_argument('video_files_json', help='Path to video files JSON file')
+    parser.add_argument('output_path', help='Output video file path')
+    parser.add_argument('--performance-mode', action='store_true', default=True,
+                       help='Enable performance optimizations')
+    parser.add_argument('--memory-limit', type=float, default=4.0,
+                       help='Memory limit in GB (default: 4.0)')
+    parser.add_argument('--parallel-tracks', type=int, default=None,
+                       help='Number of parallel tracks to process')
     
     args = parser.parse_args()
     
     # Load input data
     try:
-        with open(args.midi_json, 'r') as f:
+        with open(args.midi_json) as f:
             midi_data = json.load(f)
-        with open(args.video_files_json, 'r') as f:
+        with open(args.video_files_json) as f:
             video_files = json.load(f)
     except Exception as e:
         logger.error(f"Failed to load input files: {e}")
         return False
     
-    # Initialize processor
+    # Initialize processor with chunk-based backend
     processor = EnhancedVideoProcessor(
         performance_mode=args.performance_mode,
-        memory_limit_gb=args.memory_limit
+        memory_limit_gb=args.memory_limit,
+        parallel_tracks=args.parallel_tracks
     )
     
     # Validate inputs
@@ -188,17 +185,17 @@ def main():
         return False
     
     # Process videos using chunk-based approach
-    logger.info("Starting chunk-based video processing...")
+    logger.info("🎬 Starting chunk-based video processing...")
     success = processor.process_videos(midi_data, video_files, args.output_path)
     
     if success:
-        logger.info(f"SUCCESS: Video processing completed successfully: {args.output_path}")
+        logger.info(f"✅ Video processing completed successfully: {args.output_path}")
         
         # Show performance summary
         summary = processor.get_performance_summary()
-        logger.info(f"Performance summary: {summary}")
+        logger.info(f"📊 Performance summary: {summary}")
     else:
-        logger.error("ERROR: Video processing failed")
+        logger.error("❌ Video processing failed")
     
     # Cleanup
     processor.cleanup()

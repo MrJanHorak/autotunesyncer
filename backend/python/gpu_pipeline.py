@@ -8,7 +8,10 @@ from pathlib import Path
 import os
 import subprocess
 import logging
-from path_registry import PathRegistry
+try:
+    from .path_registry import PathRegistry
+except ImportError:
+    from path_registry import PathRegistry
 
 class GPUPipelineProcessor:
     def __init__(self, composer = None):
@@ -250,9 +253,7 @@ class GPUPipelineProcessor:
                         #     try:
                         #         output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
                         #     except Exception as e:
-                        #         logging.error(f"Frame copy error: {e}, indices: output_frame={output_frame_idx}, i={i}, sizes: output={output_frames.shape}, input={frames.shape}")
-
-        # Set chunk duration for audio processing
+                        #         logging.error(f"Frame copy error: {e}, indices: output_frame={output_frame_idx}, i={i}, sizes: output={output_frames.shape}, input={frames.shape}")        # Set chunk duration for audio processing
         self.CHUNK_DURATION = duration
         
         # Mix audio and export video
@@ -260,13 +261,22 @@ class GPUPipelineProcessor:
                                            f"mixed_{Path(output_path).stem}.aac")
         
         # Write frames to disk
-        # self._write_frames_to_disk(output_frames, output_path, fps, mixed_audio)
-
         self._write_frames_to_disk(output_frames, output_path, fps)
     
-        # Add audio if provided
-        if audio_path and os.path.exists(audio_path):
-            self._add_audio_to_video(output_path, audio_path)
+        # Add audio - prioritize mixed_audio from MIDI processing over external audio_path
+        audio_to_add = None
+        if mixed_audio and os.path.exists(mixed_audio):
+            audio_to_add = mixed_audio
+            logging.info(f"Using mixed audio from MIDI processing: {mixed_audio}")
+        elif audio_path and os.path.exists(audio_path):
+            audio_to_add = audio_path
+            logging.info(f"Using external audio path: {audio_path}")
+        
+        if audio_to_add:
+            self._add_audio_to_video(output_path, audio_to_add)
+            logging.info(f"Successfully added audio to video: {audio_to_add}")
+        else:
+            logging.warning("No audio tracks found - video will be silent")
         
         
         # Clean up temporary files
