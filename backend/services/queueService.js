@@ -101,19 +101,18 @@ videoProcessingQueue.process('compose', 4, async (job) => {
     await job.progress(30, {
       stage: 'processing_start',
       message: 'Starting video processing...',
-    });
-
-    // Launch enhanced Python processor
+    }); // Launch enhanced Python processor
     const pythonArgs = [
       join(process.cwd(), 'backend', 'utils', 'video_processor.py'),
+      '--midi-json',
       midiJsonPath,
+      '--video-files-json',
       videoFilesJsonPath,
+      '--output-path',
       outputPath,
       '--performance-mode',
       '--memory-limit',
       '4',
-      '--parallel-tracks',
-      Math.min(4, Object.keys(transformedVideoFiles).length).toString(),
     ];
 
     const pythonProcess = spawn('python', pythonArgs, {

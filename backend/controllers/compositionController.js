@@ -268,19 +268,18 @@ async function processVideoWithPython(
       writeFileSync(
         videoFilesJsonPath,
         JSON.stringify(videoFilesForPython, null, 2)
-      );
-
-      // Enhanced Python process with performance monitoring
+      ); // Enhanced Python process with performance monitoring
       const pythonArgs = [
         join(__dirname, '../utils/video_processor.py'),
+        '--midi-json',
         midiJsonPath,
+        '--video-files-json',
         videoFilesJsonPath,
+        '--output-path',
         outputPath,
         '--performance-mode', // New flag for optimized processing
         '--memory-limit',
-        '4GB',
-        '--parallel-tracks',
-        Math.min(4, Object.keys(videoFilesForPython).length).toString(),
+        '4',
       ];
 
       console.log('Starting enhanced Python process:', pythonArgs);
