@@ -1,6 +1,3 @@
-# CRITICAL PERFORMANCE FIXES FOR AUTOTUNESYNCER GPU PIPELINE
-# This file contains the complete working implementation with all performance fixes applied
-
 import shutil
 import time
 import traceback
@@ -67,6 +64,41 @@ class GPUPipelineProcessor:
         
         logging.info(f"GPUPipelineProcessor initialized on {self.device} with enhanced memory management")
         
+    # def load_video_frames_to_gpu(self, video_path, start_time=0, duration=None):
+    #     """Load ALL frames from video file"""
+    #     try:
+    #         cap = cv2.VideoCapture(video_path)
+    #         if not cap.isOpened():
+    #             logging.error(f"Failed to open video: {video_path}")
+    #             return None
+                
+    #         # Get video properties
+    #         fps = cap.get(cv2.CAP_PROP_FPS)
+    #         if fps <= 0:
+    #             fps = 30.0
+                
+    #         # Determine number of frames to read
+    #         if duration is not None:
+    #             frames_to_read = int(duration * fps)
+    #         else:
+    #             frames_to_read = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                
+    #         frames = []
+    #         for _ in range(frames_to_read):
+    #             ret, frame = cap.read()
+    #             if not ret:
+    #                 break
+                    
+    #             # Convert to RGB
+    #             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #             # Move to GPU
+    #             frame_tensor = torch.from_numpy(frame).to(self.device)
+    #             frames.append(frame_tensor)
+
+    #         cap.release()
+              #         if not frames:
+    #             logging.error(f"No frames read from {video_path}")
+            
     def load_video_frames_to_gpu(self, video_path, start_time=0, duration=None):
         """Load ALL frames from video file with enhanced caching and performance optimization"""
         # Generate cache key
@@ -75,10 +107,7 @@ class GPUPipelineProcessor:
         # Check cache first
         if cache_key in self.frame_cache:
             logging.info(f"Frame cache hit for {os.path.basename(video_path)}")
-            self.performance_stats['cache_hits'] += 1
             return self.frame_cache[cache_key]
-        
-        self.performance_stats['cache_misses'] += 1
         
         # Clear cache if needed to prevent memory issues
         self.clear_cache_if_needed()
@@ -160,7 +189,6 @@ class GPUPipelineProcessor:
                     if self.enable_tensor_reuse:
                         self.frame_cache[cache_key] = frames_tensor
                     
-                    self.performance_stats['frames_processed'] += frame_idx
                     logging.info(f"Loaded {frame_idx} frames from {os.path.basename(video_path)}")
                     return frames_tensor
                 else:
@@ -175,9 +203,81 @@ class GPUPipelineProcessor:
         except Exception as e:
             logging.error(f"Error loading video: {str(e)}")
             return None
-
-    def process_chunk_pure_gpu(self, grid_config, output_path, fps=30.0, duration=4.0, audio_path=None):
-        """Process chunk completely on GPU without CPU transfers - WITH CRITICAL PERFORMANCE FIXES"""
+    #             else:
+    #                 frames_to_read = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                
+    #             frames = []
+                
+    #             # Use async processing if available
+    #             stream = self.get_next_cuda_stream() if self.async_processing else None
+                
+    #             # Pre-allocate tensor if we know the frame count
+    #             if frames_to_read > 0:
+    #                 # Read first frame to get dimensions
+    #                 ret, first_frame = cap.read()
+    #                 if ret:
+    #                     first_frame = cv2.cvtColor(first_frame, cv2.COLOR_BGR2RGB)
+    #                     h, w, c = first_frame.shape
+                    
+    #                     # Pre-allocate tensor on GPU for better performance
+    #                     if stream:
+    #                         with torch.cuda.stream(stream):
+    #                             frames_tensor = torch.zeros((frames_to_read, h, w, c), 
+    #                                                        dtype=torch.uint8, 
+    #                                                        device=self.device)
+    #                     else:
+    #                         frames_tensor = torch.zeros((frames_to_read, h, w, c), 
+    #                                                    dtype=torch.uint8, 
+    #                                                    device=self.device)
+                    
+    #                     # Add first frame
+    #                     first_frame_tensor = torch.from_numpy(first_frame)
+    #                     first_frame_tensor = self.optimize_tensor_for_gpu(first_frame_tensor)
+    #                     frames_tensor[0] = first_frame_tensor
+                    
+    #                     # Read remaining frames efficiently
+    #                     frame_idx = 1
+    #                     while frame_idx < frames_to_read:
+    #                         ret, frame = cap.read()
+    #                         if not ret:
+    #                             break
+                            
+    #                         # Convert to RGB and optimize for GPU
+    #                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    #                         frame_tensor = torch.from_numpy(frame)
+    #                         frame_tensor = self.optimize_tensor_for_gpu(frame_tensor)
+    #                         frames_tensor[frame_idx] = frame_tensor
+    #                         frame_idx += 1
+                    
+    #                     # Trim tensor if we read fewer frames than expected
+    #                     if frame_idx < frames_to_read:
+    #                         frames_tensor = frames_tensor[:frame_idx]
+                    
+    #                     cap.release()
+                    
+    #                     # Convert to float for processing
+    #                     frames_tensor = frames_tensor.float()
+                    
+    #                     # Cache the result
+    #                     if self.enable_tensor_reuse:
+    #                         self.frame_cache[cache_key] = frames_tensor
+                    
+    #                     logging.info(f"Loaded {frame_idx} frames from {os.path.basename(video_path)}")
+    #                     return frames_tensor
+    #                 else:
+    #                     cap.release()
+    #                     logging.error(f"Could not read first frame from {video_path}")
+    #                     return None
+    #             else:
+    #                 cap.release()
+    #                 logging.error(f"No frames to read from {video_path}")
+    #                 return None
+                
+    #         except Exception as e:
+    #             logging.error(f"Error loading video: {str(e)}")
+    #             return None
+      def process_chunk_pure_gpu(self, grid_config, output_path, fps=30.0, duration=4.0, audio_path=None):
+        """Process chunk completely on GPU without CPU transfers"""
         
         # CRITICAL FIX: Memory pressure monitoring before processing
         if not self.check_and_manage_gpu_memory():
@@ -274,8 +374,8 @@ class GPUPipelineProcessor:
 
                     
                     if frames is not None:
-                        frame_count_loaded = frames.shape[0]
-                        logging.info(f"SUCCESS: Loaded {frame_count_loaded} frames from {os.path.basename(video_path)} at position [{row},{col}]")
+                        frame_count = frames.shape[0]
+                        logging.info(f"SUCCESS: Loaded {frame_count} frames from {os.path.basename(video_path)} at position [{row},{col}]")
                     else:
                         logging.error(f"FAILED: Could not load frames from {os.path.basename(video_path)} at position [{row},{col}]")
                         # Try to diagnose why loading failed
@@ -284,12 +384,12 @@ class GPUPipelineProcessor:
                             if not cap.isOpened():
                                 logging.error(f"  - Video cannot be opened: {video_path}")
                             else:
-                                fps_check = cap.get(cv2.CAP_PROP_FPS)
+                                fps = cap.get(cv2.CAP_PROP_FPS)
                                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                                 logging.error(f"  - Video opened but no frames read: {video_path}")
-                                logging.error(f"  - Stats: FPS={fps_check}, frames={total_frames}, dimensions={width}x{height}")
+                                logging.error(f"  - Stats: FPS={fps}, frames={total_frames}, dimensions={width}x{height}")
                                 ret, frame = cap.read()
                                 if not ret:
                                     logging.error("  - First frame read failed")
@@ -299,8 +399,7 @@ class GPUPipelineProcessor:
                         except Exception as e:
                             logging.error(f"  - Diagnosis failed: {str(e)}")
                     
-                    if frames is not None:
-                        # CRITICAL FIX: Improved frame positioning with proper bounds validation
+                    if frames is not None:                        # CRITICAL FIX: Improved frame positioning with proper bounds validation
                         offset_frames = int(offset * fps)
                         available_output_frames = frame_count - offset_frames
                         
@@ -365,8 +464,25 @@ class GPUPipelineProcessor:
                                 continue
                         
                         logging.info(f"Successfully copied {copyable_frames} frames to grid position [{row},{col}] with offset {offset_frames}")
-
-        # Set chunk duration for audio processing
+                        # for i in range(min(frames.shape[0], int(duration * fps))):
+                        #     # Determine the position in the output timeline
+                        #     output_frame_idx = offset_frames + i
+                            
+                        #     # Skip if frame index is out of bounds (either negative or past the end)
+                        #     if output_frame_idx < 0 or output_frame_idx >= output_frames.shape[0]:
+                        #         logging.warning(f"Skipping out-of-bounds frame: output_frame_idx={output_frame_idx} (valid range: 0-{output_frames.shape[0]-1})")
+                        #         continue
+                                
+                        #     # Check for valid source frame index as well
+                        #     if i < 0 or i >= frames.shape[0]:
+                        #         logging.warning(f"Skipping invalid source frame index: i={i}, frames.shape[0]={frames.shape[0]}")
+                        #         continue
+                                
+                        #     # Place frame in the grid with safe bounds
+                        #     try:
+                        #         output_frames[output_frame_idx, row*cell_h:(row+1)*cell_h, col*cell_w:(col+1)*cell_w] = frames[i]
+                        #     except Exception as e:
+                        #         logging.error(f"Frame copy error: {e}, indices: output_frame={output_frame_idx}, i={i}, sizes: output={output_frames.shape}, input={frames.shape}")        # Set chunk duration for audio processing
         self.CHUNK_DURATION = duration
         
         # Mix audio and export video
@@ -401,7 +517,7 @@ class GPUPipelineProcessor:
                 except Exception as e:
                     logging.warning(f"Failed to remove temp file {track_path}: {e}")
                             
-        return output_path
+                return output_path
             
     def _add_audio_to_video(self, video_path, audio_path):
         """Add audio to a video file"""
@@ -441,6 +557,56 @@ class GPUPipelineProcessor:
             return output_path
         return None
 
+    # def batch_process_audio(self, audio_files, output_path):
+    #     """Process multiple audio operations in a single FFmpeg call"""
+    #     if not audio_files:
+    #         return None
+            
+    #     cmd = ['ffmpeg', '-y']
+    #     filter_parts = []
+        
+    #     # Add all inputs first
+    #     for i, audio_file in enumerate(audio_files):
+    #         # Fix: Check for either 'path' or 'video_path' key
+    #         path = audio_file.get('path')
+    #         if path is None:
+    #             path = audio_file.get('video_path')  # Try alternate key name
+                
+    #         if not path:
+    #             logging.warning(f"Skipping audio file with no path: {audio_file}")
+    #             continue
+                
+    #         cmd.extend(['-i', path])
+            
+    #         # Calculate offset in milliseconds
+    #         delay_ms = int(audio_file.get('offset', 0) * 1000)
+            
+    #         # Create input label and apply delay if needed
+    #         if delay_ms > 0:
+    #             filter_parts.append(f'[{i}]adelay={delay_ms}|{delay_ms}[a{i}]')
+    #         else:
+    #             filter_parts.append(f'[{i}]acopy[a{i}]')
+        
+    #     # Create mix part with proper crossfading
+    #     inputs = ''.join(f'[a{i}]' for i in range(len(audio_files)))
+    #     filter_parts.append(
+    #         f'{inputs}amix=inputs={len(audio_files)}:duration=longest:normalize=0,'
+    #         f'afade=t=in:st=0:d=0.5,'
+    #         f'afade=t=out:st=3.5:d=0.5'
+    #         '[aout]'
+    #     )
+        
+    #     # Complete the command
+    #     cmd.extend([
+    #         '-filter_complex', ';'.join(filter_parts),
+    #         '-map', '[aout]',
+    #         '-c:a', 'aac', '-b:a', '192k',
+    #         output_path
+    #     ])
+          #     # Execute in a single call
+    #     subprocess.run(cmd, check=True)
+    #     return output_path
+    
     def batch_process_audio(self, audio_files, output_path):
         """Process multiple audio operations by first extracting audio from video files"""
         if not audio_files:
@@ -467,16 +633,17 @@ class GPUPipelineProcessor:
             # Extract audio to temporary file
             audio_output = temp_dir / f"extracted_{i}.wav"
             extract_cmd = [
-                'ffmpeg', '-y',                '-i', video_path,
+                'ffmpeg', '-y',
+                '-i', video_path,
                 '-vn',  # No video
                 '-c:a', 'pcm_s16le',  # PCM audio for best quality
                 '-ar', '44100',  # 44.1 kHz
                 '-ac', '2',  # Stereo
                 str(audio_output)
             ]
+            
             try:
-                result = subprocess.run(extract_cmd, check=True, capture_output=True, text=True,
-                                      encoding='utf-8', errors='replace')
+                result = subprocess.run(extract_cmd, check=True, capture_output=True, text=True)
                 if os.path.exists(audio_output) and os.path.getsize(audio_output) > 0:
                     extracted_audio_files.append({
                         'path': str(audio_output),
@@ -532,15 +699,15 @@ class GPUPipelineProcessor:
 
         # Complete the command
         cmd.extend([
-            '-filter_complex', ';'.join(filter_parts),            '-map', map_output,
+            '-filter_complex', ';'.join(filter_parts),
+            '-map', map_output,
             '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
             output_path
         ])
-        
+
         try:
             logging.info(f"Mixing audio with command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                                  encoding='utf-8', errors='replace')
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 logging.info(f"Successfully created mixed audio: {output_path} ({os.path.getsize(output_path)} bytes)")
@@ -655,6 +822,108 @@ class GPUPipelineProcessor:
         except Exception as e:
             logging.error(f"Audio extraction error: {e}")
             return None
+    
+    # def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0, autotuned_audio_path=None):
+    #     """Extract audio with proper timing offset and duration"""
+    #     try:
+    #         # Use autotuned audio if available
+    #         if autotuned_audio_path and os.path.exists(autotuned_audio_path):
+    #             audio_path = autotuned_audio_path
+    #         else:
+    #             # Extract base audio with volume adjustment
+    #             audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
+    #             extract_cmd = [
+    #                 'ffmpeg', '-y', '-i', video_path,
+    #                 '-vn', '-af', f'volume={volume}',  # Add volume filter
+    #                 '-acodec', 'pcm_s16le'
+    #             ]
+
+    #             if duration and duration < 0.1:  # 100ms minimum
+    #                 logging.warning(f"Increasing too short audio duration from {duration} to 0.1")
+    #                 duration = 0.1
+                
+    #             # Add duration parameter if specified
+    #             if duration:
+    #                 extract_cmd.extend(['-t', str(duration)])
+                    
+    #             extract_cmd.append(audio_path)
+            
+    #         try:
+    #             subprocess.run(extract_cmd, check=True, 
+    #                         stdout=subprocess.PIPE, 
+    #                         stderr=subprocess.PIPE)
+                            
+    #             if not os.path.exists(audio_path):
+    #                 return False
+                    
+    #             # Add timing information
+    #             audio_tracks.append({
+    #                 'path': audio_path,
+    #                 'offset': offset
+    #             })
+    #             return True
+    #         except subprocess.CalledProcessError as e:
+    #             logging.error(f"Audio extraction failed: {e.stderr.decode()}")
+    #             return False
+                
+    #     except Exception as e:
+    #         logging.error(f"Audio extraction error: {e}")
+    #         return None
+
+    # def _extract_audio(self, video_path, temp_dir, audio_tracks, identifier, offset=0, duration=None, volume=1.0, autotuned_audio_path=None):
+    #     """Extract audio with proper timing offset and duration"""
+    #     try:
+    #         # Use autotuned audio if available
+    #         if autotuned_audio_path and os.path.exists(autotuned_audio_path):
+    #             audio_path = autotuned_audio_path
+    #         else:
+    #             # Extract base audio with volume adjustment
+    #             audio_path = os.path.join(temp_dir, f"audio_{identifier}.wav")
+    #             extract_cmd = [
+    #                 'ffmpeg', '-y', '-i', video_path,
+    #                 '-vn', '-af', f'volume={volume}',  # Add volume filter
+    #                 '-acodec', 'pcm_s16le'
+    #             ]
+
+    #             if duration and duration < 0.1:  # 100ms minimum
+    #                 logging.warning(f"Increasing too short audio duration from {duration} to 0.1")
+    #                 duration = 0.1
+                
+    #             # Add duration parameter if specified
+    #             if duration:
+    #                 extract_cmd.extend(['-t', str(duration)])
+                    
+    #             extract_cmd.append(audio_path)
+            
+    #         # subprocess.run(extract_cmd, check=False, 
+    #         #             stdout=subprocess.PIPE, 
+    #         #             stderr=subprocess.PIPE)
+                        
+    #         # if not os.path.exists(audio_path):
+    #         #     return False
+                
+    #         # # Add timing information
+    #         # audio_tracks.append({
+    #         #     'path': audio_path,
+    #         #     'offset': offset
+    #         # })
+    #         # return True
+
+    #         subprocess.run(extract_cmd, check=True)
+        
+    #         # Add to audio tracks list with proper offset
+    #         audio_tracks.append({
+    #             'path': audio_path,
+    #             'offset': offset,
+    #             'volume': volume  # Store volume for debugging
+    #         })
+
+    #         return audio_path
+            
+                
+    #     except Exception as e:
+    #         logging.error(f"Audio extraction error: {e}")
+    #         return None
 
     def get_video_path(self, video_type, *args):
         """Generic video path finder"""
@@ -664,6 +933,9 @@ class GPUPipelineProcessor:
             return self.registry.get_instrument_path(args[0], args[1])
         return None
         
+    # def _write_frames_to_disk(self, frames, output_path, fps, audio_path=None):
+    #     """Write frames to disk with reliable video+audio sync"""
+    #     temp_video = str(Path(output_path).with_suffix('.temp.mp4'))
     def _write_frames_to_disk(self, frames, output_path, fps, audio_path=None):
         """Write frames to disk with optimized GPU→CPU transfers and reduced memory pressure"""
         temp_video = str(Path(output_path).with_suffix('.temp.mp4'))
@@ -699,8 +971,7 @@ class GPUPipelineProcessor:
                     '-threads', '8',  # Use more threads
                     temp_video
                 ]
-                
-                # Increased batch size for better throughput but use memory-aware sizing
+                  # Increased batch size for better throughput but use memory-aware sizing
                 batch_size = self.get_optimal_batch_size(60)  # Default 60, but adjust based on available memory
                 
                 # Create a dedicated CUDA stream for the transfer
@@ -742,6 +1013,7 @@ class GPUPipelineProcessor:
                     logging.info(f"Video encoding completed in {time.time() - start_time:.2f}s, wrote {bytes_written/(1024*1024):.1f}MB")
             else:
                 # Fallback non-CUDA path
+                # [Existing non-CUDA implementation]
                 try:
                     # First pass: write video with raw encoding
                     video_cmd = [
@@ -840,7 +1112,22 @@ class GPUPipelineProcessor:
             # Log total processing time
             logging.info(f"Total frame writing process took {time.time() - start_time:.2f}s")
 
-    # CRITICAL PERFORMANCE FIX METHODS
+
+    def _create_clip_with_extended_duration(clip_data):
+        # Get durations, falling back to legacy 'duration' field if needed
+        video_duration = clip_data.get('video_duration', clip_data.get('duration'))
+        audio_duration = clip_data.get('audio_duration', clip_data.get('duration'))
+        
+        # Create video with extended duration
+        video_clip = VideoFileClip(clip_data['path']).subclip(0, video_duration)
+        
+        # Extract and trim audio to match intended audio duration
+        audio_clip = video_clip.audio.subclip(0, audio_duration)
+        
+        # Replace audio with trimmed version
+        video_clip = video_clip.set_audio(audio_clip)
+        
+        return video_clip
 
     def get_next_cuda_stream(self):
         """Get next available CUDA stream for parallel processing"""
@@ -859,7 +1146,6 @@ class GPUPipelineProcessor:
             for key in keys_to_remove:
                 del self.frame_cache[key]
             logging.info(f"Cleared {items_to_remove} entries from frame cache")
-            self.performance_stats['memory_cleanups'] += 1
         
         if len(self.tensor_cache) > self.max_cache_size:
             items_to_remove = len(self.tensor_cache) - self.max_cache_size + 10
@@ -882,6 +1168,236 @@ class GPUPipelineProcessor:
             tensor = tensor.pin_memory()
             
         return tensor.to(self.device, non_blocking=True)
+    
+    def batch_load_video_frames(self, video_configs, duration=4.0):
+        """Load multiple video frames in parallel for better GPU utilization"""
+        if not self.batch_processing:
+            # Fallback to sequential processing
+            results = {}
+            for config in video_configs:
+                frames = self.load_video_frames_to_gpu(config['path'], 0, duration)
+                if frames is not None:
+                    results[config['key']] = frames
+            return results
+        
+        results = {}
+        futures = []
+        
+        # Process videos in parallel using CUDA streams
+        from concurrent.futures import ThreadPoolExecutor
+        
+        def load_single_video(config):
+            stream = self.get_next_cuda_stream()
+            if stream:
+                with torch.cuda.stream(stream):
+                    frames = self.load_video_frames_to_gpu(config['path'], 0, duration)
+                    return config['key'], frames
+            else:
+                frames = self.load_video_frames_to_gpu(config['path'], 0, duration)
+                return config['key'], frames
+        
+        with ThreadPoolExecutor(max_workers=min(4, len(video_configs))) as executor:
+            futures = [executor.submit(load_single_video, config) for config in video_configs]
+            for future in futures:
+                try:
+                    key, frames = future.result()
+                    if frames is not None:
+                        results[key] = frames
+                except Exception as e:
+                    logging.error(f"Error in batch video loading: {e}")
+        
+        return results
+
+    def batch_process_chunks_gpu(self, chunk_configs, output_dir, fps=30.0, duration=4.0):
+        """Process multiple chunks in parallel using GPU acceleration and batch operations"""
+        if not chunk_configs:
+            return []
+        
+        logging.info(f"Starting batch processing of {len(chunk_configs)} chunks with GPU acceleration")
+        
+        # Pre-load all video data to GPU memory
+        video_cache = {}
+        for config in chunk_configs:
+            for row in config.get('grid_config', []):
+                for cell_data in row:
+                    if cell_data and cell_data.get('path'):
+                        video_path = cell_data['path']
+                        if video_path not in video_cache:
+                            frames = self.load_video_frames_to_gpu(video_path, duration=duration)
+                            if frames is not None:
+                                video_cache[video_path] = frames
+        
+        # Process chunks in batches to maximize GPU utilization
+        batch_size = min(4, len(chunk_configs))  # Process up to 4 chunks simultaneously
+        results = []
+        
+        for i in range(0, len(chunk_configs), batch_size):
+            batch_configs = chunk_configs[i:i + batch_size]
+            batch_results = []
+            
+            # Use CUDA streams for parallel processing
+            streams = [self.get_next_cuda_stream() for _ in batch_configs]
+            
+            for j, (config, stream) in enumerate(zip(batch_configs, streams)):
+                chunk_id = config.get('chunk_id', f'chunk_{i+j}')
+                output_path = os.path.join(output_dir, f"{chunk_id}.mp4")
+                
+                with torch.cuda.stream(stream):
+                    result = self.process_chunk_with_cached_data(
+                        config, output_path, fps, duration, video_cache
+                    )
+                    batch_results.append(result)
+            
+            # Synchronize all streams
+            for stream in streams:
+                stream.synchronize()
+            
+            results.extend(batch_results)
+            
+            # Clear some cache between batches to manage memory
+            if i + batch_size < len(chunk_configs):
+                self.clear_cache_if_needed()
+        
+        logging.info(f"Completed batch processing of {len(chunk_configs)} chunks")
+        return results
+    
+    def process_chunk_with_cached_data(self, config, output_path, fps, duration, video_cache):
+        """Process a single chunk using pre-cached video data"""
+        try:
+            grid_config = config.get('grid_config', [])
+            audio_path = config.get('audio_path')
+            
+            # Determine output dimensions
+            rows, cols = len(grid_config), len(grid_config[0]) if grid_config else 0
+            if rows == 0 or cols == 0:
+                logging.error(f"Invalid grid configuration for chunk")
+                return None
+            
+            h, w = 1080, 1920
+            cell_h, cell_w = h // rows, w // cols
+            frame_count = int(duration * fps)
+            
+            # Pre-allocate output tensor on GPU
+            output_frames = torch.zeros((frame_count, h, w, 3), 
+                                        dtype=torch.uint8, 
+                                        device=self.device)
+            
+            # Composite all video cells using cached data
+            for row_idx, row in enumerate(grid_config):
+                for col_idx, cell_data in enumerate(row):
+                    if cell_data and cell_data.get('path'):
+                        video_path = cell_data['path']
+                        
+                        if video_path in video_cache:
+                            cell_frames = video_cache[video_path]
+                            
+                            # Calculate cell position
+                            y_start = row_idx * cell_h
+                            y_end = y_start + cell_h
+                            x_start = col_idx * cell_w
+                            x_end = x_start + cell_w
+                            
+                            # Resize frames to cell size if needed
+                            if cell_frames.shape[1:3] != (cell_h, cell_w):
+                                # Use GPU-accelerated resize
+                                cell_frames_resized = torch.nn.functional.interpolate(
+                                    cell_frames.permute(0, 3, 1, 2).float(),
+                                    size=(cell_h, cell_w),
+                                    mode='bilinear',
+                                    align_corners=False
+                                )
+                                cell_frames_resized = cell_frames_resized.permute(0, 2, 3, 1).byte()
+                            else:
+                                cell_frames_resized = cell_frames
+                            
+
+                            # Copy frames to output grid
+                            frames_to_copy = min(frame_count, cell_frames_resized.shape[0])
+                            output_frames[:frames_to_copy, y_start:y_end, x_start:x_end] = cell_frames_resized[:frames_to_copy]
+            
+            # Convert tensor back to CPU for video writing
+            output_frames_cpu = output_frames.cpu().numpy()
+            
+            # Write video using optimized parameters
+            self.write_video_optimized(output_frames_cpu, output_path, fps, audio_path)
+            
+            return output_path
+            
+        except Exception as e:
+            logging.error(f"Error processing chunk with cached data: {str(e)}")
+            return None
+    
+    def write_video_optimized(self, frames, output_path, fps, audio_path=None):
+        """Write video with optimized FFmpeg parameters for GPU acceleration"""
+        try:
+            h, w = frames.shape[1:3]
+            
+            # Use hardware-accelerated encoding if available
+            codec_options = []
+            if torch.cuda.is_available():
+                # Try NVENC (NVIDIA hardware encoding)
+                codec_options = [
+                    '-c:v', 'h264_nvenc',
+                    '-preset', 'fast',
+                    '-b:v', '8M',
+                    '-maxrate', '12M',
+                    '-bufsize', '16M'
+                ]
+            else:
+                # Fallback to CPU encoding with optimization
+                codec_options = [
+                    '-c:v', 'libx264',
+                    '-preset', 'medium',
+                    '-crf', '18',
+                    '-pix_fmt', 'yuv420p'
+                ]
+            
+            # Base FFmpeg command
+            cmd = [
+                'ffmpeg', '-y',
+                '-f', 'rawvideo',
+                '-vcodec', 'rawvideo',
+                '-pix_fmt', 'rgb24',
+                '-s', f'{w}x{h}',
+                '-r', str(fps),
+                '-i', '-'
+            ] + codec_options
+            
+            # Add audio if provided
+            if audio_path and os.path.exists(audio_path):
+                cmd.extend([
+                    '-i', audio_path,
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    '-shortest'
+                ])
+            
+            cmd.append(output_path)
+            
+            # Execute FFmpeg with optimized buffer handling
+            process = subprocess.Popen(cmd, stdin=subprocess.PIPE, 
+                                     stderr=subprocess.PIPE, 
+                                     stdout=subprocess.PIPE)
+              # Write frames in chunks to prevent memory issues
+            chunk_size = 30  # Write 30 frames at a time
+            for i in range(0, len(frames), chunk_size):
+                chunk = frames[i:i + chunk_size]
+                frame_data = chunk.tobytes()
+                process.stdin.write(frame_data)
+            
+            process.stdin.close()
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                logging.error(f"FFmpeg error: {stderr.decode()}")
+                return False
+            
+            logging.info(f"Successfully wrote optimized video: {output_path}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error writing optimized video: {str(e)}")
+            return False
     
     def initialize_memory_pools(self):
         """Initialize tensor pools for efficient memory management"""
@@ -924,6 +1440,80 @@ class GPUPipelineProcessor:
             # Create new tensor if not in pool
             return torch.zeros(shape, dtype=torch.uint8, device=self.device)
     
+    def analyze_content_complexity(self, frames_tensor):
+        """Analyze video content complexity for adaptive encoding"""
+        try:
+            # Sample a few frames for analysis
+            sample_indices = torch.linspace(0, frames_tensor.shape[0] - 1, 
+                                          min(10, frames_tensor.shape[0]), 
+                                          dtype=torch.long)
+            sample_frames = frames_tensor[sample_indices]
+            
+            # Calculate edge density using Sobel operator
+            gray_frames = torch.mean(sample_frames.float(), dim=-1)
+            
+            # Simple edge detection (approximation of Sobel)
+            dx = torch.diff(gray_frames, dim=-1)
+            dy = torch.diff(gray_frames, dim=-2)
+            
+            edge_density = torch.mean(torch.abs(dx)) + torch.mean(torch.abs(dy))
+            
+            # Calculate motion between frames
+            motion_score = 0.0
+            if len(sample_frames) > 1:
+                frame_diffs = torch.diff(gray_frames, dim=0)
+                motion_score = torch.mean(torch.abs(frame_diffs))
+            
+            # Determine complexity category
+            total_complexity = edge_density + motion_score * 0.5
+            
+            if total_complexity > 30:
+                return "high"
+            elif total_complexity > 15:
+                return "medium"
+            else:
+                return "low"
+                
+        except Exception as e:
+            logging.warning(f"Content complexity analysis failed: {str(e)}")
+            return "medium"  # Default to medium complexity
+    
+    def get_adaptive_encoding_params(self, complexity, duration):
+        """Get encoding parameters based on content complexity and duration"""
+        base_params = {
+            "low": {
+                "crf": "23",
+                "preset": "fast",
+                "bitrate": "4M",
+                "maxrate": "6M",
+                "bufsize": "8M"
+            },
+            "medium": {
+                "crf": "20",
+                "preset": "medium", 
+                "bitrate": "6M",
+                "maxrate": "9M",
+                "bufsize": "12M"
+            },
+            "high": {
+                "crf": "18",
+                "preset": "slow",
+                "bitrate": "8M",
+                "maxrate": "12M",
+                "bufsize": "16M"
+            }
+        }
+        
+        params = base_params.get(complexity, base_params["medium"])
+        
+        # Adjust for duration (longer videos may need different settings)
+        if duration > 10:  # For videos longer than 10 seconds
+            # Reduce bitrate slightly for longer videos
+            bitrate_val = int(params["bitrate"][:-1])
+            params["bitrate"] = f"{max(2, bitrate_val - 1)}M"
+        
+        return params
+    
     def optimize_gpu_utilization(self):
         """Optimize GPU settings for maximum utilization"""
         if torch.cuda.is_available():
@@ -946,8 +1536,7 @@ class GPUPipelineProcessor:
                 
             except Exception as e:
                 logging.warning(f"Could not optimize GPU utilization: {str(e)}")
-                
-        # Optimize OpenCV threading
+          # Optimize OpenCV threading
         cv2.setNumThreads(min(4, os.cpu_count()))
     
     def cleanup_resources(self):
@@ -976,7 +1565,7 @@ class GPUPipelineProcessor:
             logging.warning(f"Error during resource cleanup: {str(e)}")
     
     def check_and_manage_gpu_memory(self):
-        """Monitor GPU memory and perform cleanup if needed - CRITICAL FIX"""
+        """Monitor GPU memory and perform cleanup if needed"""
         if not torch.cuda.is_available():
             return True
         
@@ -995,7 +1584,7 @@ class GPUPipelineProcessor:
                         f"{free_memory/(1024*1024):.1f}MB free ({memory_usage_percent:.1f}% used)")
             
             # If memory usage is high, perform cleanup
-            if memory_usage_percent > self.memory_pressure_threshold * 100:
+            if memory_usage_percent > 80:
                 logging.warning(f"High GPU memory usage ({memory_usage_percent:.1f}%), performing cleanup")
                 self.force_memory_cleanup()
                 
@@ -1013,7 +1602,7 @@ class GPUPipelineProcessor:
             return True
     
     def force_memory_cleanup(self):
-        """Aggressive memory cleanup when under pressure - CRITICAL FIX"""
+        """Aggressive memory cleanup when under pressure"""
         try:
             # Clear all caches
             self.frame_cache.clear()
@@ -1033,14 +1622,13 @@ class GPUPipelineProcessor:
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
             
-            self.performance_stats['memory_cleanups'] += 1
             logging.info("Performed aggressive memory cleanup")
             
         except Exception as e:
             logging.error(f"Error during memory cleanup: {e}")
 
     def get_optimal_batch_size(self, base_size=30):
-        """Calculate optimal batch size based on available GPU memory - CRITICAL FIX"""
+        """Calculate optimal batch size based on available GPU memory"""
         if not torch.cuda.is_available():
             return base_size
         
@@ -1175,22 +1763,3 @@ class GPUPipelineProcessor:
         except Exception as e:
             logging.warning(f"Pipeline optimization failed: {e}")
             return optimization_report
-
-    def get_performance_stats(self):
-        """Get current performance statistics"""
-        return self.performance_stats.copy()
-
-    def log_performance_summary(self):
-        """Log a summary of performance statistics"""
-        stats = self.performance_stats
-        logging.info(f"Performance Summary:")
-        logging.info(f"  Frames processed: {stats['frames_processed']:,}")
-        logging.info(f"  Memory cleanups: {stats['memory_cleanups']}")
-        logging.info(f"  Cache hits: {stats['cache_hits']}")
-        logging.info(f"  Cache misses: {stats['cache_misses']}")
-        
-        if stats['cache_hits'] + stats['cache_misses'] > 0:
-            hit_rate = stats['cache_hits'] / (stats['cache_hits'] + stats['cache_misses']) * 100
-            logging.info(f"  Cache hit rate: {hit_rate:.1f}%")
-
-# End of GPUPipelineProcessor class with critical performance fixes

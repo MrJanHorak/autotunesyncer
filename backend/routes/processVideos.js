@@ -335,16 +335,34 @@ router.post(
 
       console.log('Final video mapping:', videos);
 
+      // Validate grid arrangement before proceeding
+      if (
+        !midiData.gridArrangement ||
+        Object.keys(midiData.gridArrangement).length === 0
+      ) {
+        console.error(
+          'Grid arrangement is missing or empty:',
+          midiData.gridArrangement
+        );
+        throw new Error(
+          'Grid arrangement is required for video composition. Please ensure the grid is properly configured.'
+        );
+      }
+
+      console.log(
+        'Grid arrangement validation passed:',
+        Object.keys(midiData.gridArrangement).length,
+        'positions'
+      );
+
       // Create temp config file
       const config = {
-        tracks: {
-          tracks: midiData.tracks,
-          header: midiData.header,
-          gridArrangement: midiData.gridArrangement, // Add this line
-        },
+        tracks: midiData.tracks,
+        header: midiData.header,
+        gridArrangement: midiData.gridArrangement, // Move to top level
         videos: videos,
       };
-      console.log('Grid arrangement in config:', config.tracks.gridArrangement);
+      console.log('Grid arrangement in config:', config.gridArrangement);
       const configPath = path.join(
         os.tmpdir(),
         `video-config-${uuidv4()}.json`

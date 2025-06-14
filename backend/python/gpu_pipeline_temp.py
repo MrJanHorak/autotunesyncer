@@ -467,16 +467,17 @@ class GPUPipelineProcessor:
             # Extract audio to temporary file
             audio_output = temp_dir / f"extracted_{i}.wav"
             extract_cmd = [
-                'ffmpeg', '-y',                '-i', video_path,
+                'ffmpeg', '-y',
+                '-i', video_path,
                 '-vn',  # No video
                 '-c:a', 'pcm_s16le',  # PCM audio for best quality
                 '-ar', '44100',  # 44.1 kHz
                 '-ac', '2',  # Stereo
                 str(audio_output)
             ]
+            
             try:
-                result = subprocess.run(extract_cmd, check=True, capture_output=True, text=True,
-                                      encoding='utf-8', errors='replace')
+                result = subprocess.run(extract_cmd, check=True, capture_output=True, text=True)
                 if os.path.exists(audio_output) and os.path.getsize(audio_output) > 0:
                     extracted_audio_files.append({
                         'path': str(audio_output),
@@ -532,15 +533,15 @@ class GPUPipelineProcessor:
 
         # Complete the command
         cmd.extend([
-            '-filter_complex', ';'.join(filter_parts),            '-map', map_output,
+            '-filter_complex', ';'.join(filter_parts),
+            '-map', map_output,
             '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
             output_path
         ])
-        
+
         try:
             logging.info(f"Mixing audio with command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                                  encoding='utf-8', errors='replace')
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 logging.info(f"Successfully created mixed audio: {output_path} ({os.path.getsize(output_path)} bytes)")

@@ -249,14 +249,13 @@ async function processVideoWithPython(
         trackCount: Object.keys(midiData.tracks || {}).length,
         hasGridArrangement: !!midiData.gridArrangement,
         duration: midiData.duration,
-      });
-
-      // Enhanced data structure for Python processing
+      }); // Enhanced data structure for Python processing
       const enhancedMidiData = {
         ...midiData,
         gridArrangement:
           midiData.gridArrangement ||
           calculateOptimalGridLayout(Object.keys(videoFilesForPython)),
+        uploadsDir: UPLOADS_DIR, // Add uploads directory path for VideoComposer
         processingMetadata: {
           totalTracks: Object.keys(videoFilesForPython).length,
           timestamp: Date.now(),
