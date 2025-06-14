@@ -291,8 +291,7 @@ def get_pitch_crepe(audio, sr, hop_length=512):
                     step_size=hop_length/sr*1000,
                     viterbi=True,
                     model_capacity='full',
-                    verbose=1
-                )
+                    verbose=0                )
                 print("CREPE GPU processing completed")
                 return result
         except Exception as e:
@@ -301,7 +300,19 @@ def get_pitch_crepe(audio, sr, hop_length=512):
     
     print("Using CPU for CREPE")
     # Ensure we're not using GPU when falling back
-    with tf.device('/CPU:0'):
+    if tf is not None:
+        with tf.device('/CPU:0'):
+            import crepe
+            result = crepe.predict(
+                audio,
+                sr,
+                step_size=hop_length/sr*1000,
+                viterbi=True,
+                model_capacity='medium',
+                verbose=0
+            )
+    else:
+        # TensorFlow not available, use basic CREPE
         import crepe
         result = crepe.predict(
             audio,
@@ -430,7 +441,7 @@ def validate_audio(audio, sr):
     
     return audio
 
-def process_audio(audio, sr):
+def process_audio(audio, sr, target_midi_note=60):
     """
     Process audio with GPU acceleration when available
     """
@@ -474,8 +485,9 @@ def process_audio(audio, sr):
     print("Smoothing pitch curve...")
     smooth_frequency = smooth_pitch_curve(frequency, confidence)
     
-    # Target frequency (Middle C)
-    target_freq = 261.63
+    # Convert MIDI note to frequency
+    target_freq = 440.0 * (2.0 ** ((target_midi_note - 69) / 12.0))
+    print(f"Target MIDI note {target_midi_note} = {target_freq:.2f} Hz")
     
     # Process in overlapping frames with larger sizes
     frame_length = 4096
@@ -521,18 +533,43 @@ def process_audio(audio, sr):
     return stereo_output, smooth_frequency, frequency
 
 def main():
+    # Set proper encoding for Windows
+    import sys
+    import io
+    
+    # Force UTF-8 encoding for stdout/stderr
+    if sys.platform.startswith('win'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        # Set environment variable for Python subprocess encoding
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+    
     try:
         # Verify GPU configuration at start
         print(f"GPU available: {gpu_available}")
-        if gpu_available:
-            print(f"GPU devices: {tf.config.list_physical_devices('GPU')}")
+        if gpu_available and tf is not None:        print(f"GPU devices: {tf.config.list_physical_devices('GPU')}")
+        elif gpu_available:
+            print("GPU marked available but TensorFlow not loaded properly")
+        else:
+            print("Using CPU processing")
         
-        if len(sys.argv) != 3:
-            print("Usage: python autotune.py input_path output_path")
+        if len(sys.argv) not in [3, 4]:
+            print("Usage: python autotune.py input_path output_path [target_midi_note]")
             sys.exit(1)
 
         input_path = sys.argv[1]
         output_path = sys.argv[2]
+        
+        # Optional target MIDI note (defaults to Middle C)
+        target_midi_note = 60  # Middle C
+        if len(sys.argv) == 4:
+            try:
+                target_midi_note = int(sys.argv[3])
+                print(f"Target MIDI note: {target_midi_note}")
+            except ValueError:
+                print(f"Warning: Invalid MIDI note '{sys.argv[3]}', using default (60)")
+        else:
+            print(f"Using default target: MIDI note {target_midi_note} (Middle C)")
         
         # Load audio with proper encoding
         input_path = os.path.abspath(input_path)
@@ -561,19 +598,17 @@ def main():
         audio = validate_audio(audio, sr)
         
         print(f"Loaded audio format: {audio.dtype}, shape: {audio.shape}")
-        
-        # Additional shape validation
+          # Additional shape validation  
         if len(audio.shape) != 2:
             raise ValueError(f"Unexpected audio shape: {audio.shape}")
         
         print("\nInput Audio Statistics:")
         print(f"Sample rate: {sr} Hz")
-        print(f"Duration: {audio.shape[1]/sr:.2f} seconds")
-        print(f"Channels: {audio.shape[0]}")
-        print(f"Samples: {audio.shape[1]}")
-        
-        # Process audio
-        processed, smooth_pitch, raw_pitch = process_audio(audio, sr)
+        print(f"Duration: {audio.shape[0]/sr:.2f} seconds")
+        print(f"Samples: {audio.shape[0]}")
+        print(f"Channels: {audio.shape[1]}")
+          # Process audio
+        processed, smooth_pitch, raw_pitch = process_audio(audio, sr, target_midi_note)
         
         # Calculate average pitches with NaN handling
         valid_pitch = raw_pitch[raw_pitch > 0]
@@ -584,7 +619,10 @@ def main():
             print(f"Original average pitch: {np.nanmean(valid_pitch):.2f} Hz")
         if len(valid_smooth) > 0:
             print(f"Smoothed average pitch: {np.nanmean(valid_smooth):.2f} Hz")
-        print(f"Target pitch (Middle C): 261.63 Hz")
+        
+        # Calculate target frequency from MIDI note  
+        target_freq = 440.0 * (2.0 ** ((target_midi_note - 69) / 12.0))
+        print(f"Target pitch: MIDI note {target_midi_note} = {target_freq:.2f} Hz")
         
         # Save with specific format and ensure correct shape
         print(f"\nSaving to: {output_path}")

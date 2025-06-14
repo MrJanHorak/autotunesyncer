@@ -109,20 +109,20 @@ class VideoComposerWrapper:
             processed_dir = self.temp_dir / "a" / "b" / "processed"
             uploads_dir.mkdir(parents=True, exist_ok=True)
             processed_dir.mkdir(parents=True, exist_ok=True)
+              # Ensure grid arrangement is present before initializing VideoComposer
+            if 'gridArrangement' not in midi_data or not midi_data['gridArrangement']:
+                self.logger.error("No grid arrangement found in MIDI data")
+                raise ValueError("Grid arrangement is required for video composition")
+            
+            self.logger.info(f"Grid arrangement validated: {midi_data['gridArrangement']}")
             
             # Initialize VideoComposer with the correct path structure
+            # The VideoComposer will access gridArrangement from midi_data during __init__
             self.composer = VideoComposer(
                 processed_videos_dir=str(processed_dir),
                 midi_data=midi_data,
                 output_path=output_path
             )
-            
-            # Set up grid arrangement if available
-            if 'gridArrangement' in midi_data:
-                self.composer.grid_positions = midi_data['gridArrangement']
-            elif 'tracks' in midi_data and isinstance(midi_data['tracks'], dict):
-                if 'gridArrangement' in midi_data['tracks']:
-                    self.composer.grid_positions = midi_data['tracks']['gridArrangement']
             
             self.logger.info("VideoComposer initialized successfully")
             

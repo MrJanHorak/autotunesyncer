@@ -1,80 +1,52 @@
 import os
 import logging
-import time
-import threading
-import weakref
 from pathlib import Path
-from typing import Dict, Optional, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+from typing import Optional, Dict, Set
+import threading
+from threading import RLock
 import psutil
-from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
-class CacheManager:
-    """Enhanced cache manager with memory optimization"""
+class LRUCache:
+    """Simple LRU cache implementation"""
+    def __init__(self, maxsize=128):
+        self.maxsize = maxsize
+        self.cache = {}
+        self.access_order = []
+        self.lock = RLock()
     
-    def __init__(self, max_size: int = 1000, cleanup_interval: int = 300):
-        self.max_size = max_size
-        self.cleanup_interval = cleanup_interval
-        self._cache = OrderedDict()
-        self._access_times = {}
-        self._lock = threading.RLock()
-        self._last_cleanup = time.time()
-        
-    def get(self, key: str) -> Optional[str]:
-        """Get value from cache with LRU tracking"""
-        with self._lock:
-            if key in self._cache:
+    def get(self, key):
+        with self.lock:
+            if key in self.cache:
                 # Move to end (most recently used)
-                value = self._cache.pop(key)
-                self._cache[key] = value
-                self._access_times[key] = time.time()
-                return value
-        return None
+                self.access_order.remove(key)
+                self.access_order.append(key)
+                return self.cache[key]
+            return None
     
-    def set(self, key: str, value: str):
-        """Set value in cache with automatic cleanup"""
-        with self._lock:
-            self._cache[key] = value
-            self._access_times[key] = time.time()
+    def set(self, key, value):
+        with self.lock:
+            if key in self.cache:
+                # Update existing
+                self.access_order.remove(key)
+            elif len(self.cache) >= self.maxsize:
+                # Remove least recently used
+                lru_key = self.access_order.pop(0)
+                del self.cache[lru_key]
             
-            # Remove oldest items if cache is too large
-            while len(self._cache) > self.max_size:
-                oldest_key = next(iter(self._cache))
-                del self._cache[oldest_key]
-                del self._access_times[oldest_key]
-            
-            # Periodic cleanup
-            if time.time() - self._last_cleanup > self.cleanup_interval:
-                self._cleanup_expired()
-    
-    def _cleanup_expired(self, max_age: int = 3600):
-        """Remove entries older than max_age seconds"""
-        current_time = time.time()
-        expired_keys = [
-            key for key, access_time in self._access_times.items()
-            if current_time - access_time > max_age
-        ]
-        
-        for key in expired_keys:
-            if key in self._cache:
-                del self._cache[key]
-            del self._access_times[key]
-        
-        self._last_cleanup = current_time
-        
-        if expired_keys:
-            logging.info(f"Cleaned up {len(expired_keys)} expired cache entries")
+            self.cache[key] = value
+            self.access_order.append(key)
 
 class PathRegistry:
-    """Central registry for tracking file paths across the application with performance optimizations"""
+    """Central registry for tracking file paths across the application"""
     
     _instance = None
-    _lock = threading.RLock()
+    _lock = RLock()
     
     @classmethod
     def get_instance(cls):
-        """Thread-safe singleton access method"""
+        """Singleton access method"""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -85,24 +57,18 @@ class PathRegistry:
         self.drum_paths = {}          # Format: {"drum_name": "path/to/file.mp4"}
         self.instrument_paths = {}    # Format: {"instrument_name": {"note_X": "path.mp4"}}
         self.track_paths = {}         # Format: {"track_id": "path/to/directory"}
-        self.debug_lookups = {}       # For tracking lookup attempts
         self.registry_file = None     # Path to save/load registry
-        
-        # Performance optimizations
-        self._cache = CacheManager()
+        self._lock = RLock()
+        self._cache = LRUCache(maxsize=256)
         self._path_validation_cache = {}
         self._stats = {
+            'registrations': 0,
             'lookups': 0,
             'cache_hits': 0,
-            'cache_misses': 0,
-            'registrations': 0
+            'cache_misses': 0
         }
-        self._lock = threading.RLock()
-        
-        # Weak references to avoid memory leaks
-        self._weak_refs = weakref.WeakSet()
     
-    def register_drum(self, drum_name: str, file_path: str, validate: bool = True):
+    def register_drum(self, drum_name: str, file_path: str, validate: bool = True) -> bool:
         """Register a drum video path with optional validation"""
         with self._lock:
             norm_name = drum_name.lower().replace(' ', '_')
@@ -118,7 +84,7 @@ class PathRegistry:
             logging.info(f"Registered drum path: {norm_name} -> {file_path}")
             return True
         
-    def register_instrument(self, instrument_name: str, note: str, file_path: str, validate: bool = True):
+    def register_instrument(self, instrument_name: str, note: str, file_path: str, validate: bool = True) -> bool:
         """Register an instrument note video path with optional validation"""
         with self._lock:
             norm_name = instrument_name.lower().replace(' ', '_')
@@ -137,7 +103,7 @@ class PathRegistry:
             logging.info(f"Registered instrument path: {norm_name}:{note} -> {file_path}")
             return True
     
-    def register_track_directory(self, track_id: str, directory_path: str):
+    def register_track_directory(self, track_id: str, directory_path: str) -> bool:
         """Register a track's base directory"""
         with self._lock:
             if not os.path.isdir(directory_path):
@@ -149,10 +115,10 @@ class PathRegistry:
             return True
         
     def get_drum_path(self, drum_key: str) -> Optional[str]:
-        """Get path for drum video with caching"""
+        """Get path for drum video with improved matching and caching"""
         with self._lock:
             self._stats['lookups'] += 1
-            norm_name = drum_key.lower().replace(' ', '_')
+            norm_name = drum_key.lower().replace(' ', '_').replace('drum_', '')
             
             # Check cache first
             cache_key = f"drum:{norm_name}"
@@ -169,17 +135,22 @@ class PathRegistry:
                 self._cache.set(cache_key, path)
                 return path
                 
-            # Check for partial matches
+            # Check for partial matches - more comprehensive matching
             for key in self.drum_paths:
-                if norm_name in key or key in norm_name:
+                # Check if norm_name is contained in key or vice versa
+                if (norm_name in key or key in norm_name or 
+                    self._fuzzy_match(norm_name, key)):
                     path = self.drum_paths[key]
                     self._cache.set(cache_key, path)
+                    logging.info(f"Drum path found via fuzzy match: {norm_name} -> {key} -> {path}")
                     return path
-                    
+            
+            logging.warning(f"No drum path found for: {drum_key} (normalized: {norm_name})")
+            logging.debug(f"Available drum paths: {list(self.drum_paths.keys())}")
             return None
-        
+    
     def get_instrument_path(self, instrument_name: str, note: str) -> Optional[str]:
-        """Get path for instrument video by note with caching"""
+        """Get path for instrument video by note with improved fallback and caching"""
         with self._lock:
             self._stats['lookups'] += 1
             norm_name = instrument_name.lower().replace(' ', '_')
@@ -194,72 +165,73 @@ class PathRegistry:
             
             self._stats['cache_misses'] += 1
             
-            if norm_name not in self.instrument_paths:
-                return None
+            # Try exact instrument name match first
+            if norm_name in self.instrument_paths:
+                # Try exact note match
+                if note_str in self.instrument_paths[norm_name]:
+                    path = self.instrument_paths[norm_name][note_str]
+                    self._cache.set(cache_key, path)
+                    return path
                 
-            if note_str in self.instrument_paths[norm_name]:
-                path = self.instrument_paths[norm_name][note_str]
-                self._cache.set(cache_key, path)
-                return path
-                
-            # Fall back to any note for this instrument
-            if self.instrument_paths[norm_name]:
-                path = next(iter(self.instrument_paths[norm_name].values()))
-                self._cache.set(cache_key, path)
-                return path
-                
+                # Fall back to any note for this exact instrument
+                if self.instrument_paths[norm_name]:
+                    path = next(iter(self.instrument_paths[norm_name].values()))
+                    self._cache.set(cache_key, path)
+                    logging.info(f"Instrument fallback used: {norm_name}:{note_str} -> {path}")
+                    return path
+            
+            # Try fuzzy matching on instrument names
+            for key in self.instrument_paths:
+                if self._fuzzy_match(norm_name, key):
+                    # Try exact note match first
+                    if note_str in self.instrument_paths[key]:
+                        path = self.instrument_paths[key][note_str]
+                        self._cache.set(cache_key, path)
+                        logging.info(f"Instrument found via fuzzy match: {norm_name} -> {key}:{note_str} -> {path}")
+                        return path
+                    
+                    # Fall back to any note for fuzzy-matched instrument
+                    if self.instrument_paths[key]:
+                        path = next(iter(self.instrument_paths[key].values()))
+                        self._cache.set(cache_key, path)
+                        logging.info(f"Instrument fuzzy fallback: {norm_name} -> {key}:{note_str} -> {path}")
+                        return path
+            
+            logging.warning(f"No instrument path found for: {instrument_name}:{note} (normalized: {norm_name}:{note_str})")
+            logging.debug(f"Available instruments: {list(self.instrument_paths.keys())}")
             return None
     
-    def batch_register_paths(self, paths_data: Dict, max_workers: int = None) -> Dict[str, bool]:
-        """Register multiple paths in parallel"""
-        if max_workers is None:
-            max_workers = min(4, psutil.cpu_count(logical=False))
+    def _fuzzy_match(self, name1: str, name2: str) -> bool:
+        """Perform fuzzy matching between two names"""
+        # Simple fuzzy matching - can be enhanced with more sophisticated algorithms
+        name1_parts = set(name1.replace('_', ' ').split())
+        name2_parts = set(name2.replace('_', ' ').split())
         
-        results = {}
+        # Check if there's significant overlap in parts
+        if name1_parts and name2_parts:
+            overlap = len(name1_parts.intersection(name2_parts))
+            min_parts = min(len(name1_parts), len(name2_parts))
+            return overlap >= min_parts * 0.5  # At least 50% overlap
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            
-            for path_type, data in paths_data.items():
-                if path_type == 'drums':
-                    for drum_name, file_path in data.items():
-                        future = executor.submit(self.register_drum, drum_name, file_path)
-                        futures[future] = ('drum', drum_name)
-                elif path_type == 'instruments':
-                    for instrument_name, notes_data in data.items():
-                        for note, file_path in notes_data.items():
-                            future = executor.submit(self.register_instrument, instrument_name, note, file_path)
-                            futures[future] = ('instrument', f"{instrument_name}:{note}")
-            
-            # Collect results
-            for future in as_completed(futures):
-                path_type, identifier = futures[future]
-                try:
-                    success = future.result()
-                    results[f"{path_type}:{identifier}"] = success
-                except Exception as e:
-                    logging.error(f"Failed to register {path_type}:{identifier}: {e}")
-                    results[f"{path_type}:{identifier}"] = False
-        
-        logging.info(f"Batch registration completed: {sum(results.values())}/{len(results)} successful")
-        return results
+        return False
     
     def _validate_path(self, file_path: str) -> bool:
-        """Validate that a file path exists and is accessible"""
-        if file_path in self._path_validation_cache:
-            return self._path_validation_cache[file_path]
-        
+        """Validate that a file path exists with caching"""
         try:
-            exists = os.path.exists(file_path) and os.path.isfile(file_path)
-            self._path_validation_cache[file_path] = exists
+            # Check cache first
+            if file_path in self._path_validation_cache:
+                return self._path_validation_cache[file_path]
             
-            # Limit cache size
+            exists = os.path.exists(file_path) and os.path.isfile(file_path)
+            
+            # Cache the result (with size limit)
             if len(self._path_validation_cache) > 1000:
-                # Remove oldest entries
+                # Clear oldest entries
                 keys_to_remove = list(self._path_validation_cache.keys())[:500]
                 for key in keys_to_remove:
                     del self._path_validation_cache[key]
             
+            self._path_validation_cache[file_path] = exists
             return exists
         except Exception as e:
             logging.error(f"Path validation failed for {file_path}: {e}")
@@ -282,15 +254,22 @@ class PathRegistry:
         elif not self.registry_file:
             return False
             
-        data = {
-            "drum_paths": self.drum_paths,
-            "instrument_paths": self.instrument_paths,
-            "track_paths": self.track_paths
-        }
-        
-        with open(self.registry_file, 'w') as f:
-            json.dump(data, f, indent=2)
-        return True
+        try:
+            data = {
+                "drum_paths": self.drum_paths,
+                "instrument_paths": self.instrument_paths,
+                "track_paths": self.track_paths,
+                "stats": self._stats
+            }
+            
+            os.makedirs(os.path.dirname(self.registry_file), exist_ok=True)
+            with open(self.registry_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logging.info(f"Registry saved to: {self.registry_file}")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to save registry: {e}")
+            return False
         
     def load_registry(self, file_path: Optional[str] = None) -> bool:
         """Load registry from file"""
@@ -300,32 +279,46 @@ class PathRegistry:
             return False
             
         if not os.path.exists(self.registry_file):
+            logging.info(f"Registry file not found: {self.registry_file}")
             return False
+        
+        try:
+            with open(self.registry_file, 'r') as f:
+                data = json.load(f)
+                
+            self.drum_paths = data.get("drum_paths", {})
+            self.instrument_paths = data.get("instrument_paths", {})
+            self.track_paths = data.get("track_paths", {})
+            if "stats" in data:
+                self._stats.update(data["stats"])
             
-        with open(self.registry_file, 'r') as f:
-            data = json.load(f)
-            
-        self.drum_paths = data.get("drum_paths", {})
-        self.instrument_paths = data.get("instrument_paths", {})
-        self.track_paths = data.get("track_paths", {})
-        return True
+            logging.info(f"Registry loaded from: {self.registry_file}")
+            logging.info(f"Loaded {len(self.drum_paths)} drum paths, {sum(len(notes) for notes in self.instrument_paths.values())} instrument paths")
+            return True
+        except Exception as e:
+            logging.error(f"Failed to load registry: {e}")
+            return False
         
     def register_from_directory(self, base_dir):
         """Register all videos in a directory structure"""
         base_path = Path(base_dir)
+        logging.info(f"Registering videos from directory: {base_path}")
         
         # Register drum videos - using glob patterns that match your actual directory structure
+        drum_count = 0
         for drum_path in base_path.glob("**/drum_*.mp4"):
             try:
                 # Extract drum name from filename (removing drum_ prefix)
                 drum_name = drum_path.stem
                 if drum_name.startswith("drum_"):
                     drum_name = drum_name[5:]  # Remove "drum_" prefix
-                self.register_drum(drum_name, str(drum_path))
+                self.register_drum(drum_name, str(drum_path), validate=False)
+                drum_count += 1
             except Exception as e:
                 logging.error(f"Error registering drum: {e}")
                 
         # Register instrument note videos
+        instrument_count = 0
         for note_path in base_path.glob("**/note_*.mp4"):
             try:
                 # Extract instrument name from parent directory
@@ -343,22 +336,78 @@ class PathRegistry:
                     if len(note_parts) >= 2:
                         try:
                             note = note_parts[1]  # Get the numeric note value
-                            self.register_instrument(instrument_name, note, str(note_path))
+                            self.register_instrument(instrument_name, note, str(note_path), validate=False)
+                            instrument_count += 1
                         except (ValueError, IndexError):
                             logging.warning(f"Could not parse note number from {note_path}")
             except Exception as e:
                 logging.error(f"Error registering instrument: {e}")
-
-    def register_drum_path(self, drum_key, path):
-        """Register a path for a drum sound by key name"""
-        logging.info(f"Registered drum path: {drum_key.replace('drum_', '')} -> {path}")
         
-        # Extract the drum name without 'drum_' prefix for consistent lookup
-        drum_name = drum_key.replace('drum_', '')
+        logging.info(f"Registered {drum_count} drum videos and {instrument_count} instrument videos from {base_path}")
+    
+    def register_from_uploads_directory(self, uploads_dir):
+        """Register videos from the uploads directory with the specific naming pattern"""
+        uploads_path = Path(uploads_dir)
+        logging.info(f"Registering videos from uploads directory: {uploads_path}")
         
-        # Initialize drum_paths if it doesn't exist
-        if not hasattr(self, 'drum_paths'):
-            self.drum_paths = {}
-            
-        self.drum_paths[drum_name] = path
-        return path
+        drum_count = 0
+        instrument_count = 0
+        
+        # Find all processed video files in uploads directory
+        for video_file in uploads_path.glob("processed_*.mp4"):
+            try:
+                # Extract instrument name from filename
+                # Pattern: processed_timestamp-random-instrument_name.mp4
+                filename = video_file.stem  # Remove .mp4 extension
+                parts = filename.split('-')
+                
+                if len(parts) >= 3:
+                    # Join all parts after the second dash to handle names with dashes
+                    instrument_name = '-'.join(parts[2:])
+                    
+                    if instrument_name.startswith('drum_'):
+                        # Register drum video
+                        drum_name = instrument_name[5:]  # Remove 'drum_' prefix
+                        self.register_drum(drum_name, str(video_file), validate=False)
+                        drum_count += 1
+                        logging.debug(f"Registered drum: {drum_name} -> {video_file}")
+                    else:
+                        # Register instrument video (use a default note since we don't have note-specific videos)
+                        self.register_instrument(instrument_name, "60", str(video_file), validate=False)
+                        instrument_count += 1
+                        logging.debug(f"Registered instrument: {instrument_name} -> {video_file}")
+                else:
+                    logging.warning(f"Could not parse video filename: {video_file}")
+                    
+            except Exception as e:
+                logging.error(f"Error registering video {video_file}: {e}")
+        
+        logging.info(f"Registered {drum_count} drum videos and {instrument_count} instrument videos from uploads directory")
+        return drum_count + instrument_count > 0
+    
+    def clear_cache(self):
+        """Clear all caches"""
+        with self._lock:
+            self._cache = LRUCache(maxsize=256)
+            self._path_validation_cache.clear()
+            logging.info("Registry caches cleared")
+    
+    def debug_dump(self):
+        """Debug method to dump all registered paths"""
+        logging.info("=== PATH REGISTRY DEBUG DUMP ===")
+        logging.info(f"Drum paths ({len(self.drum_paths)}):")
+        for name, path in self.drum_paths.items():
+            logging.info(f"  {name} -> {path}")
+        
+        logging.info(f"Instrument paths ({sum(len(notes) for notes in self.instrument_paths.values())} total):")
+        for instrument, notes in self.instrument_paths.items():
+            logging.info(f"  {instrument}:")
+            for note, path in notes.items():
+                logging.info(f"    note_{note} -> {path}")
+        
+        logging.info(f"Track paths ({len(self.track_paths)}):")
+        for track_id, path in self.track_paths.items():
+            logging.info(f"  {track_id} -> {path}")
+        
+        stats = self.get_stats()
+        logging.info(f"Registry stats: {stats}")
