@@ -75,8 +75,7 @@ class EnhancedVideoProcessor:
             if not os.path.exists(video_files_json_path):
                 logger.error(f"Video files JSON not found: {video_files_json_path}")
                 return False
-                
-            # Try to load JSON files
+                  # Try to load JSON files
             with open(midi_json_path, 'r') as f:
                 json.load(f)
             with open(video_files_json_path, 'r') as f:
@@ -95,6 +94,13 @@ class EnhancedVideoProcessor:
         try:
             logger.info("Using efficient chunk-based processing instead of note-by-note")
             logger.info(f"Processing {len(midi_data.get('tracks', []))} tracks with chunked approach")
+            
+            # Add grid arrangement validation
+            grid_arrangement = midi_data.get('gridArrangement', {})
+            logger.info(f"Grid arrangement validation: {len(grid_arrangement)} positions found")
+            if not grid_arrangement:
+                logger.error("ERROR: Grid arrangement is empty in video processor")
+                return False
             
             # Count total notes for comparison
             total_notes = 0

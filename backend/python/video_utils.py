@@ -165,8 +165,7 @@ def run_ffmpeg_command(cmd):
             # Add thread optimization if not present
             if '-threads' not in cmd:
                 cpu_count = psutil.cpu_count(logical=False)
-                optimized_cmd.extend(['-threads', str(min(cpu_count, 8))])
-              # Use GPU context if available, with fallback to CPU
+                optimized_cmd.extend(['-threads', str(min(cpu_count, 8))])            # Use GPU context if available, with fallback to CPU
             try:
                 if gpu_manager.has_gpu:
                     with gpu_manager.gpu_context():
@@ -175,13 +174,18 @@ def run_ffmpeg_command(cmd):
                             check=True, 
                             capture_output=True, 
                             text=True,
+                            encoding='utf-8',
+                            errors='replace',
                             timeout=300  # 5 minute timeout
                         )
-                else:                    result = subprocess.run(
+                else:
+                    result = subprocess.run(
                         optimized_cmd, 
                         check=True, 
                         capture_output=True,
                         text=True,
+                        encoding='utf-8',
+                        errors='replace',
                         timeout=300
                     )
             except Exception as gpu_error:

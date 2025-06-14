@@ -20,10 +20,39 @@ export const runPythonProcessor = async (configPath) => {
 
       midiJsonPath = path.join(tempDir, `${baseName}-midi.json`);
       videoJsonPath = path.join(tempDir, `${baseName}-videos.json`);
-      outputPath = path.join(tempDir, `${baseName}-output.mp4`); // Write MIDI data - ensure proper format with tracks wrapper
+      outputPath = path.join(tempDir, `${baseName}-output.mp4`); // Write MIDI data - ensure proper format with tracks wrapper and grid arrangement
       const midiData = {
         tracks: config.tracks || [],
+        gridArrangement: config.gridArrangement || {},
       };
+
+      // Add validation to ensure grid arrangement is not empty
+      if (
+        !config.gridArrangement ||
+        Object.keys(config.gridArrangement).length === 0
+      ) {
+        console.error(
+          'Python Bridge - Grid arrangement is empty or missing:',
+          config.gridArrangement
+        );
+        reject(new Error('Grid arrangement is required but was not provided'));
+        return;
+      }
+
+      console.log(
+        'Python Bridge - Grid arrangement being sent:',
+        JSON.stringify(config.gridArrangement, null, 2)
+      );
+      console.log(
+        'Python Bridge - MIDI data structure:',
+        Object.keys(midiData)
+      );
+      console.log(
+        'Python Bridge - Grid arrangement validation passed:',
+        Object.keys(config.gridArrangement).length,
+        'positions'
+      );
+
       fs.writeFileSync(midiJsonPath, JSON.stringify(midiData));
 
       // Write video files data - ensure proper format
