@@ -8,6 +8,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from processing_utils import encoder_queue, GPUManager
 
+# Import our GPU acceleration functions
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
+from ffmpeg_gpu import ffmpeg_gpu_encode, gpu_batch_process, gpu_note_synchronized_encode
+from gpu_config import FFMPEG_GPU_CONFIG
+
 gpu_manager = GPUManager()
 
 # Performance monitoring
@@ -39,26 +47,18 @@ def performance_monitor(operation_name):
 def get_optimized_ffmpeg_params(use_gpu=True, preset="fast", quality="high"):
     """Get optimized FFmpeg parameters based on system capabilities"""
     
-    # Force CPU mode since CUDA is failing - disable GPU until issues are resolved
-    use_gpu = False
-    
+    # Enable GPU acceleration using our verified GPU functions
     if use_gpu and gpu_manager.has_gpu:
-        # NVENC hardware acceleration
+        # Use our GPU config settings
         params = {
             'hwaccel': 'cuda',
-            'video_codec': 'h264_nvenc',
-            'preset': 'p4',
+            'video_codec': FFMPEG_GPU_CONFIG['encoder'],
+            'preset': FFMPEG_GPU_CONFIG['preset'],
             'crf': 23 if quality == "high" else 28,
             'gpu_options': [
-                '-hwaccel_output_format', 'cuda',
-                '-tune', 'hq',
-                '-rc', 'vbr',
-                '-cq', str(23 if quality == "high" else 28),
-                '-b:v', '8M',
-                '-maxrate', '12M',
-                '-bufsize', '16M',
-                '-surfaces', '64',
-                '-gpu', '0'
+                '-b:v', FFMPEG_GPU_CONFIG['bitrate'],
+                '-maxrate', FFMPEG_GPU_CONFIG['max_bitrate'],
+                '-bufsize', FFMPEG_GPU_CONFIG['buffer_size']
             ]
         }
     else:
@@ -238,11 +238,58 @@ def run_ffmpeg_command(cmd):
             raise
 
 def encode_video_batch(commands, max_workers=None):
-    """Encode multiple videos in parallel"""
+    """Encode multiple videos in parallel with GPU acceleration"""
     if max_workers is None:
         max_workers = min(4, psutil.cpu_count(logical=False))
     
     with performance_monitor(f"Batch encoding {len(commands)} videos"):
+        # Use GPU batch processing if available
+        if gpu_manager.has_gpu:
+            try:
+                # Create temporary directory for GPU batch processing
+                import tempfile
+                import os
+                gpu_output_dir = tempfile.mkdtemp(prefix='gpu_batch_')
+                
+                # Extract input files from commands
+                input_files = []
+                for cmd in commands:
+                    if '-i' in cmd:
+                        i_index = cmd.index('-i')
+                        if i_index + 1 < len(cmd):
+                            input_files.append(cmd[i_index + 1])
+                
+                if input_files:
+                    results = gpu_batch_process(input_files, gpu_output_dir)
+                    
+                    # Clean up temporary directory
+                    import shutil
+                    shutil.rmtree(gpu_output_dir, ignore_errors=True)
+                    
+                    # Clear GPU memory after batch processing
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except:
+                        pass
+                    
+                    return results
+                else:
+                    logging.warning("No valid input files found for GPU batch processing")
+                    
+            except Exception as e:
+                logging.warning(f"GPU batch processing failed: {e}. Falling back to CPU.")
+                
+                # Emergency GPU memory cleanup
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except:
+                    pass
+        
+        # CPU fallback
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_cmd = {
                 executor.submit(encode_video, cmd): cmd 
@@ -273,6 +320,10 @@ def encode_video(cmd):
             optimized_cmd.extend(['-preset', 'p4'])
         elif '-preset' not in cmd:
             optimized_cmd.extend(['-preset', 'fast'])
+        
+        # Use our GPU encoding function for GPU-enabled commands
+        if gpu_manager.has_gpu:
+            return ffmpeg_gpu_encode(optimized_cmd)
         
         result = encoder_queue.encode(optimized_cmd)
         if result.returncode != 0:
