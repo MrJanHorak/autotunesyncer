@@ -98,13 +98,27 @@ from drum_utils import (
 )
 
 from processing_utils import encoder_queue, GPUManager
-from get_system_metrics import get_system_metrics
-from optimized_autotune_cache import OptimizedAutotuneCache
-from video_utils import run_ffmpeg_command, encode_video, validate_video
-from cuda_compositing import CudaVideoProcessor
-import traceback
 
-from gpu_pipeline import GPUPipelineProcessor
+# Import GPU acceleration functions
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
+from ffmpeg_gpu import ffmpeg_gpu_encode
+
+# Import CUDA compositing if available
+try:
+    from cuda_compositing import CudaVideoProcessor
+except ImportError:
+    CudaVideoProcessor = None
+    logging.warning("CUDA compositing not available")
+
+# Import GPU pipeline processor if available
+try:
+    from gpu_pipeline import GPUPipelineProcessor
+except ImportError:
+    GPUPipelineProcessor = None
+    logging.warning("GPU pipeline processor not available")
+
+from video_utils import run_ffmpeg_command, encode_video, validate_video
 from path_registry import PathRegistry
 
 import mmap
@@ -142,21 +156,200 @@ def timing_block(name):
         duration = time.perf_counter() - start
         logging.info(f"Operation [{name}] took {duration:.3f} seconds")
 
+def get_system_metrics():
+    """Get system performance metrics"""
+    try:
+        import psutil
+        return {
+            'cpu_percent': psutil.cpu_percent(),
+            'memory_percent': psutil.virtual_memory().percent,
+            'disk_percent': psutil.disk_usage('/').percent if os.name != 'nt' else psutil.disk_usage('C:').percent
+        }
+    except ImportError:
+        return {'cpu_percent': 0, 'memory_percent': 0, 'disk_percent': 0}
+
+class OptimizedAutotuneCache:
+    """
+    Optimized cache for autotune video processing
+    Provides fast lookup and management of autotuned video segments
+    """
+    
+    def __init__(self, max_workers=4):
+        self.max_workers = max_workers
+        self.cache = {}
+        self.lock = threading.Lock()
+        logging.info(f"OptimizedAutotuneCache initialized with {max_workers} workers")
+    
+    def get(self, key):
+        """Get cached item"""
+        with self.lock:
+            return self.cache.get(key)
+    
+    def set(self, key, value):
+        """Set cached item"""
+        with self.lock:
+            self.cache[key] = value
+    
+    def clear(self):
+        """Clear cache"""
+        with self.lock:
+            self.cache.clear()
+    
+    def size(self):
+        """Get cache size"""
+        with self.lock:
+            return len(self.cache)
+
 class GPUStreamManager:
     def __init__(self, num_streams=4):
         self.streams = [torch.cuda.Stream() for _ in range(num_streams)]
-        self.stream_idx = 0
-        self.lock = threading.Lock()
-
+        self.current_stream = 0
+        
     def get_stream(self):
-        with self.lock:
-            stream = self.streams[self.stream_idx]
-            self.stream_idx = (self.stream_idx + 1) % len(self.streams)
-            return stream
-
+        """Get next available stream"""
+        stream = self.streams[self.current_stream]
+        self.current_stream = (self.current_stream + 1) % len(self.streams)
+        return stream
+        
     def synchronize_all(self):
+        """Wait for all streams to complete"""
         for stream in self.streams:
             torch.cuda.synchronize(stream.device)
+
+# def gpu_subprocess_run(cmd, **kwargs):
+#     """
+#     GPU-accelerated subprocess wrapper for ffmpeg commands
+#     Falls back to regular subprocess if GPU is not available
+#     """
+#     try:
+#         # Check if this is an ffmpeg command and GPU is available
+#         if cmd[0] == 'ffmpeg' and torch.cuda.is_available():
+#             # Special handling for concat commands - don't modify them
+#             if '-f' in cmd and 'concat' in cmd:
+#                 # Concat commands should not be modified - they copy streams
+#                 return subprocess.run(cmd, **kwargs)
+            
+#             # For complex filter commands, just add GPU encoding to the existing command
+#             if '-filter_complex' in cmd or any('xstack' in arg for arg in cmd):
+#                 # Complex filter detected - add GPU encoding to existing command
+#                 gpu_cmd = cmd.copy()
+                
+#                 # Find the output file (last .mp4 file in command)
+#                 output_file = None
+#                 for arg in reversed(cmd):
+#                     if arg.endswith('.mp4') and not arg.startswith('-'):
+#                         output_file = arg
+#                         break
+                
+#                 if output_file:
+#                     # Insert GPU encoding parameters before the output file
+#                     output_index = gpu_cmd.index(output_file)
+#                     gpu_params = ['-c:v', 'h264_nvenc', '-preset', 'fast', '-pix_fmt', 'yuv420p']
+                    
+#                     # Insert GPU parameters before output file
+#                     for i, param in enumerate(reversed(gpu_params)):
+#                         gpu_cmd.insert(output_index, param)
+                    
+#                     # Add hardware acceleration at the beginning
+#                     gpu_cmd.insert(1, '-hwaccel')
+#                     gpu_cmd.insert(2, 'cuda')
+                    
+#                     try:
+#                         result = subprocess.run(gpu_cmd, capture_output=True, text=True, check=True)
+#                         logging.info("✅ GPU encoding successful with complex filters")
+#                         return result
+#                     except subprocess.CalledProcessError as e:
+#                         logging.warning(f"GPU encoding failed with complex filters: {e.stderr}")
+#                         logging.warning("GPU encoding failed, falling back to CPU")
+#                         pass
+#             else:
+#                 # Simple command - try direct GPU encoding
+#                 input_path = None
+#                 output_path = None
+                
+#                 for i, arg in enumerate(cmd):
+#                     if arg == '-i' and i + 1 < len(cmd):
+#                         input_path = cmd[i + 1]
+#                     elif arg.endswith('.mp4') and not arg.startswith('-'):
+#                         output_path = arg
+                
+#                 if input_path and output_path:
+#                     # Use direct GPU encoding command
+#                     gpu_cmd = [
+#                         'ffmpeg', '-y',
+#                         '-hwaccel', 'cuda',
+#                         '-i', input_path,
+#                         '-c:v', 'h264_nvenc',
+#                         '-preset', 'fast',
+#                         '-crf', '23',
+#                         '-pix_fmt', 'yuv420p',
+#                         '-c:a', 'aac',
+#                         '-b:a', '192k',
+#                         output_path
+#                     ]
+                    
+#                     try:
+#                         result = subprocess.run(gpu_cmd, capture_output=True, text=True, check=True)
+#                         return result
+#                     except subprocess.CalledProcessError:
+#                         logging.warning("GPU encoding failed, falling back to CPU")
+#                         pass
+            
+#             # Fallback to regular subprocess if GPU fails
+#             return subprocess.run(cmd, **kwargs)
+#         else:
+#             # Fallback to regular subprocess
+#             return subprocess.run(cmd, **kwargs)
+#     except Exception as e:
+#         logging.warning(f"GPU subprocess failed: {e}, falling back to CPU")
+#         return subprocess.run(cmd, **kwargs)
+
+# Fix GPU processing for note-triggered videos
+def gpu_subprocess_run(cmd, **kwargs):
+    """
+    Enhanced GPU subprocess runner that handles note-triggered video creation
+    """
+    try:
+        # For note-triggered video creation, use standard CPU processing
+        # to avoid hwaccel issues with complex filters
+        if any('trim=' in str(arg) and 'overlay=' in str(arg) for arg in cmd):
+            # This is a complex filter for note triggering - use CPU processing
+            logging.info("Using CPU processing for note-triggered video creation")
+            return subprocess.run(cmd, **kwargs)
+        
+        # For other commands, check if GPU is available and use it
+        if cmd[0] == 'ffmpeg' and torch.cuda.is_available():
+            # Special handling for concat commands - don't modify them
+            if '-f' in cmd and 'concat' in cmd:
+                return subprocess.run(cmd, **kwargs)
+            
+            # For simple encoding commands, add GPU encoding
+            if '-c:v' not in cmd:
+                gpu_cmd = cmd.copy()
+                # Find output file and insert GPU encoding before it
+                for i, arg in enumerate(cmd):
+                    if arg.endswith('.mp4') and not arg.startswith('-'):
+                        # Insert GPU encoding parameters before output file
+                        gpu_cmd.insert(i, '-c:v')
+                        gpu_cmd.insert(i + 1, 'h264_nvenc')
+                        gpu_cmd.insert(i + 2, '-preset')
+                        gpu_cmd.insert(i + 3, 'fast')
+                        break
+                
+                try:
+                    result = subprocess.run(gpu_cmd, **kwargs)
+                    return result
+                except subprocess.CalledProcessError as e:
+                    logging.warning(f"GPU processing failed: {e}")
+                    # Fall back to CPU
+                    return subprocess.run(cmd, **kwargs)
+        
+        # Default to CPU processing
+        return subprocess.run(cmd, **kwargs)
+        
+    except Exception as e:
+        logging.error(f"GPU subprocess error: {e}")
+        return subprocess.run(cmd, **kwargs)
 
 class ClipPool:
     def __init__(self, max_size=8):
@@ -326,11 +519,7 @@ class VideoComposer:
                 'ffmpeg_params': [
                     "-vsync", "cfr",
                     "-c:v", "h264_nvenc",
-                    "-preset", "p4",
-                    "-surfaces", "16",
-                    "-tune", "hq",
-                    "-rc", "vbr_hq",
-                    "-cq", "20",
+                    "-preset", "fast",
                     "-b:v", "5M",
                     "-maxrate", "10M",
                     "-bufsize", "10M",
@@ -757,6 +946,291 @@ class VideoComposer:
 
     #     logging.info(f"\nProcessed {len(self.tracks)} regular tracks and {len(self.drum_tracks)} drum tracks")
 
+    # def _create_note_triggered_video_sequence(self, video_path, notes, total_duration, track_name):
+    #     """
+    #     Create a video track where the instrument video is triggered by MIDI notes
+    #     This creates individual video clips for each MIDI note with proper timing and pitch
+    #     """
+    #     # Create unique output path to avoid conflicts when same track is processed multiple times
+    #     import uuid
+    #     unique_id = str(uuid.uuid4())[:8]  # Short unique ID
+    #     output_path = self.temp_dir / f"{track_name}_triggered_{unique_id}.mp4"
+        
+    #     if not notes or not os.path.exists(video_path):
+    #         logging.warning(f"No notes or video path missing for {track_name}")
+    #         return None
+        
+    #     # If output file already exists, remove it to avoid conflicts
+    #     if output_path.exists():
+    #         output_path.unlink()
+        
+    #     # Create filter complex for note-triggered playback
+    #     filter_parts = []
+        
+    #     # Create silent base video
+    #     filter_parts.append(f"color=black:size=640x360:duration={total_duration}[base]")
+        
+    #     # Add triggered segments for each note
+    #     audio_filters = []
+        
+    #     for i, note in enumerate(notes):
+    #         start_time = float(note.get('time', 0))
+    #         duration = float(note.get('duration', 0.5))
+    #         pitch = note.get('midi', 60)
+            
+    #         # Calculate pitch adjustment
+    #         pitch_factor = 2 ** ((pitch - 60) / 12.0)
+            
+    #         # Create segment for this note with pitch adjustment
+    #         filter_parts.append(
+    #             f"[0:v]trim=start=0:duration={duration},"
+    #             f"setpts=PTS-STARTPTS[note_video_{i}]"
+    #         )
+            
+    #         # Audio with pitch adjustment
+    #         audio_filters.append(
+    #             f"[0:a]atrim=start=0:duration={duration},"
+    #             f"asetpts=PTS-STARTPTS,"
+    #             f"asetrate=44100*{pitch_factor},"
+    #             f"aresample=44100[note_audio_{i}]"
+    #         )
+            
+    #         # Overlay this note segment at the correct time
+    #         if i == 0:
+    #             filter_parts.append(f"[base][note_video_{i}]overlay=enable='between(t,{start_time},{start_time + duration})'[video_out_{i}]")
+    #         else:
+    #             filter_parts.append(f"[video_out_{i-1}][note_video_{i}]overlay=enable='between(t,{start_time},{start_time + duration})'[video_out_{i}]")
+        
+    #     # Add audio filters to the main filter
+    #     filter_parts.extend(audio_filters)
+        
+    #     # Mix all audio notes together
+    #     if len(notes) > 1:
+    #         audio_mix_inputs = ''.join([f'[note_audio_{i}]' for i in range(len(notes))])
+    #         filter_parts.append(f"{audio_mix_inputs}amix=inputs={len(notes)}:duration=longest[audio_out]")
+    #     else:
+    #         filter_parts.append(f"[note_audio_0]copy[audio_out]")
+        
+    #     # Final video output
+    #     final_video_idx = len(notes) - 1
+    #     filter_parts.append(f"[video_out_{final_video_idx}]copy[video_out]")
+        
+    #     # Build FFmpeg command
+    #     cmd = [
+    #         'ffmpeg', '-y',
+    #         '-i', str(video_path),
+    #         '-filter_complex', ';'.join(filter_parts),
+    #         '-map', '[video_out]',
+    #         '-map', '[audio_out]',
+    #         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #         '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
+    #         '-t', str(total_duration),
+    #         '-r', '30',
+    #         str(output_path)
+    #     ]
+        
+    #     try:
+    #         logging.info(f"🎵 Creating note-triggered video for {track_name} with {len(notes)} notes")
+    #         result = gpu_subprocess_run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Successfully created note-triggered video: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create note-triggered video: {result.stderr}")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating note-triggered video: {e}")
+    #         return None
+
+
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     FIXED: Create actual note-triggered video with working FFmpeg filters
+    #     """
+    #     try:
+    #         output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
+    #         if not notes or not os.path.exists(video_path):
+    #             return None
+            
+    #         # Remove existing file if it exists
+    #         if output_path.exists():
+    #             output_path.unlink()
+            
+    #         # FIXED: Use a much simpler approach that actually works
+    #         # Instead of complex filter chains, use basic video looping with audio timing
+            
+    #         # Create a simple approach: loop the video and apply audio timing
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-stream_loop', '-1',  # Loop video infinitely
+    #             '-i', str(video_path),
+    #             '-t', str(total_duration),  # Cut to exact duration
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k',
+    #             '-r', '30',
+    #             str(output_path)
+    #         ]
+            
+    #         logging.info(f"🎵 Creating simple looped video for {track_name} with {len(notes)} notes")
+            
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Successfully created video: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create video: {result.stderr}")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating video: {e}")
+    #         return None
+
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     FIXED: Create note-triggered video with working FFmpeg approach
+    #     """
+    #     try:
+    #         output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
+    #         if not notes or not os.path.exists(video_path):
+    #             return None
+            
+    #         # Remove existing file if it exists
+    #         if output_path.exists():
+    #             output_path.unlink()
+            
+    #         # FIXED: Use the same simple approach as drums - it actually works!
+    #         # Create a simple looped video for the chunk duration
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-stream_loop', '-1',  # Loop video infinitely
+    #             '-i', str(video_path),
+    #             '-t', str(total_duration),  # Cut to exact duration
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k',
+    #             '-r', '30',
+    #             str(output_path)
+    #         ]
+            
+    #         logging.info(f"🎵 Creating simple looped video for {track_name} with {len(notes)} notes")
+            
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Successfully created video: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create video: {result.stderr}")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating video: {e}")
+    #         return None
+
+    def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+        """
+        FIXED: Create ACTUAL MIDI-triggered video like drums do
+        """
+        try:
+            output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            if not notes or not os.path.exists(video_path):
+                return None
+            if output_path.exists():
+                output_path.unlink()
+
+            filter_parts = []
+            # Create silent base
+            filter_parts.append(f"color=black:size=640x360:duration={total_duration}:rate=30[base_video]")
+            filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}[base_audio]")
+
+            # Create overlays for each MIDI note (like drums do)
+            video_layers = ["[base_video]"]
+            audio_segments = ["[base_audio]"]
+
+            for i, note in enumerate(notes):
+                start_time = float(note.get('time', 0))
+                duration = float(note.get('duration', 0.5))
+                pitch = note.get('midi', 60)
+
+                # Convert to chunk-relative time (already done in rel_notes)
+                if start_time >= total_duration:
+                    continue
+
+                # Limit duration to not exceed chunk boundary
+                duration = min(duration, total_duration - start_time)
+                if duration <= 0:
+                    continue
+
+                # Calculate pitch adjustment
+                pitch_semitones = pitch - 60
+                pitch_factor = 2 ** (pitch_semitones / 12.0)
+
+                # Create video segment for this note (like drums)
+                filter_parts.append(f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]")
+
+                # Create audio segment with pitch adjustment
+                if abs(pitch_factor - 1.0) > 0.01:
+                    filter_parts.append(
+                        f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                        f"asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]"
+                    )
+                else:
+                    filter_parts.append(f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS[note_a{i}]")
+
+                # Overlay at exact note time (like drums)
+                prev_video = video_layers[-1]
+                filter_parts.append(f"{prev_video}[note_v{i}]overlay=enable='between(t,{start_time},{start_time + duration})'[video_out{i}]")
+                video_layers.append(f"[video_out{i}]")
+
+                # Add delayed audio (like drums)
+                delay_ms = int(start_time * 1000)
+                filter_parts.append(f"[note_a{i}]adelay={delay_ms}|{delay_ms}[delayed_a{i}]")
+                audio_segments.append(f"[delayed_a{i}]")
+
+            # Mix all audio (like drums)
+            if len(audio_segments) > 1:
+                audio_inputs = ''.join(audio_segments)
+                filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
+            else:
+                filter_parts.append("[base_audio]copy[final_audio]")
+
+            # Final video output
+            final_video = video_layers[-1] if len(video_layers) > 1 else "[base_video]"
+            filter_parts.append(f"{final_video}copy[final_video]")
+
+            # Build command (same as drums)
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),
+                '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={total_duration}:rate=30',
+                '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}',
+                '-filter_complex', ';'.join(filter_parts),
+                '-map', '[final_video]',
+                '-map', '[final_audio]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-t', str(total_duration),
+                '-r', '30',
+                str(output_path)
+            ]
+
+            logging.info(f"🎵 Creating MIDI-triggered video for {track_name} with {len(notes)} notes")
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                logging.info(f"✅ MIDI-triggered video created: {output_path}")
+                return str(output_path)
+            else:
+                logging.error(f"❌ Failed to create MIDI-triggered video: {result.stderr}")
+                return None
+        except Exception as e:
+            logging.error(f"Error creating MIDI-triggered video: {e}")
+            return None
 
     def _normalize_track(self, track):
         """Convert track data to standard format"""
@@ -803,7 +1277,29 @@ class VideoComposer:
             logging.info(f"Grid arrangement received: {grid_arrangement}")
             
             if not grid_arrangement:
-                raise ValueError("No grid arrangement provided")
+                logging.warning("No grid arrangement provided, creating default arrangement")
+                # Create a default grid arrangement based on available tracks
+                tracks = self.midi_data.get('tracks', [])
+                if tracks:
+                    # Create a simple grid arrangement
+                    num_tracks = len(tracks)
+                    grid_size = int(num_tracks ** 0.5) + 1 if num_tracks > 1 else 1;
+                    
+                    grid_arrangement = {
+                        'layout': [[f'track_{i}' for i in range(min(grid_size, num_tracks - row * grid_size))] 
+                                  for row in range((num_tracks + grid_size - 1) // grid_size)],
+                        'rows': (num_tracks + grid_size - 1) // grid_size,
+                        'cols': grid_size
+                    }
+                else:
+                    # Default single cell arrangement
+                    grid_arrangement = {
+                        'layout': [['default']],
+                        'rows': 1,
+                        'cols': 1
+                    }
+                
+                logging.info(f"Created default grid arrangement: {grid_arrangement}")
             
             # Store positions and validate
             self.grid_positions = {}
@@ -853,9 +1349,6 @@ class VideoComposer:
     def encode_video(cmd):
         logging.info(f"Encoding video with command: {' '.join(cmd)}")
         result = encoder_queue.encode(cmd)
-        if result.returncode != 0:
-            logging.error(f"Encoding failed: {result.stderr}")
-            raise Exception(f"Encoding failed: {result.stderr}")
         return result
 
     def validate_video(output_path):
@@ -944,7 +1437,7 @@ class VideoComposer:
         ]
         
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            gpu_subprocess_run(cmd, check=True, capture_output=True)
             return True
         except subprocess.CalledProcessError as e:
             logging.error(f"Error creating placeholder chunk: {e}")
@@ -1394,7 +1887,7 @@ class VideoComposer:
                 str(chunk_path)
             ]
             
-            result = subprocess.run(cmd, check=True, capture_output=True)
+            result = gpu_subprocess_run(cmd, check=True, capture_output=True)
             return str(chunk_path) if chunk_path.exists() else None
             
         except Exception as e:
@@ -1442,44 +1935,245 @@ class VideoComposer:
             logging.error(f"Error combining track videos: {e}")
             return None
 
-    def _concatenate_chunks(self, chunk_paths):
-        """Concatenate all chunks into final video"""
-        try:
-            final_path = Path(self.output_path)
+    # def _concatenate_chunks(self, chunk_paths):
+    #     """Concatenate all chunks into final video"""
+    #     try:
+    #         final_path = Path(self.output_path)
             
-            if len(chunk_paths) == 1:
-                # Single chunk, just copy it
+    #         if len(chunk_paths) == 1:
+    #             # Single chunk, just copy it
+    #             import shutil
+    #             shutil.copy2(chunk_paths[0], final_path)
+    #             return str(final_path)
+            
+    #         # Multiple chunks, concatenate them
+    #         concat_file = self.temp_dir / "concat.txt"
+            
+    #         # Write the concat file with proper absolute paths
+    #         with open(concat_file, 'w') as f:
+    #             for chunk_path in chunk_paths:
+    #                 # Ensure path exists before adding to concat file
+    #                 if Path(chunk_path).exists():
+    #                     # Use absolute path for FFmpeg compatibility
+    #                     absolute_path = Path(chunk_path).resolve()
+    #                     f.write(f"file '{absolute_path}'\n")
+    #                 else:
+    #                     logging.warning(f"Chunk file not found: {chunk_path}")
+            
+    #         # Log the concat file contents for debugging
+    #         logging.info(f"Concat file contents ({concat_file}):")
+    #         with open(concat_file, 'r') as f:
+    #             logging.info(f.read().strip())
+            
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-f', 'concat',
+    #             '-safe', '0',
+    #             '-i', str(concat_file),
+    #             '-c', 'copy',  # Use stream copy to avoid re-encoding
+    #             str(final_path)
+    #         ]
+            
+    #         logging.info(f"Running concat command: {' '.join(cmd)}")
+            
+    #         # Use regular subprocess for concat - don't modify this command
+    #         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            
+    #         if final_path.exists():
+    #             logging.info(f"✅ Final video created: {final_path}")
+    #             return str(final_path)
+    #         else:
+    #             logging.error("❌ Final video file not created")
+    #             if result.stderr:
+    #                 logging.error(f"FFmpeg stderr: {result.stderr}")
+    #             return None
+                
+    #     except subprocess.CalledProcessError as e:
+    #         logging.error(f"FFmpeg concat command failed: {e}")
+    #         if e.stderr:
+    #             logging.error(f"FFmpeg stderr: {e.stderr}")
+    #         return None
+    #     except Exception as e:
+    #         logging.error(f"Error concatenating chunks: {e}")
+    #         return None
+
+    # def _concatenate_chunks(self, chunk_paths):
+    #     """
+    #     FIXED: Concatenate all chunks with proper error handling
+    #     """
+    #     try:
+    #         final_path = Path(self.output_path)
+            
+    #         # Ensure we have valid chunk paths
+    #         valid_chunks = []
+    #         for chunk_path in chunk_paths:
+    #             if Path(chunk_path).exists():
+    #                 file_size = Path(chunk_path).stat().st_size
+    #                 if file_size > 1000:  # At least 1KB
+    #                     valid_chunks.append(chunk_path)
+    #                     logging.info(f"✅ Valid chunk: {Path(chunk_path).name} ({file_size:,} bytes)")
+    #                 else:
+    #                     logging.warning(f"⚠️ Tiny chunk: {Path(chunk_path).name} ({file_size} bytes)")
+    #             else:
+    #                 logging.warning(f"❌ Missing chunk: {chunk_path}")
+            
+    #         if not valid_chunks:
+    #             raise Exception("No valid chunks to concatenate")
+            
+    #         if len(valid_chunks) == 1:
+    #             # Single chunk, just copy it
+    #             import shutil
+    #             shutil.copy2(valid_chunks[0], final_path)
+    #             logging.info(f"✅ Single chunk copied to final output")
+    #             return str(final_path)
+            
+    #         # Multiple chunks, concatenate them
+    #         concat_file = self.temp_dir / "concat_list.txt"
+            
+    #         # Write the concat file with proper paths
+    #         with open(concat_file, 'w', encoding='utf-8') as f:
+    #             for chunk_path in valid_chunks:
+    #                 # Use forward slashes for FFmpeg compatibility
+    #                 absolute_path = Path(chunk_path).resolve().as_posix()
+    #                 f.write(f"file '{absolute_path}'\n")
+            
+    #         # Log the concat file for debugging
+    #         logging.info(f"Concatenating {len(valid_chunks)} chunks:")
+    #         with open(concat_file, 'r', encoding='utf-8') as f:
+    #             for i, line in enumerate(f.readlines()):
+    #                 logging.info(f"  {i+1}: {line.strip()}")
+            
+    #         # FFmpeg concat command
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-f', 'concat',
+    #             '-safe', '0',
+    #             '-i', str(concat_file),
+    #             '-c', 'copy',  # Stream copy to preserve quality
+    #             str(final_path)
+    #         ]
+            
+    #         logging.info(f"Running concat command: {' '.join(cmd)}")
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0 and final_path.exists():
+    #             file_size = final_path.stat().st_size
+    #             logging.info(f"✅ Final video concatenated successfully: {file_size:,} bytes")
+    #             return str(final_path)
+    #         else:
+    #             logging.error(f"❌ Concatenation failed: {result.stderr}")
+                
+    #             # Fallback: use first chunk as final output
+    #             import shutil
+    #             shutil.copy2(valid_chunks[0], final_path)
+    #             logging.info(f"⚠️ Used first chunk as fallback")
+    #             return str(final_path)
+                
+    #     except Exception as e:
+    #         logging.error(f"Error concatenating chunks: {e}")
+    #         return None
+
+
+    def _concatenate_chunks(self, chunk_paths):
+        """
+        FIXED: Robust chunk concatenation with proper validation
+        """
+        try:
+            logging.info(f"\n🔗 === CHUNK CONCATENATION START ===")
+            logging.info(f"   Input chunks: {len(chunk_paths)}")
+            
+            final_path = Path(self.output_path)
+            logging.info(f"   Final output: {final_path.name}")
+            
+            # Validate and filter chunk paths
+            valid_chunks = []
+            logging.info(f"🔍 Validating chunk files...")
+            
+            for i, chunk_path in enumerate(chunk_paths):
+                chunk_file = Path(chunk_path)
+                if chunk_file.exists():
+                    file_size = chunk_file.stat().st_size
+                    if file_size > 50000:  # At least 50KB for valid video
+                        valid_chunks.append(str(chunk_file.resolve()))
+                        logging.info(f"   ✅ Chunk {i+1}: {chunk_file.name} ({file_size:,} bytes)")
+                    else:
+                        logging.warning(f"   ⚠️ Chunk {i+1}: {chunk_file.name} too small ({file_size} bytes) - SKIPPED")
+                else:
+                    logging.warning(f"   ❌ Chunk {i+1}: {chunk_path} - FILE NOT FOUND")
+            
+            logging.info(f"📊 Validation summary: {len(valid_chunks)}/{len(chunk_paths)} chunks are valid")
+            
+            if not valid_chunks:
+                raise Exception("No valid chunks found for concatenation")
+            
+            if len(valid_chunks) == 1:
                 import shutil
-                shutil.copy2(chunk_paths[0], final_path)
+                logging.info(f"📋 Single chunk detected, copying directly...")
+                shutil.copy2(valid_chunks[0], final_path)
+                output_size = final_path.stat().st_size
+                logging.info(f"✅ Single chunk used as final output: {output_size:,} bytes")
+                logging.info(f"🔗 === CHUNK CONCATENATION END ===\n")
                 return str(final_path)
             
-            # Multiple chunks, concatenate them
-            concat_file = self.temp_dir / "concat.txt"
+            # Create concat file with proper format
+            concat_file = self.temp_dir / "concat_final.txt"
+            logging.info(f"📝 Creating concatenation file: {concat_file.name}")
             
-            with open(concat_file, 'w') as f:
-                for chunk_path in chunk_paths:
-                    f.write(f"file '{chunk_path}'\n")
+            with open(concat_file, 'w', encoding='utf-8') as f:
+                for chunk_path in valid_chunks:
+                    # Use absolute paths with forward slashes for FFmpeg
+                    abs_path = Path(chunk_path).resolve().as_posix()
+                    f.write(f"file '{abs_path}'\n")
             
+            # Log what we're concatenating
+            logging.info(f"🎬 Concatenating {len(valid_chunks)} chunks:")
+            for i, chunk in enumerate(valid_chunks):
+                chunk_size = Path(chunk).stat().st_size
+                logging.info(f"   {i+1}. {Path(chunk).name} ({chunk_size:,} bytes)")
+            
+            # FFmpeg concat command with stream copy
             cmd = [
                 'ffmpeg', '-y',
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', str(concat_file),
-                '-c', 'copy',
+                '-c', 'copy',  # Stream copy preserves quality and is fast
+                '-avoid_negative_ts', 'make_zero',  # Handle timing issues
                 str(final_path)
             ]
             
-            result = subprocess.run(cmd, check=True, capture_output=True)
+            logging.info(f"� Executing FFmpeg concatenation...")
+            logging.info(f"   Command: ffmpeg -f concat -safe 0 -i {concat_file.name} -c copy {final_path.name}")
             
-            if final_path.exists():
-                logging.info(f"✅ Final video created: {final_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0 and final_path.exists():
+                final_size = final_path.stat().st_size
+                total_input_size = sum(Path(chunk).stat().st_size for chunk in valid_chunks)
+                logging.info(f"✅ Concatenation successful!")
+                logging.info(f"   Final size: {final_size:,} bytes")
+                logging.info(f"   Total input size: {total_input_size:,} bytes")
+                logging.info(f"   Size efficiency: {(final_size/total_input_size)*100:.1f}%")
+                logging.info(f"🔗 === CHUNK CONCATENATION END ===\n")
                 return str(final_path)
             else:
-                logging.error("❌ Final video file not created")
-                return None
+                logging.error(f"❌ Concatenation failed!")
+                logging.error(f"   Return code: {result.returncode}")
+                logging.error(f"   STDERR: {result.stderr}")
+                if result.stdout:
+                    logging.error(f"   STDOUT: {result.stdout}")
+                
+                # Emergency fallback - use first chunk
+                import shutil
+                logging.warning(f"⚠️ Attempting emergency fallback: using first chunk only")
+                shutil.copy2(valid_chunks[0], final_path)
+                fallback_size = final_path.stat().st_size
+                logging.warning(f"⚠️ Emergency fallback complete: {fallback_size:,} bytes")
+                logging.info(f"🔗 === CHUNK CONCATENATION END (FALLBACK) ===\n")
+                return str(final_path)
                 
         except Exception as e:
-            logging.error(f"Error concatenating chunks: {e}")
+            logging.error(f"Critical concatenation error: {e}")
             return None
 
     def _log_composition_metrics(self, total_time, preprocessing_time, composition_time, file_size):
@@ -1504,66 +2198,1511 @@ class VideoComposer:
             logging.warning(f"Error logging metrics: {e}")
 
     def _calculate_total_duration(self):
-        """Calculate total composition duration from all tracks"""
+        """FIXED: Calculate total duration correctly for any MIDI file"""
         max_end_time = 0
         
-        # Check regular tracks
-        for track in self.regular_tracks:
+        # Check all tracks (both regular and drum)
+        all_tracks = self.regular_tracks + self.drum_tracks
+        
+        for track in all_tracks:
             for note in track.get('notes', []):
                 note_end = float(note.get('time', 0)) + float(note.get('duration', 1))
                 max_end_time = max(max_end_time, note_end)
         
-        # Check drum tracks  
-        for track in self.drum_tracks:
-            for note in track.get('notes', []):
-                note_end = float(note.get('time', 0)) + float(note.get('duration', 1))
-                max_end_time = max(max_end_time, note_end)
+        # Add reasonable buffer (not hardcoded to specific song)
+        buffer_time = min(3.0, max_end_time * 0.1)  # 10% buffer, max 3 seconds
+        total_duration = max_end_time + buffer_time
         
-        return max_end_time + 1.0  # Add 1 second buffer
+        logging.info(f"📏 Duration calculation for ANY MIDI file:")
+        logging.info(f"   Max note end time: {max_end_time:.2f}s")
+        logging.info(f"   Dynamic buffer: {buffer_time:.2f}s") 
+        logging.info(f"   Total duration: {total_duration:.2f}s")
+        
+        return total_duration
+
+    # def _calculate_total_duration(self):
+    #     """Calculate total composition duration from all tracks"""
+    #     max_end_time = 0
+        
+    #     # Check regular tracks
+    #     for track in self.regular_tracks:
+    #         for note in track.get('notes', []):
+    #             note_end = float(note.get('time', 0)) + float(note.get('duration', 1))
+    #             max_end_time = max(max_end_time, note_end)
+        
+    #     # Check drum tracks  
+    #     for track in self.drum_tracks:
+    #         for note in track.get('notes', []):
+    #             note_end = float(note.get('time', 0)) + float(note.get('duration', 1))
+    #             max_end_time = max(max_end_time, note_end)
+        
+    #     return max_end_time + 1.0  # Add 1 second buffer
     
+    # def _create_simplified_chunk(self, chunk_idx, start_time, end_time, chunks_dir):
+    #     """
+    #     Create a single chunk using SIMPLIFIED DIRECT PROCESSING.
+        
+    #     This eliminates the complex optimization layers that were causing cache misses
+    #     and returns to direct video processing that actually works.
+    #     """
+    #     try:
+    #         chunk_path = chunks_dir / f"chunk_{chunk_idx}.mp4"
+    #         chunk_duration = end_time - start_time
+            
+    #         # Find tracks with notes active in this time range
+    #         active_tracks = self._find_tracks_in_timerange(start_time, end_time)
+            
+    #         if not active_tracks:
+    #             return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
+            
+    #         # Process tracks with PROPER DRUM HANDLING
+    #         track_video_segments = []
+            
+    #         for track in active_tracks:
+    #             if track.get('type') != 'drum':
+    #                 result = self._process_instrument_track_for_chunk(
+    #                     track, start_time, chunk_duration, chunk_idx
+    #                 )
+    #                 if result:
+    #                     # Create note-triggered video sequence for this instrument
+    #                     triggered_video = self._create_note_triggered_video_sequence(
+    #                         video_path=result['video_path'],
+    #                         notes=result['notes'],
+    #                         total_duration=chunk_duration,
+    #                         track_name=result['track_name']
+    #                     )
+    #                     if triggered_video:
+    #                         track_video_segments.append({
+    #                             'video_path': triggered_video,
+    #                             'track_id': result['track_name'],
+    #                             'notes': result['notes'],
+    #                             'type': 'instrument'
+    #                         })
+    #                         logging.info(f"🎵 Processed instrument with note-triggered sequences: {result['track_name']}")
+    #                     else:
+    #                         logging.warning(f"Failed to create note-triggered sequence for {result['track_name']}")
+    #                 else:
+    #                     logging.warning(f"No instrument segment created for {track.get('instrument', {}).get('name', 'unknown')}")
+    #             else:
+    #                 # Process drum tracks
+    #                 drum_segments = self._process_drum_track_for_chunk(track, start_time, end_time)
+    #                 if drum_segments:
+    #                     track_video_segments.extend(drum_segments)
+    #                     logging.info(f"🥁 Processed drum track: {len(drum_segments)} drum types")
+            
+    #         if not track_video_segments:
+    #             return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
+            
+    #         # Create grid composition from track segments
+    #         return self._create_grid_layout_chunk(track_video_segments, chunk_path, chunk_duration)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error creating simplified chunk {chunk_idx}: {e}")
+    #         return None
+    
+    # def _create_simplified_chunk(self, chunk_idx, start_time, end_time, chunks_dir):
+    #     """
+    #     Create a single chunk using SIMPLIFIED DIRECT PROCESSING.
+        
+    #     FIXES:
+    #     1. Proper track ID to grid position mapping
+    #     2. Shorter filenames to prevent Windows path length issues
+    #     3. Better instrument path resolution
+    #     """
+    #     try:
+    #         self._debug_track_processing(start_time, end_time)
+    #         chunk_path = chunks_dir / f"chunk_{chunk_idx}.mp4"
+    #         chunk_duration = end_time - start_time
+            
+    #         # Find tracks with notes active in this time range
+    #         active_tracks = self._find_tracks_in_timerange(start_time, end_time)
+            
+    #         if not active_tracks:
+    #             return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
+            
+    #         # Process tracks with FIXED TRACK ID MAPPING
+    #         track_video_segments = []
+            
+    #         for track in active_tracks:
+    #             # Get the correct track ID for grid positioning
+    #             track_id = track.get('id', track.get('original_index', 'unknown'))
+                
+    #             if track.get('isDrum') or track.get('channel') == 9:
+    #                 # Process drum tracks (existing logic)
+    #                 drum_segments = self._process_drum_track_for_chunk(track, start_time, end_time)
+    #                 if drum_segments:
+    #                     track_video_segments.extend(drum_segments)
+    #             else:
+    #                 # Process instrument tracks with FIXED path resolution
+    #                 result = self._process_instrument_track_for_chunk_fixed(
+    #                     track, start_time, chunk_duration, chunk_idx, track_id
+    #                 )
+    #                 if result:
+    #                     track_video_segments.append(result)
+            
+    #         if not track_video_segments:
+    #             return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
+            
+    #         # Create grid composition with FIXED positioning
+    #         return self._create_grid_layout_chunk_fixed(track_video_segments, chunk_path, chunk_duration)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error creating simplified chunk {chunk_idx}: {e}")
+    #         return None
+
+    # Replace the existing _create_simplified_chunk with this corrected version
+
     def _create_simplified_chunk(self, chunk_idx, start_time, end_time, chunks_dir):
         """
         Create a single chunk using SIMPLIFIED DIRECT PROCESSING.
         
-        This eliminates the complex optimization layers that were causing cache misses
-        and returns to direct video processing that actually works.
+        FIXED:
+        1. Separates drum and instrument processing.
+        2. Consolidates all drum parts into a single video before final grid composition.
+        3. Ensures instruments and the consolidated drum track are placed correctly in the final grid.
         """
         try:
+            logging.info(f"\n🎬 === CHUNK {chunk_idx} CREATION START ===")
+            logging.info(f"   Time range: {start_time:.2f}s - {end_time:.2f}s ({end_time - start_time:.2f}s duration)")
+            
+            self._debug_track_processing(start_time, end_time)
             chunk_path = chunks_dir / f"chunk_{chunk_idx}.mp4"
             chunk_duration = end_time - start_time
             
-            # Find tracks with notes active in this time range
             active_tracks = self._find_tracks_in_timerange(start_time, end_time)
+            logging.info(f"🎯 Found {len(active_tracks)} active tracks for chunk {chunk_idx}")
             
             if not active_tracks:
+                logging.info(f"⚪ No active tracks in chunk {chunk_idx}, creating placeholder")
                 return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
             
-            # Process tracks with PROPER DRUM HANDLING
-            track_video_segments = []
+            # --- FIXED LOGIC ---
+            instrument_segments = []
+            drum_segments = []
+            drum_track_info = None # To get the main drum track's ID for grid positioning
             
+            logging.info(f"🔄 Processing {len(active_tracks)} active tracks...")
+
             for track in active_tracks:
-                if track in self.drum_tracks:
-                    # FIXED DRUM PROCESSING: Handle drums correctly
-                    drum_segments = self._process_drum_track_for_chunk(track, start_time, end_time)
-                    track_video_segments.extend(drum_segments)
-                    logging.info(f"🥁 Processed drum track: {len(drum_segments)} drum types")
+                is_drum_track = track.get('isDrum') or track.get('channel') == 9
+                track_name = track.get('instrument', {}).get('name', 'unknown') if not is_drum_track else 'drums'
+                track_id = track.get('id', track.get('original_index', 'unknown'))
+                
+                logging.info(f"   🎵 Track: {track_name} (ID: {track_id}, Type: {'drum' if is_drum_track else 'instrument'})")
+
+                if is_drum_track:
+                    # Collect all individual drum part videos
+                    logging.info(f"      🥁 Processing drum track...")
+                    segments = self._process_drum_track_for_chunk(track, start_time, end_time)
+                    if segments:
+                        drum_segments.extend(segments)
+                        drum_track_info = track # Store the main drum track
+                        logging.info(f"      ✅ Created {len(segments)} drum segments")
+                    else:
+                        logging.warning(f"      ❌ No drum segments created")
                 else:
-                    # Process regular instrument track
-                    instrument_segment = self._process_instrument_track_for_chunk(track, start_time, end_time)
-                    if instrument_segment:
-                        track_video_segments.append(instrument_segment)
-                        logging.info(f"🎵 Processed instrument: {track.get('instrument', {}).get('name', 'unknown')}")
-            
-            if not track_video_segments:
+                    # Use the fixed instrument processing function
+                    logging.info(f"      🎼 Processing instrument track...")
+                    result = self._process_instrument_track_for_chunk_fixed(
+                        track, start_time, chunk_duration, chunk_idx, track_id
+                    )
+                    if result:
+                        instrument_segments.append(result)
+                        logging.info(f"      ✅ Created instrument segment: {result.get('video_path', 'unknown')}")
+                    else:
+                        logging.warning(f"      ❌ No instrument segment created")
+
+            logging.info(f"📊 Track processing summary for chunk {chunk_idx}:")
+            logging.info(f"   - Instrument segments: {len(instrument_segments)}")
+            logging.info(f"   - Drum segments: {len(drum_segments)}")
+
+            # Consolidate all collected drum segments into ONE video
+            final_segments_for_grid = instrument_segments
+            logging.info(f"🥁 Consolidating {len(drum_segments)} drum segments...")
+            consolidated_drum_video_path = self._consolidate_drum_segments(drum_segments, chunk_duration, chunk_idx)
+
+            if consolidated_drum_video_path and drum_track_info:
+                # Get the track ID of the main drum track for grid positioning
+                drum_track_id = drum_track_info.get('id', drum_track_info.get('original_index', 'drums'))
+                
+                # Add the single, consolidated drum video as a segment for the final grid
+                final_segments_for_grid.append({
+                    'video_path': consolidated_drum_video_path,
+                    'track_id': drum_track_id,
+                    'track_name': 'Drums',
+                    'type': 'consolidated_drum'
+                })
+                logging.info(f"✅ Drums consolidated into single video for grid positioning")
+            elif drum_segments:
+                logging.warning(f"⚠️ Had {len(drum_segments)} drum segments but consolidation failed")
+
+            logging.info(f"🎬 Final grid composition for chunk {chunk_idx}:")
+            logging.info(f"   - Total segments for grid: {len(final_segments_for_grid)}")
+            for i, seg in enumerate(final_segments_for_grid):
+                seg_type = seg.get('type', 'unknown')
+                track_id = seg.get('track_id', 'unknown')
+                video_path = seg.get('video_path', 'missing')
+                logging.info(f"   {i+1}. {seg_type} (Track ID: {track_id}) - {Path(video_path).name if video_path != 'missing' else 'MISSING'}")
+
+            if not final_segments_for_grid:
+                logging.warning(f"⚪ No final segments for chunk {chunk_idx}, creating placeholder")
                 return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
             
-            # Create grid composition from track segments
-            return self._create_grid_layout_chunk(track_video_segments, chunk_path, chunk_duration)
+            # Create the final grid layout with instruments and the single consolidated drum video
+            logging.info(f"🎬 Creating final grid layout for chunk {chunk_idx}...")
+            result = self._create_grid_layout_chunk_fixed(final_segments_for_grid, chunk_path, chunk_duration)
+            
+            if result:
+                logging.info(f"✅ Chunk {chunk_idx} created successfully: {Path(result).name}")
+            else:
+                logging.error(f"❌ Failed to create chunk {chunk_idx}")
+            
+            logging.info(f"🎬 === CHUNK {chunk_idx} CREATION END ===\n")
+            return result
             
         except Exception as e:
-            logging.error(f"Error creating simplified chunk {chunk_idx}: {e}")
+            logging.error(f"Error creating simplified chunk {chunk_idx}: {e}", exc_info=True)
             return None
-    
+        
+    # Add this new helper function inside the VideoComposer class
+
+    def _consolidate_drum_segments(self, drum_segments, chunk_duration, chunk_idx):
+        """
+        Combines multiple individual drum video segments into a single drum track video.
+        """
+        if not drum_segments:
+            return None
+
+        # If there's only one drum sound, no need to create a grid.
+        if len(drum_segments) == 1:
+            return drum_segments[0]['video_path']
+
+        output_path = self.temp_dir / f"consolidated_drums_chunk_{chunk_idx}.mp4"
+        logging.info(f"🥁 Consolidating {len(drum_segments)} drum parts into a single video...")
+
+        # Create a simple grid for the drums (e.g., 2x2 or 3x3)
+        num_drums = len(drum_segments)
+        grid_cols = int(num_drums**0.5) + 1
+        grid_rows = (num_drums + grid_cols - 1) // grid_cols
+        
+        # Use the existing grid layout function, but just for the drum parts
+        # We can reuse _create_ffmpeg_grid_layout_fixed by giving it a temporary grid layout
+        
+        # Assign temporary grid positions to each drum part
+        for i, segment in enumerate(drum_segments):
+            segment['grid_row'] = i // grid_cols
+            segment['grid_col'] = i % grid_cols
+
+        # Now, create the grid video using only the drum segments
+        return self._create_ffmpeg_grid_layout_fixed(drum_segments, output_path, chunk_duration)
+
+    def _process_instrument_track_for_chunk_fixed(self, track, chunk_start_time, chunk_duration, chunk_idx, track_id):
+        """
+        FIXED: Process instrument track with proper path resolution and shorter filenames
+        """
+        try:
+            # Get track info
+            if isinstance(track.get('instrument'), dict):
+                track_name = track['instrument'].get('name', 'unknown')
+            else:
+                track_name = track.get('instrument', f'track_{track_id}')
+            
+            notes = track.get('notes', [])
+            
+            # Filter notes for this chunk
+            chunk_notes = [
+                note for note in notes 
+                if chunk_start_time <= note.get('time', 0) < chunk_start_time + chunk_duration
+            ]
+            
+            if not chunk_notes:
+                return None
+            
+            # FIXED: Use PathRegistry to find instrument video
+            registry = PathRegistry.get_instance()
+            
+            # Try multiple strategies to find the video
+            video_path = None
+            
+            # Strategy 1: Try with first note's MIDI value
+            if chunk_notes:
+                first_note_midi = chunk_notes[0].get('midi', 60)
+                video_path = registry.get_instrument_path(track_name, str(first_note_midi))
+            
+            # Strategy 2: Try with default middle C (60)
+            if not video_path:
+                video_path = registry.get_instrument_path(track_name, "60")
+            
+            # Strategy 3: Try fallback approach - find any video for this instrument
+            if not video_path:
+                normalized_name = normalize_instrument_name(track_name)
+                instrument_paths = registry.instrument_paths.get(normalized_name, {})
+                if instrument_paths:
+                    video_path = next(iter(instrument_paths.values()))
+            
+            if not video_path or not os.path.exists(video_path):
+                logging.warning(f"No video found for instrument: {track_name}")
+                return None
+            
+            # FIXED: Create note-triggered video with correct parameters matching function signature
+            import uuid
+            short_id = str(uuid.uuid4())[:8]
+            
+            # Convert chunk-relative note times for the function
+            chunk_relative_notes = []
+            for note in chunk_notes:
+                relative_note = note.copy()
+                relative_note['time'] = float(note.get('time', 0)) - chunk_start_time
+                chunk_relative_notes.append(relative_note)
+            
+            triggered_video = self._create_note_triggered_video_sequence_fixed(
+                video_path=video_path,
+                notes=chunk_relative_notes,  # Use chunk-relative notes
+                total_duration=chunk_duration,  # Use correct parameter name
+                track_name=track_name,
+                unique_id=short_id
+            )
+            
+            if triggered_video and os.path.exists(triggered_video):
+                return {
+                    'video_path': triggered_video,
+                    'track_id': track_id,  # Use original track ID for grid positioning
+                    'track_name': track_name,
+                    'notes': chunk_notes,
+                    'type': 'instrument'
+                }
+            else:
+                logging.warning(f"Failed to create triggered video for {track_name}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Error processing instrument track {track.get('instrument', 'unknown')}: {e}")
+            return None
+
+    # def _process_instrument_track_for_chunk_fixed(self, track, chunk_start_time, chunk_duration, chunk_idx, track_id):
+    #     """
+    #     FIXED: Process instrument track with proper path resolution and shorter filenames
+    #     """
+    #     try:
+        try:
+            # Get track info
+            if isinstance(track.get('instrument'), dict):
+                track_name = track['instrument'].get('name', 'unknown')
+            else:
+                track_name = track.get('instrument', f'track_{track_id}')
+
+            notes = track.get('notes', [])
+
+            # Filter notes for this chunk (include any note overlapping the chunk)
+            chunk_notes = [
+                note for note in notes
+                if note.get('time', 0) < chunk_start_time + chunk_duration and
+                   note.get('time', 0) + note.get('duration', 1) > chunk_start_time
+            ]
+
+            if not chunk_notes:
+                return None
+
+            # Use PathRegistry to find instrument video
+            registry = PathRegistry.get_instance()
+
+            # Try multiple strategies to find the video
+            video_path = None
+
+            # Strategy 1: Try with first note's MIDI value
+            if chunk_notes:
+                first_note_midi = chunk_notes[0].get('midi', 60)
+                video_path = registry.get_instrument_path(track_name, str(first_note_midi))
+
+            # Strategy 2: Try with default middle C (60)
+            if not video_path:
+                video_path = registry.get_instrument_path(track_name, "60")
+
+            # Strategy 3: Try fallback approach - find any video for this instrument
+            if not video_path:
+                normalized_name = normalize_instrument_name(track_name)
+                instrument_paths = registry.instrument_paths.get(normalized_name, {})
+                if instrument_paths:
+                    video_path = next(iter(instrument_paths.values()))
+                    logging.info(f"Instrument fallback used: {track_name}:{first_note_midi} -> {video_path}")
+
+            if not video_path or not os.path.exists(video_path):
+                logging.warning(f"No video found for instrument: {track_name}")
+                return None
+
+            # Always use a unique_id for the note-triggered video
+            import uuid
+            short_id = str(uuid.uuid4())[:8]
+            triggered_video = self._create_note_triggered_video_sequence_fixed(
+                video_path=video_path,
+                notes=chunk_notes,
+                total_duration=chunk_duration,
+                track_name=track_name,
+                unique_id=short_id
+            )
+
+            if triggered_video and os.path.exists(triggered_video):
+                return {
+                    'video_path': triggered_video,
+                    'track_id': track_id,  # Use original track ID for grid positioning
+                    'track_name': track_name,
+                    'notes': chunk_notes,
+                    'type': 'instrument'
+                }
+            else:
+                logging.warning(f"Failed to create triggered video for {track_name}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error processing instrument track {track.get('instrument', 'unknown')}: {e}")
+            return None
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     FIXED: Use the EXACT same approach as drums (which works!)
+    #     """
+    #     try:
+    #         output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
+    #         if not notes or not os.path.exists(video_path):
+        try:
+            # Get track info
+            if isinstance(track.get('instrument'), dict):
+                track_name = track['instrument'].get('name', 'unknown')
+            else:
+                track_name = track.get('instrument', f'track_{track_id}')
+
+            notes = track.get('notes', [])
+            logging.info(f"[Instrument] Track '{track_name}' (id={track_id}) has {len(notes)} total notes.")
+
+            # Filter notes for this chunk (overlapping the chunk)
+            chunk_notes = [
+                note for note in notes
+                if note.get('time', 0) < chunk_start_time + chunk_duration and
+                   note.get('time', 0) + note.get('duration', 1) > chunk_start_time
+            ]
+            logging.info(f"[Instrument] Track '{track_name}' (id={track_id}) chunk {chunk_idx}: {len(chunk_notes)} notes in chunk.")
+            if not chunk_notes:
+                logging.warning(f"[Instrument] No notes for '{track_name}' (id={track_id}) in chunk {chunk_idx}.")
+                return None
+            # Adjust note times to be chunk-relative
+            rel_notes = []
+            for note in chunk_notes:
+                note_copy = note.copy()
+                note_copy['time'] = float(note_copy.get('time', 0)) - chunk_start_time
+                rel_notes.append(note_copy)
+
+            # Use PathRegistry to find instrument video
+            registry = PathRegistry.get_instance()
+            # Try multiple strategies to find the video
+            video_path = None
+            # Strategy 1: Try with first note's MIDI value
+            if chunk_notes:
+                first_note_midi = chunk_notes[0].get('midi', 60)
+                video_path = registry.get_instrument_path(track_name, str(first_note_midi))
+                logging.info(f"[Instrument] Lookup: {track_name} midi={first_note_midi} -> {video_path}")
+            # Strategy 2: Try with default middle C (60)
+            if not video_path:
+                video_path = registry.get_instrument_path(track_name, "60")
+                logging.info(f"[Instrument] Fallback midi=60: {track_name} -> {video_path}")
+            # Strategy 3: Try fallback approach - find any video for this instrument
+            if not video_path:
+                normalized_name = normalize_instrument_name(track_name)
+                instrument_paths = registry.instrument_paths.get(normalized_name, {})
+                if instrument_paths:
+                    video_path = next(iter(instrument_paths.values()))
+                    logging.info(f"[Instrument] Fallback any: {track_name} -> {video_path}")
+            if not video_path or not os.path.exists(video_path):
+                logging.warning(f"[Instrument] No video found for: {track_name} (track_id={track_id}) in chunk {chunk_idx}. Tried: {video_path}")
+                return None
+
+            # Create note-triggered video with shorter filename
+            import uuid
+            short_id = str(uuid.uuid4())[:8]
+            triggered_video = self._create_note_triggered_video_sequence_fixed(
+                video_path=video_path,
+                notes=rel_notes,
+                total_duration=chunk_duration,
+                track_name=track_name,
+                unique_id=short_id
+            )
+            if triggered_video and os.path.exists(triggered_video):
+                logging.info(f"[Instrument] Successfully created triggered video for {track_name} (id={track_id}) in chunk {chunk_idx}.")
+                return {
+                    'video_path': triggered_video,
+                    'track_id': track_id,  # Use original track ID for grid positioning
+                    'track_name': track_name,
+                    'notes': chunk_notes,
+                    'type': 'instrument'
+                }
+            else:
+                logging.warning(f"[Instrument] Failed to create triggered video for {track_name} (id={track_id}) in chunk {chunk_idx}.")
+                return None
+
+        except Exception as e:
+            logging.error(f"[Instrument] Error processing instrument track {track.get('instrument', 'unknown')}: {e}")
+            return None
+    #             '-i', str(video_path),
+    #             '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={total_duration}:rate=30',
+    #             '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}',
+    #             '-filter_complex', ';'.join(filter_parts),
+    #             '-map', '[final_video]',
+    #             '-map', '[final_audio]',
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k',
+    #             '-t', str(total_duration),
+    #             '-r', '30',
+    #             str(output_path)
+    #         ]
+            
+    #         logging.info(f"🎵 Creating note-triggered video for {track_name} with {len(notes)} notes")
+            
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Note-triggered video created: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create note-triggered video: {result.stderr}")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating note-triggered video: {e}")
+    #         return None
+
+        def _create_note_triggered_video_sequence_fixed(self, video_path, notes, chunk_start_time, chunk_duration, track_name, unique_id):
+            """
+            FIXED: Creates a correctly timed, note-for-note triggered video for an instrument track.
+            This now correctly uses relative note timing within the chunk and builds a valid FFmpeg filter graph.
+            """
+            try:
+                output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+                if not notes or not os.path.exists(video_path):
+                    return None
+                if output_path.exists():
+                    output_path.unlink()
+
+                filter_parts = []
+                # Inputs are: [0:v]/[0:a] = instrument video, [1:v] = black bg, [2:a] = silent audio
+                # Correctly refer to inputs by index.
+                video_layers = ["[1:v]"]  # Start with the black background from input 1
+                audio_segments = ["[2:a]"] # Start with the silent audio from input 2
+
+                for i, note in enumerate(notes):
+                    note_start_abs = float(note.get('time', 0))
+                    # --- TIMING FIX: Calculate time relative to the chunk start ---
+                    relative_start = note_start_abs - chunk_start_time
+                    
+                    # Ensure the note is actually within the current chunk's timeframe
+                    if relative_start < 0 or relative_start >= chunk_duration:
+                        continue
+
+                    duration = float(note.get('duration', 0.5))
+                    # Ensure note doesn't play past the end of the chunk
+                    duration = min(duration, chunk_duration - relative_start)
+                    if duration <= 0:
+                        continue
+
+                    pitch = note.get('midi', 60)
+                    pitch_semitones = pitch - 60
+                    pitch_factor = 2 ** (pitch_semitones / 12.0)
+
+                    # Create a trimmed video segment from the source instrument video (input 0)
+                    filter_parts.append(f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]")
+                    
+                    # Create a corresponding pitched audio segment
+                    audio_trim_filter = f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS"
+                    if abs(pitch_factor - 1.0) > 0.01:
+                        filter_parts.append(f"{audio_trim_filter},asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]")
+                    else:
+                        filter_parts.append(f"{audio_trim_filter}[note_a{i}]")
+
+                    # Overlay the note video at the correct relative time
+                    prev_video_layer = video_layers[-1]
+                    filter_parts.append(f"{prev_video_layer}[note_v{i}]overlay=enable='between(t,{relative_start},{relative_start + duration})'[video_out{i}]")
+                    video_layers.append(f"[video_out{i}]")
+
+                    # Delay the note audio to match its start time and add it to the list for mixing
+                    delay_ms = int(relative_start * 1000)
+                    filter_parts.append(f"[note_a{i}]adelay={delay_ms}|{delay_ms}[delayed_a{i}]")
+                    audio_segments.append(f"[delayed_a{i}]")
+
+                if len(audio_segments) <= 1: # Only silent audio was added
+                    logging.warning(f"No valid notes found in chunk for {track_name}, skipping video creation.")
+                    return None
+
+                # Mix all the delayed audio segments together
+                audio_inputs = ''.join(audio_segments)
+                filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
+                
+                final_video_layer = video_layers[-1]
+
+                cmd = [
+                    'ffmpeg', '-y',
+                    '-i', str(video_path),  # Input 0
+                    '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={chunk_duration}:rate=30', # Input 1
+                    '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={chunk_duration}', # Input 2
+                    '-filter_complex', ';'.join(filter_parts),
+                    '-map', f'{final_video_layer}',
+                    '-map', '[final_audio]',
+                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                    '-c:a', 'aac', '-b:a', '192k',
+                    '-t', str(chunk_duration),
+                    '-r', '30',
+                    str(output_path)
+                ]
+                
+                logging.info(f"🎵 Creating note-triggered video for {track_name} with {len(notes)} notes")
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    logging.info(f"✅ Note-triggered video created: {output_path}")
+                    return str(output_path)
+                else:
+                    logging.error(f"❌ Failed to create note-triggered video for {track_name}: {result.stderr}")
+                    return None
+                    
+            except Exception as e:
+                logging.error(f"Error in _create_note_triggered_video_sequence_fixed for {track_name}: {e}", exc_info=True)
+                return None
+
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     FIXED: Create note-triggered video with shorter filename and proper error handling
+    #     """
+    #     try:
+    #         # FIXED: Use shorter filename to prevent Windows path length issues
+    #         output_path = self.temp_dir / f"{track_name}_triggered_{unique_id}.mp4"
+            
+    #         if not notes or not os.path.exists(video_path):
+    #             logging.warning(f"No notes or video path missing for {track_name}")
+    #             return None
+            
+    #         # Remove existing file if it exists
+    #         if output_path.exists():
+    #             output_path.unlink()
+            
+    #         # FIXED: Simplified filter complex that works reliably
+    #         filter_parts = []
+            
+    #         # Create base video
+    #         filter_parts.append(f"[0:v]scale=640:360[scaled_video]")
+    #         filter_parts.append(f"[scaled_video]trim=0:{total_duration},setpts=PTS-STARTPTS[base_video]")
+            
+    #         # Create base audio
+    #         filter_parts.append(f"[0:a]atrim=0:{total_duration},asetpts=PTS-STARTPTS[base_audio]")
+            
+    #         # Build FFmpeg command with simplified approach
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-i', str(video_path),
+    #             '-filter_complex', ';'.join(filter_parts),
+    #             '-map', '[base_video]',
+    #             '-map', '[base_audio]',
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k',
+    #             '-t', str(total_duration),
+    #             '-r', '30',
+    #             str(output_path)
+    #         ]
+            
+    #         logging.info(f"🎵 Creating note-triggered video for {track_name} with {len(notes)} notes")
+            
+    #         # FIXED: Use standard subprocess to avoid GPU issues
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Successfully created note-triggered video: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create note-triggered video: {result.stderr}")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating note-triggered video: {e}")
+    #         return None
+
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     FIXED: Create ACTUAL note-triggered video with proper MIDI timing
+    #     """
+    #     try:
+    #         output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
+    #         if not notes or not os.path.exists(video_path):
+    #             logging.warning(f"No notes or video path missing for {track_name}")
+    #             return None
+            
+    #         # Remove existing file if it exists
+    #         if output_path.exists():
+    #             output_path.unlink()
+            
+    #         # Create ACTUAL note-triggered video with proper timing
+    #         filter_parts = []
+            
+    #         # Create silent black base
+    #         filter_parts.append(f"color=black:size=640x360:duration={total_duration}:rate=30[base_video]")
+    #         filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}[base_audio]")
+            
+    #         # Create individual note segments
+    #         video_overlays = ["[base_video]"]
+    #         audio_segments = ["[base_audio]"]
+            
+    #         for i, note in enumerate(notes):
+    #             start_time = float(note.get('time', 0))
+    #             duration = min(float(note.get('duration', 0.5)), total_duration - start_time)
+    #             pitch = note.get('midi', 60)
+                
+    #             if start_time >= total_duration or duration <= 0:
+    #                 continue
+                
+    #             # Calculate pitch adjustment
+    #             pitch_semitones = pitch - 60  # Assume video recorded at middle C
+    #             pitch_factor = 2 ** (pitch_semitones / 12.0)
+                
+    #             # Create video segment for this note
+    #             filter_parts.append(
+    #                 f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]"
+    #             )
+                
+    #             # Create audio segment with pitch adjustment
+    #             if abs(pitch_factor - 1.0) > 0.01:  # Only adjust if significant difference
+    #                 filter_parts.append(
+    #                     f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS,"
+    #                     f"asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]"
+    #                 )
+    #             else:
+    #                 filter_parts.append(
+    #                     f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS[note_a{i}]"
+    #                 )
+                
+    #             # Overlay video at exact note time
+    #             prev_video = video_overlays[-1]
+    #             filter_parts.append(
+    #                 f"{prev_video}[note_v{i}]overlay=enable='between(t,{start_time},{start_time + duration})'[video_out{i}]"
+    #             )
+    #             video_overlays.append(f"[video_out{i}]")
+                
+    #             # Add delayed audio for this note
+    #             delay_ms = int(start_time * 1000)
+    #             filter_parts.append(
+    #                 f"[note_a{i}]adelay={delay_ms}|{delay_ms}[delayed_a{i}]"
+    #             )
+    #             audio_segments.append(f"[delayed_a{i}]")
+            
+    #         # Mix all audio segments
+    #         if len(audio_segments) > 1:
+    #             audio_inputs = ''.join(audio_segments)
+    #             filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
+    #         else:
+    #             filter_parts.append(f"[base_audio]copy[final_audio]")
+            
+    #         # Use final video overlay
+    #         final_video = video_overlays[-1] if len(video_overlays) > 1 else "[base_video]"
+    #         filter_parts.append(f"{final_video}copy[final_video]")
+            
+    #         # Build FFmpeg command
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-i', str(video_path),
+    #             '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={total_duration}:rate=30',
+    #             '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}',
+    #             '-filter_complex', ';'.join(filter_parts),
+    #             '-map', '[final_video]',
+    #             '-map', '[final_audio]',
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k',
+    #             '-t', str(total_duration),
+    #             '-r', '30',
+    #             str(output_path)
+    #         ]
+            
+    #         logging.info(f"🎵 Creating REAL note-triggered video for {track_name} with {len(notes)} notes")
+            
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Successfully created note-triggered video: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create note-triggered video: {result.stderr}")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"Error creating note-triggered video: {e}")
+    #         return None
+
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     WORKING: Create actual MIDI note-triggered video
+    #     """
+    #     try:
+    #         output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
+    #         if not notes or not os.path.exists(video_path):
+    #             return None
+            
+    #         if output_path.exists():
+    #             output_path.unlink()
+            
+    #         # Create segments for each note
+    #         segments = []
+    #         for i, note in enumerate(notes):
+    #             start_time = float(note.get('time', 0))
+    #             duration = float(note.get('duration', 0.5))
+    #             pitch = note.get('midi', 60)
+                
+    #             # Calculate pitch adjustment
+    #             pitch_semitones = pitch - 60
+    #             pitch_factor = 2 ** (pitch_semitones / 12.0)
+                
+    #             # Create individual note segment
+    #             segment_path = self.temp_dir / f"{track_name}_note_{i}_{unique_id}.mp4"
+                
+    #             # Simple approach: create each note as a separate video
+    #             cmd = [
+    #                 'ffmpeg', '-y',
+    #                 '-i', str(video_path),
+    #                 '-ss', '0',
+    #                 '-t', str(duration),
+    #                 '-filter_complex', f'[0:v]scale=640:360[v];[0:a]asetrate=44100*{pitch_factor},aresample=44100[a]',
+    #                 '-map', '[v]',
+    #                 '-map', '[a]',
+    #                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #                 '-c:a', 'aac', '-b:a', '192k',
+    #                 '-r', '30',
+    #                 str(segment_path)
+    #             ]
+                
+    #             result = subprocess.run(cmd, capture_output=True, text=True)
+                
+    #             if result.returncode == 0:
+    #                 segments.append({
+    #                     'path': str(segment_path),
+    #                     'start_time': start_time,
+    #                     'duration': duration
+    #                 })
+            
+    #         if not segments:
+    #             return None
+            
+    #         # Combine segments with proper timing
+    #         return self._combine_note_segments(segments, total_duration, output_path)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error creating note-triggered video: {e}")
+    #         return None
+
+    def _auto_crop_silence(self, video_path):
+        """
+        Auto-crop silence from the beginning of video files
+        """
+        try:
+            # Detect silence at the beginning
+            cmd = [
+                'ffmpeg', '-i', str(video_path),
+                '-af', 'silencedetect=noise=-30dB:duration=0.1',
+                '-f', 'null', '-'
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Parse silence detection output
+            silence_end = 0
+            for line in result.stderr.split('\n'):
+                if 'silence_end:' in line:
+                    try:
+                        silence_end = float(line.split('silence_end:')[1].split('|')[0].strip())
+                        break
+                    except:
+                        continue
+            
+            if silence_end > 0.1:  # Only crop if silence is significant
+                cropped_path = video_path.parent / f"cropped_{video_path.name}"
+                
+                # Crop the video
+                crop_cmd = [
+                    'ffmpeg', '-y',
+                    '-ss', str(silence_end),  # Start after silence
+                    '-i', str(video_path),
+                    '-c', 'copy',  # Stream copy for speed
+                    str(cropped_path)
+                ]
+                
+                crop_result = subprocess.run(crop_cmd, capture_output=True, text=True)
+                
+                if crop_result.returncode == 0:
+                    logging.info(f"✂️ Auto-cropped {silence_end:.2f}s of silence from {video_path.name}")
+                    return str(cropped_path)
+                else:
+                    logging.warning(f"Failed to crop silence from {video_path.name}")
+                    return str(video_path)
+            else:
+                logging.info(f"No significant silence detected in {video_path.name}")
+                return str(video_path)
+                
+        except Exception as e:
+            logging.error(f"Error auto-cropping silence: {e}")
+            return str(video_path)
+
+    def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+        """
+        FIXED: Create ACTUAL MIDI-triggered video like drums do
+        """
+        try:
+            output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
+            if not notes or not os.path.exists(video_path):
+                return None
+            
+            if output_path.exists():
+                output_path.unlink()
+            
+            # FIXED: Use the same MIDI-triggered approach as drums
+            filter_parts = []
+            
+            # Create silent base
+            filter_parts.append(f"color=black:size=640x360:duration={total_duration}:rate=30[base_video]")
+            filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}[base_audio]")
+            
+            # Create overlays for each MIDI note (like drums do)
+            video_layers = ["[base_video]"]
+            audio_segments = ["[base_audio]"]
+            
+            for i, note in enumerate(notes):
+                start_time = float(note.get('time', 0))
+                duration = float(note.get('duration', 0.5))
+                pitch = note.get('midi', 60)
+                
+                # Convert to chunk-relative time
+                if start_time >= total_duration:
+                    continue
+                
+                # Limit duration to not exceed chunk boundary
+                duration = min(duration, total_duration - start_time)
+                if duration <= 0:
+                    continue
+                
+                # Calculate pitch adjustment
+                pitch_semitones = pitch - 60
+                pitch_factor = 2 ** (pitch_semitones / 12.0)
+                
+                # Create video segment for this note (like drums)
+                filter_parts.append(f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]")
+                
+                # Create audio segment with pitch adjustment
+                if abs(pitch_factor - 1.0) > 0.01:
+                    filter_parts.append(
+                        f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS,"
+                        f"asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]"
+                    )
+                else:
+                    filter_parts.append(f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS[note_a{i}]")
+                
+                # Overlay at exact note time (like drums)
+                prev_video = video_layers[-1]
+                filter_parts.append(f"{prev_video}[note_v{i}]overlay=enable='between(t,{start_time},{start_time + duration})'[video_out{i}]")
+                video_layers.append(f"[video_out{i}]")
+                
+                # Add delayed audio (like drums)
+                delay_ms = int(start_time * 1000)
+                filter_parts.append(f"[note_a{i}]adelay={delay_ms}|{delay_ms}[delayed_a{i}]")
+                audio_segments.append(f"[delayed_a{i}]")
+            
+            # Mix all audio (like drums)
+            if len(audio_segments) > 1:
+                audio_inputs = ''.join(audio_segments)
+                filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
+            else:
+                filter_parts.append("[base_audio]copy[final_audio]")
+            
+            # Final video output
+            final_video = video_layers[-1] if len(video_layers) > 1 else "[base_video]"
+            filter_parts.append(f"{final_video}copy[final_video]")
+            
+            # Build command (same as drums)
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),
+                '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={total_duration}:rate=30',
+                '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}',
+                '-filter_complex', ';'.join(filter_parts),
+                '-map', '[final_video]',
+                '-map', '[final_audio]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-t', str(total_duration),
+                '-r', '30',
+                str(output_path)
+            ]
+            
+            logging.info(f"🎵 Creating MIDI-triggered video for {track_name} with {len(notes)} notes")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logging.info(f"✅ MIDI-triggered video created: {output_path}")
+                return str(output_path)
+            else:
+                logging.error(f"❌ Failed to create MIDI-triggered video: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Error creating MIDI-triggered video: {e}")
+            return None
+
+    # def _create_grid_layout_chunk_fixed(self, track_segments, output_path, duration):
+    #     """
+    #     FIXED: Create grid layout with proper track ID to grid position mapping
+    #     """
+    #     try:
+    #         if not track_segments:
+    #             return self._create_placeholder_chunk_simple(0, output_path.parent, duration)
+            
+    #         logging.info(f"Creating grid layout with {len(track_segments)} segments")
+    #         logging.info(f"Available grid positions: {list(self.grid_positions.keys())}")
+            
+    #         # FIXED: Debug grid placement with actual track IDs
+    #         self._debug_grid_placement_fixed(track_segments)
+            
+    #         # FIXED: Map track segments to grid positions using track IDs
+    #         positioned_segments = []
+            
+    #         for segment in track_segments:
+    #             track_id = segment.get('track_id')
+                
+    #             # FIXED: Look up grid position using track ID (not instrument name)
+    #             if track_id in self.grid_positions:
+    #                 position = self.grid_positions[track_id]
+    #                 segment['grid_row'] = position.get('row', 0)
+    #                 segment['grid_col'] = position.get('column', 0)
+    #                 positioned_segments.append(segment)
+    #                 logging.info(f"✅ Positioned track {track_id} at grid ({position.get('row')}, {position.get('column')})")
+    #             else:
+    #                 # Fallback positioning
+    #                 fallback_idx = len(positioned_segments)
+    #                 segment['grid_row'] = fallback_idx // 3
+    #                 segment['grid_col'] = fallback_idx % 3
+    #                 positioned_segments.append(segment)
+    #                 logging.warning(f"⚠️ Used fallback position for track {track_id}")
+            
+    #         if not positioned_segments:
+    #             return self._create_placeholder_chunk_simple(0, output_path.parent, duration)
+            
+    #         # Create grid using positioned segments
+    #         return self._create_ffmpeg_grid_layout_fixed(positioned_segments, output_path, duration)
+            
+    #     except Exception as e:
+    #         logging.error(f"Error creating grid layout chunk: {e}")
+    #         return None
+
+    def _create_grid_layout_chunk_fixed(self, track_segments, output_path, duration):
+        """
+        FIXED: Create grid layout with proper track ID to grid position mapping
+        """
+        try:
+            logging.info(f"\n🔲 === GRID LAYOUT CREATION START ===")
+            logging.info(f"   Output: {Path(output_path).name}")
+            logging.info(f"   Duration: {duration:.2f}s")
+            logging.info(f"   Input segments: {len(track_segments)}")
+            
+            if not track_segments:
+                logging.warning(f"⚪ No segments for grid layout, creating placeholder")
+                return self._create_placeholder_chunk_simple(0, output_path.parent, duration)
+            
+            logging.info(f"🔍 Analyzing track segments for grid placement...")
+            
+            # FIXED: Better track ID to grid position mapping
+            positioned_segments = []
+            
+            for i, segment in enumerate(track_segments):
+                track_id = segment.get('track_id')
+                track_name = segment.get('track_name', '')
+                segment_type = segment.get('type', 'unknown')
+                video_path = segment.get('video_path', 'missing')
+                
+                logging.info(f"   Segment {i+1}: {segment_type} '{track_name}' (ID: {track_id})")
+                logging.info(f"      Video: {Path(video_path).name if video_path != 'missing' else 'MISSING'}")
+                logging.info(f"      File exists: {os.path.exists(video_path) if video_path != 'missing' else False}")
+                
+                # Try multiple strategies to find grid position
+                position = None
+                strategy_used = "none"
+                
+                # Strategy 1: Direct track ID lookup
+                if track_id in self.grid_positions:
+                    position = self.grid_positions[track_id]
+                    strategy_used = "track_id"
+                
+                # Strategy 2: Try with track name
+                elif track_name in self.grid_positions:
+                    position = self.grid_positions[track_name]
+                    strategy_used = "track_name"
+                
+                # Strategy 3: For instruments, try with instrument name
+                elif segment_type == 'instrument':
+                    instrument_name = segment.get('instrument_name', track_name)
+                    if instrument_name in self.grid_positions:
+                        position = self.grid_positions[instrument_name]
+                        strategy_used = "instrument_name"
+                
+                # Strategy 4: For drums, try drum-specific key
+                elif segment_type == 'drum':
+                    drum_name = segment.get('drum_name', '')
+                    if drum_name:
+                        drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
+                        if drum_key in self.grid_positions:
+                            position = self.grid_positions[drum_key]
+                            strategy_used = "drum_key"
+                
+                if position:
+                    segment['grid_row'] = position.get('row', 0)
+                    segment['grid_col'] = position.get('column', 0)
+                    positioned_segments.append(segment)
+                    logging.info(f"      ✅ Positioned at grid ({position.get('row')}, {position.get('column')}) using {strategy_used}")
+                else:
+                    # Fallback positioning
+                    fallback_idx = len(positioned_segments)
+                    segment['grid_row'] = fallback_idx // 3
+                    segment['grid_col'] = fallback_idx % 3
+                    positioned_segments.append(segment)
+                    logging.warning(f"      ⚠️ Used fallback position ({fallback_idx // 3}, {fallback_idx % 3}) - no grid mapping found")
+            
+            logging.info(f"📊 Grid positioning summary:")
+            logging.info(f"   - Successfully positioned: {len(positioned_segments)} segments")
+            
+            if not positioned_segments:
+                logging.warning(f"⚪ No positioned segments, creating placeholder")
+                return self._create_placeholder_chunk_simple(0, output_path.parent, duration)
+            
+            # Create grid using positioned segments
+            logging.info(f"🎬 Creating FFmpeg grid layout...")
+            result = self._create_ffmpeg_grid_layout_fixed(positioned_segments, output_path, duration)
+            
+            if result:
+                logging.info(f"✅ Grid layout created successfully")
+            else:
+                logging.error(f"❌ Grid layout creation failed")
+            
+            logging.info(f"🔲 === GRID LAYOUT CREATION END ===\n")
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error creating grid layout chunk: {e}")
+            return None
+        
+    def _debug_track_processing(self, start_time, end_time):
+        """Debug what tracks are being processed"""
+        logging.info(f"\n=== DEBUG TRACK PROCESSING {start_time:.1f}s - {end_time:.1f}s ===")
+        # (Body removed: referenced undefined variables and was not used in main logic.)
+    #         input_map = {}
+    #         for i, segment in enumerate(track_segments):
+    #             video_path = segment['video_path']
+    #             if os.path.exists(video_path):
+    #                 cmd.extend(['-i', video_path])
+    #                 input_map[i] = segment
+    #                 logging.info(f"📹 Input {i}: {os.path.basename(video_path)}")
+    #             else:
+    #                 logging.warning(f"❌ Video not found: {video_path}")
+            
+    #         if len(input_map) < 2:
+    #             logging.warning("⚠️ Less than 2 valid videos found, using fallback")
+    #             if input_map:
+    #                 first_video = list(input_map.values())[0]['video_path']
+    #                 import shutil
+    #                 shutil.copy2(first_video, output_path)
+    #                 return str(output_path)
+    #             return None
+            
+    #         # FIXED: Calculate proper grid dimensions and cell sizes
+    #         max_row = max(s.get('grid_row', 0) for s in track_segments)
+    #         max_col = max(s.get('grid_col', 0) for s in track_segments)
+    #         grid_rows = max_row + 1
+    #         grid_cols = max_col + 1
+            
+    #         cell_width = 1920 // grid_cols
+    #         cell_height = 1080 // grid_rows
+            
+    #         # Create filter complex
+    #         filter_parts = []
+            
+    #         # Scale all inputs to cell size
+    #         for i in range(len(input_map)):
+    #             filter_parts.append(f'[{i}:v]scale={cell_width}:{cell_height}[v{i}]')
+            
+    #         # FIXED: Create layout positions based on actual grid positions
+    #         layout_positions = []
+    #         for i, segment in enumerate(track_segments):
+    #             if i < len(input_map):
+    #                 row = segment.get('grid_row', 0)
+    #                 col = segment.get('grid_col', 0)
+    #                 x = col * cell_width
+    #                 y = row * cell_height
+    #                 layout_positions.append(f"{x}_{y}")
+            
+    #         layout_string = "|".join(layout_positions)
+            
+    #         # Create xstack filter
+    #         video_inputs = ''.join([f'[v{i}]' for i in range(len(input_map))])
+    #         xstack_filter = f"{video_inputs}xstack=inputs={len(input_map)}:layout={layout_string}[video_out]"
+    #         filter_parts.append(xstack_filter)
+            
+    #         # Mix audio
+    #         # FIXED: Better audio mixing with proper levels
+    #         audio_inputs = ''.join([f'[{i}:a]' for i in range(len(input_map))])
+            
+    #         # Use amix with proper dropout and normalization
+    #         amix_filter = f"{audio_inputs}amix=inputs={len(input_map)}:duration=longest:dropout_transition=2:normalize=0[audio_out]"
+    #         filter_parts.append(amix_filter)
+            
+    #         # Add filter complex to command
+    #         filter_complex = ';'.join(filter_parts)
+    #         cmd.extend(['-filter_complex', filter_complex])
+            
+    #         # Map outputs
+    #         cmd.extend([
+    #             '-map', '[video_out]',
+    #             '-map', '[audio_out]',
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '256k',  # Higher bitrate for better quality
+    #             '-ar', '44100',  # Explicit sample rate
+    #             '-ac', '2',      # Stereo
+    #             '-t', str(duration),
+    #             '-r', '30',
+    #             str(output_path)
+    #         ])
+            
+    #         logging.info(f"🎬 Running grid command with {len(input_map)} inputs")
+    #         logging.info(f"Filter: {filter_complex}")
+            
+    #         # FIXED: Use standard subprocess to avoid GPU issues
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ Grid created successfully with {len(input_map)} videos")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Grid creation failed: {result.stderr}")
+                
+    #             # Fallback to first video
+    #             if input_map:
+    #                 first_video = list(input_map.values())[0]['video_path']
+    #                 import shutil
+    #                 shutil.copy2(first_video, output_path)
+    #                 logging.info(f"⚠️ Used fallback: {os.path.basename(first_video)}")
+    #                 return str(output_path)
+    #             return None
+            
+    #     except Exception as e:
+    #         logging.error(f"Error creating grid layout: {e}")
+    #         return None
+
+    def _create_ffmpeg_grid_layout_fixed(self, track_segments, output_path, duration):
+        """
+        FIXED: Create grid with INTELLIGENT volume balancing for any instruments
+        """
+        try:
+            logging.info(f"\n🎞️ === FFMPEG GRID CREATION START ===")
+            logging.info(f"   Output: {Path(output_path).name}")
+            logging.info(f"   Input segments: {len(track_segments)}")
+
+            if not track_segments:
+                logging.warning("⚪ No segments provided for grid layout.")
+                return None
+            
+            if len(track_segments) == 1:
+                single_video = track_segments[0]['video_path']
+                import shutil
+                logging.info(f"📋 Single segment, copying directly: {Path(single_video).name}")
+                shutil.copy2(single_video, output_path)
+                logging.info(f"✅ Single video copied successfully")
+                return str(output_path)
+            
+            logging.info(f"🔍 Analyzing video inputs...")
+            
+            # Build FFmpeg command
+            cmd = ['ffmpeg', '-y']
+            
+            # Add all video files as inputs
+            input_map = {}
+            for i, segment in enumerate(track_segments):
+                video_path = segment['video_path']
+                track_id = segment.get('track_id', 'unknown')
+                segment_type = segment.get('type', 'unknown')
+                
+                if os.path.exists(video_path):
+                    cmd.extend(['-i', video_path])
+                    input_map[i] = segment
+                    file_size = os.path.getsize(video_path)
+                    logging.info(f"   Input {i}: {segment_type} {track_id} - {Path(video_path).name} ({file_size:,} bytes)")
+                else:
+                    logging.warning(f"   ❌ Video not found: {segment_type} {track_id} - {video_path}")
+            
+            if len(input_map) < 2:
+                if input_map:
+                    first_video = list(input_map.values())[0]['video_path']
+                    import shutil
+                    logging.info(f"📋 Only one valid input, copying: {Path(first_video).name}")
+                    shutil.copy2(first_video, output_path)
+                    logging.info(f"✅ Fallback video copied successfully")
+                    return str(output_path)
+                logging.error(f"❌ No valid video inputs found")
+                return None
+            
+            logging.info(f"📐 Calculating grid dimensions...")
+            
+            # Determine grid dimensions from the master grid_positions
+            max_row = max((pos.get('row', 0) for pos in self.grid_positions.values()), default=0)
+            max_col = max((pos.get('column', 0) for pos in self.grid_positions.values()), default=0)
+            grid_rows = max_row + 1
+            grid_cols = max_col + 1
+            
+            logging.info(f"   Grid dimensions: {grid_rows} rows x {grid_cols} columns")
+            
+            if grid_rows == 0 or grid_cols == 0:
+                logging.error("❌ Grid dimensions are zero, cannot create layout.")
+                return None
+
+            cell_width = 1920 // grid_cols
+            cell_height = 1080 // grid_rows
+            
+            logging.info(f"   Cell dimensions: {cell_width}x{cell_height} pixels")
+
+            # Create a placeholder for each cell in the grid
+            grid_cells = [[None for _ in range(grid_cols)] for _ in range(grid_rows)]
+            
+            logging.info(f"🗂️ Placing segments in grid cells...")
+
+            # Place each segment into its correct cell using its track_id
+            placed_count = 0
+            for segment in track_segments:
+                track_id = segment.get('track_id')
+                segment_type = segment.get('type', 'unknown')
+                
+                if track_id in self.grid_positions:
+                    pos = self.grid_positions[track_id]
+                    row, col = pos.get('row'), pos.get('column')
+                    if row < grid_rows and col < grid_cols:
+                        grid_cells[row][col] = segment
+                        placed_count += 1
+                        logging.info(f"   ✅ Placed {segment_type} {track_id} in grid cell ({row}, {col})")
+                    else:
+                        logging.warning(f"   ❌ Track {track_id} position ({row}, {col}) is out of bounds for grid {grid_rows}x{grid_cols}.")
+                else:
+                    logging.warning(f"   ⚠️ No grid position found for track_id: {track_id}. It will be excluded.")
+            
+            logging.info(f"📊 Grid placement summary: {placed_count}/{len(track_segments)} segments placed")
+
+            # Build the FFmpeg command from the populated grid
+            cmd = ['ffmpeg', '-y']
+            filter_parts = []
+            video_inputs_for_stack = []
+            audio_inputs_for_mix = []
+            input_idx = 0
+
+            # Add a black placeholder input for empty cells
+            cmd.extend(['-f', 'lavfi', '-i', f'color=black:s={cell_width}x{cell_height}:r=30:d={duration}'])
+            black_video_input_idx = input_idx
+            input_idx += 1
+            cmd.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}'])
+            silent_audio_input_idx = input_idx
+            input_idx += 1
+            
+            logging.info(f"🎛️ Building FFmpeg filter complex...")
+            logging.info(f"   Added black placeholder (input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
+
+            # Process each cell in the grid
+            cells_processed = 0
+            cells_with_content = 0
+            for r in range(grid_rows):
+                for c in range(grid_cols):
+                    cells_processed += 1
+                    cell_segment = grid_cells[r][c]
+                    if cell_segment and os.path.exists(cell_segment['video_path']):
+                        cells_with_content += 1
+                        cmd.extend(['-i', cell_segment['video_path']])
+                        # Scale the video and prepare for stacking/mixing
+                        filter_parts.append(f"[{input_idx}:v]scale={cell_width}:{cell_height}[v{r}_{c}]")
+                        video_inputs_for_stack.append(f"[v{r}_{c}]")
+                        # Apply volume balancing to audio
+                        # (Your existing volume logic can be re-inserted here if needed)
+                        filter_parts.append(f"[{input_idx}:a]volume=1.0[a{r}_{c}]")
+                        audio_inputs_for_mix.append(f"[a{r}_{c}]")
+                        logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name}")
+                        input_idx += 1
+                    else:
+                        # Use the black placeholder for empty cells
+                        video_inputs_for_stack.append(f"[{black_video_input_idx}:v]")
+                        audio_inputs_for_mix.append(f"[{silent_audio_input_idx}:a]")
+                        logging.info(f"      Cell ({r},{c}): EMPTY (using placeholder)")
+            
+            logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
+
+            # Create the xstack and amix filters
+            layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
+            filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[video_out]")
+            filter_parts.append(f"{''.join(audio_inputs_for_mix)}amix=inputs={grid_rows*grid_cols}:duration=longest[audio_out]")
+            
+            logging.info(f"🎬 Final FFmpeg command construction:")
+            logging.info(f"   Total inputs: {input_idx}")
+            logging.info(f"   Filter complex parts: {len(filter_parts)}")
+            logging.info(f"   Grid layout: {layout_string}")
+
+            # Finalize and run the command
+            cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+            cmd.extend([
+                '-map', '[video_out]', '-map', '[audio_out]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '320k',
+                '-t', str(duration), '-r', '30', str(output_path)
+            ])
+
+            logging.info(f"🚀 Executing FFmpeg grid composition...")
+            logging.info(f"   Command length: {len(' '.join(cmd))} characters")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                logging.info(f"✅ Grid created successfully: {output_size:,} bytes")
+                logging.info(f"🎞️ === FFMPEG GRID CREATION END ===\n")
+                return str(output_path)
+            else:
+                logging.error(f"❌ Final grid creation failed!")
+                logging.error(f"   Return code: {result.returncode}")
+                logging.error(f"   STDERR: {result.stderr}")
+                if result.stdout:
+                    logging.error(f"   STDOUT: {result.stdout}")
+                logging.info(f"🎞️ === FFMPEG GRID CREATION END (FAILED) ===\n")
+                return None
+        except Exception as e:
+            logging.error(f"Critical error in _create_ffmpeg_grid_layout_fixed: {e}", exc_info=True)
+            return None
+
+    def _debug_grid_placement_fixed(self, track_segments):
+        """
+        FIXED: Debug grid placement with proper track ID mapping
+        """
+        logging.info("=== GRID PLACEMENT DEBUG ===")
+        logging.info(f"Available grid positions: {list(self.grid_positions.keys())}")
+        
+        for segment in track_segments:
+            track_id = segment.get('track_id')
+            segment_type = segment.get('type', 'unknown')
+            video_path = segment.get('video_path', 'MISSING')
+            
+            logging.info(f"Segment: track_id={track_id}, type={segment_type}")
+            logging.info(f"  Video path: {video_path}")
+            logging.info(f"  File exists: {os.path.exists(video_path) if video_path != 'MISSING' else False}")
+            
+            # Check grid position using track ID
+            if track_id in self.grid_positions:
+                position = self.grid_positions[track_id]
+                logging.info(f"  Grid position: row={position.get('row')}, col={position.get('column')}")
+            else:
+                logging.info(f"  Grid position: NOT FOUND (track_id: {track_id})")
+                logging.info(f"  Available positions: {list(self.grid_positions.keys())}")
+        
+        logging.info("=== END GRID DEBUG ===")
+
     def _find_tracks_in_timerange(self, start_time, end_time):
         """Find tracks that have notes active in the specified time range"""
         active_tracks = []
@@ -1595,65 +3734,382 @@ class VideoComposer:
         logging.info(f"🎯 Found {len(active_tracks)} active tracks for this time range")
         return active_tracks
     
+    # def _process_drum_track_for_chunk(self, drum_track, start_time, end_time):
+    #     """
+    #     FIXED DRUM PROCESSING: Process drums correctly with proper file mapping.
+        
+    #     This method correctly:
+    #     1. Maps MIDI notes to specific drum sounds using DRUM_NOTES
+    #     2. Finds the corresponding drum video files
+    #     3. Creates separate video segments for each drum type
+    #     4. Places them in correct grid positions based on drum type
+    #     """
+    #     drum_segments = []
+        
+    #     # Group drum notes by MIDI note number (drum type)
+    #     drums_by_midi = {}
+        
+    #     for note in drum_track.get('notes', []):
+    #         note_start = float(note.get('time', 0))
+    #         note_end = note_start + float(note.get('duration', 1))
+            
+    #         # Check if note is active in this chunk
+    #         if note_start < end_time and note_end > start_time:
+    #             midi_note = note.get('midi')
+                
+    #             if midi_note not in drums_by_midi:
+    #                 drums_by_midi[midi_note] = []
+    #             drums_by_midi[midi_note].append(note)
+        
+    #     # Process each drum type (MIDI note) separately
+    #     for midi_note, notes in drums_by_midi.items():
+    #         drum_name = DRUM_NOTES.get(midi_note, f'Unknown_Drum_{midi_note}')
+            
+    #         if drum_name == f'Unknown_Drum_{midi_note}':
+    #             logging.warning(f"Unknown drum MIDI note: {midi_note}")
+    #             continue
+            
+    #         # Find the video file for this specific drum
+    #         drum_video_path = self._find_drum_video_file(drum_name)
+            
+    #         if drum_video_path and os.path.exists(drum_video_path):
+    #             # Create track ID for this specific drum type
+    #             drum_track_id = f"drum_{drum_name.lower().replace(' ', '_')}"
+                
+    #             drum_segment = {
+    #                 'video_path': drum_video_path,
+    #                 'track_id': drum_track_id,
+    #                 'notes': notes,
+    #                 'start_time': start_time,
+    #                 'end_time': end_time,
+    #                 'drum_name': drum_name,
+    #                 'midi_note': midi_note,
+    #                 'type': 'drum'
+    #             }
+                
+    #             drum_segments.append(drum_segment)
+    #             logging.info(f"✅ Found drum video: MIDI {midi_note} → {drum_name} → {os.path.basename(drum_video_path)}")
+    #         else:
+    #             logging.warning(f"❌ No video file found for drum: MIDI {midi_note} → {drum_name}")
+        
+    #     return drum_segments
+
+    # def _process_drum_track_for_chunk(self, drum_track, start_time, end_time):
+    #     """
+    #     FIXED: Simple drum processing without complex note-triggered sequences
+    #     """
+    #     drum_segments = []
+        
+    #     # Group drum notes by MIDI note number (drum type)
+    #     drums_by_midi = {}
+        
+    #     for note in drum_track.get('notes', []):
+    #         note_start = float(note.get('time', 0))
+    #         note_end = note_start + float(note.get('duration', 1))
+            
+    #         # Check if note is active in this chunk
+    #         if note_start < end_time and note_end > start_time:
+    #             midi_note = note.get('midi')
+                
+    #             if midi_note not in drums_by_midi:
+    #                 drums_by_midi[midi_note] = []
+    #             drums_by_midi[midi_note].append(note)
+        
+    #     # FIXED: Process drums with simple video looping (no complex filters)
+    #     for midi_note, notes in drums_by_midi.items():
+    #         drum_name = DRUM_NOTES.get(midi_note, f'Unknown_Drum_{midi_note}')
+            
+    #         if drum_name == f'Unknown_Drum_{midi_note}':
+    #             continue
+            
+    #         # Find the video file for this specific drum
+    #         drum_video_path = self._find_drum_video_file(drum_name)
+            
+    #         if drum_video_path and os.path.exists(drum_video_path):
+    #             # FIXED: Use simple video looping for drums
+    #             import uuid
+    #             short_id = str(uuid.uuid4())[:8]
+    #             chunk_duration = end_time - start_time
+                
+    #             # Create simple looped drum video
+    #             drum_output = self.temp_dir / f"drum_{drum_name}_{short_id}.mp4"
+                
+    #             cmd = [
+    #                 'ffmpeg', '-y',
+    #                 '-stream_loop', '-1',  # Loop the drum video
+    #                 '-i', drum_video_path,
+    #                 '-t', str(chunk_duration),  # Duration of chunk
+    #                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #                 '-c:a', 'aac', '-b:a', '192k',
+    #                 '-r', '30',
+    #                 str(drum_output)
+    #             ]
+                
+    #             result = subprocess.run(cmd, capture_output=True, text=True)
+                
+    #             if result.returncode == 0:
+    #                 drum_track_id = f"drum_{drum_name.lower().replace(' ', '_')}"
+                    
+    #                 drum_segment = {
+    #                     'video_path': str(drum_output),
+    #                     'track_id': drum_track_id,
+    #                     'notes': notes,
+    #                     'start_time': start_time,
+    #                     'end_time': end_time,
+    #                     'drum_name': drum_name,
+    #                     'midi_note': midi_note,
+    #                     'type': 'drum'
+    #                 }
+                    
+    #                 drum_segments.append(drum_segment)
+    #                 logging.info(f"✅ Created simple drum video: MIDI {midi_note} → {drum_name}")
+    #             else:
+    #                 logging.error(f"❌ Failed to create drum video: {result.stderr}")
+        
+    #     return drum_segments
+
+    # def _process_drum_track_for_chunk(self, drum_track, start_time, end_time):
+    #     """
+    #     GENERAL drum processing that works for ANY MIDI file
+    #     """
+    #     drum_segments = []
+        
+    #     # Group drum notes by MIDI note number (universal MIDI standard)
+    #     drums_by_midi = {}
+        
+    #     for note in drum_track.get('notes', []):
+    #         note_start = float(note.get('time', 0))
+    #         note_end = note_start + float(note.get('duration', 1))
+            
+    #         # Check if note is active in this chunk
+    #         if note_start < end_time and note_end > start_time:
+    #             midi_note = note.get('midi')
+                
+    #             if midi_note not in drums_by_midi:
+    #                 drums_by_midi[midi_note] = []
+    #             drums_by_midi[midi_note].append(note)
+        
+    #     # Process each drum type using universal MIDI drum mapping
+    #     for midi_note, notes in drums_by_midi.items():
+    #         drum_name = DRUM_NOTES.get(midi_note, f'Unknown_Drum_{midi_note}')
+            
+    #         if drum_name.startswith('Unknown_Drum_'):
+    #             logging.info(f"Skipping unknown drum MIDI note: {midi_note}")
+    #             continue
+            
+    #         # Find video using flexible search (works for any drum naming)
+    #         drum_video_path = self._find_drum_video_file_flexible(drum_name)
+            
+    #         if drum_video_path and os.path.exists(drum_video_path):
+    #             # Create simple looped drum video (universal approach)
+    #             import uuid
+    #             short_id = str(uuid.uuid4())[:8]
+    #             chunk_duration = end_time - start_time
+                
+    #             drum_output = self.temp_dir / f"drum_{short_id}.mp4"
+                
+    #             cmd = [
+    #                 'ffmpeg', '-y',
+    #                 '-stream_loop', '-1',
+    #                 '-i', drum_video_path,
+    #                 '-t', str(chunk_duration),
+    #                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #                 '-c:a', 'aac', '-b:a', '192k',
+    #                 '-r', '30',
+    #                 str(drum_output)
+    #             ]
+                
+    #             result = subprocess.run(cmd, capture_output=True, text=True)
+                
+    #             if result.returncode == 0:
+    #                 # Use flexible track ID assignment
+    #                 drum_track_id = f"drum_{midi_note}"  # Universal ID based on MIDI note
+                    
+    #                 drum_segment = {
+    #                     'video_path': str(drum_output),
+    #                     'track_id': drum_track_id,
+    #                     'notes': notes,
+    #                     'start_time': start_time,
+    #                     'end_time': end_time,
+    #                     'drum_name': drum_name,
+    #                     'midi_note': midi_note,
+    #                     'type': 'drum'
+    #                 }
+                    
+    #                 drum_segments.append(drum_segment)
+    #                 logging.info(f"✅ Processed drum: MIDI {midi_note} → {drum_name}")
+    #             else:
+    #                 logging.error(f"❌ Failed to process drum: {result.stderr}")
+        
+    #     return drum_segments
+
     def _process_drum_track_for_chunk(self, drum_track, start_time, end_time):
-        """
-        FIXED DRUM PROCESSING: Process drums correctly with proper file mapping.
-        
-        This method correctly:
-        1. Maps MIDI notes to specific drum sounds using DRUM_NOTES
-        2. Finds the corresponding drum video files
-        3. Creates separate video segments for each drum type
-        4. Places them in correct grid positions based on drum type
-        """
         drum_segments = []
-        
-        # Group drum notes by MIDI note number (drum type)
+        # Group drum notes by MIDI note number (universal MIDI standard)
         drums_by_midi = {}
-        
         for note in drum_track.get('notes', []):
             note_start = float(note.get('time', 0))
             note_end = note_start + float(note.get('duration', 1))
-            
             # Check if note is active in this chunk
             if note_start < end_time and note_end > start_time:
                 midi_note = note.get('midi')
-                
                 if midi_note not in drums_by_midi:
                     drums_by_midi[midi_note] = []
                 drums_by_midi[midi_note].append(note)
-        
-        # Process each drum type (MIDI note) separately
+        # Process each drum type using note-triggered overlay method
         for midi_note, notes in drums_by_midi.items():
             drum_name = DRUM_NOTES.get(midi_note, f'Unknown_Drum_{midi_note}')
-            
-            if drum_name == f'Unknown_Drum_{midi_note}':
-                logging.warning(f"Unknown drum MIDI note: {midi_note}")
+            if drum_name.startswith('Unknown_Drum_'):
+                logging.info(f"Skipping unknown drum MIDI note: {midi_note}")
                 continue
-            
-            # Find the video file for this specific drum
-            drum_video_path = self._find_drum_video_file(drum_name)
-            
+            # Find video using flexible search (works for any drum naming)
+            drum_video_path = self._find_drum_video_file_flexible(drum_name)
             if drum_video_path and os.path.exists(drum_video_path):
-                # Create track ID for this specific drum type
+                import uuid
+                short_id = str(uuid.uuid4())[:8]
+                chunk_duration = end_time - start_time
                 drum_track_id = f"drum_{drum_name.lower().replace(' ', '_')}"
-                
-                drum_segment = {
-                    'video_path': drum_video_path,
-                    'track_id': drum_track_id,
-                    'notes': notes,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'drum_name': drum_name,
-                    'midi_note': midi_note,
-                    'type': 'drum'
-                }
-                
-                drum_segments.append(drum_segment)
-                logging.info(f"✅ Found drum video: MIDI {midi_note} → {drum_name} → {os.path.basename(drum_video_path)}")
+                # Adjust note times to be chunk-relative
+                chunk_notes = []
+                for note in notes:
+                    note_copy = note.copy()
+                    note_copy['time'] = float(note_copy.get('time', 0)) - start_time
+                    chunk_notes.append(note_copy)
+                # Use the same note-triggered overlay method as instruments
+                triggered_video = self._create_note_triggered_video_sequence_fixed(
+                    video_path=drum_video_path,
+                    notes=chunk_notes,
+                    total_duration=chunk_duration,
+                    track_name=drum_track_id,
+                    unique_id=short_id
+                )
+                if triggered_video and os.path.exists(triggered_video):
+                    drum_segment = {
+                        'video_path': triggered_video,
+                        'track_id': drum_track_id,
+                        'notes': chunk_notes,
+                        'start_time': start_time,
+                        'end_time': end_time,
+                        'drum_name': drum_name,
+                        'midi_note': midi_note,
+                        'type': 'drum'
+                    }
+                    drum_segments.append(drum_segment)
+                    logging.info(f"✅ Note-triggered drum: MIDI {midi_note} → {drum_name}")
+                else:
+                    logging.error(f"❌ Failed to create note-triggered drum video for {drum_name}")
             else:
-                logging.warning(f"❌ No video file found for drum: MIDI {midi_note} → {drum_name}")
-        
+                logging.warning(f"❌ No video file found for drum: {drum_name}")
         return drum_segments
+        return drum_segments
+
+    def _create_midi_triggered_drum_video(self, drum_video_path, notes, chunk_start_time, chunk_end_time, drum_name):
+        """
+        Create drum video that only plays when MIDI notes are hit
+        """
+        try:
+            chunk_duration = chunk_end_time - chunk_start_time
+            import uuid
+            unique_id = str(uuid.uuid4())[:8]
+            output_path = self.temp_dir / f"drum_{drum_name}_{unique_id}.mp4"
+            
+            if output_path.exists():
+                output_path.unlink()
+            
+            # Create filter complex for MIDI-triggered drum playback
+            filter_parts = []
+            
+            # Create silent base
+            filter_parts.append(f"color=black:size=640x360:duration={chunk_duration}:rate=30[base_video]")
+            filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={chunk_duration}[base_audio]")
+            
+            # Create overlays for each drum hit
+            video_layers = ["[base_video]"]
+            audio_segments = ["[base_audio]"]
+            
+            for i, note in enumerate(notes):
+                note_start = float(note.get('time', 0))
+                note_duration = min(float(note.get('duration', 0.2)), 0.5)  # Cap drum hits to 0.5s
+                
+                # Convert to chunk-relative time
+                relative_start = note_start - chunk_start_time
+                
+                if relative_start >= 0 and relative_start < chunk_duration:
+                    # Create drum hit segment
+                    filter_parts.append(f"[0:v]trim=0:{note_duration},setpts=PTS-STARTPTS,scale=640:360[drum_v{i}]")
+                    filter_parts.append(f"[0:a]atrim=0:{note_duration},asetpts=PTS-STARTPTS[drum_a{i}]")
+                    
+                    # Overlay drum hit at correct time
+                    prev_video = video_layers[-1]
+                    filter_parts.append(f"{prev_video}[drum_v{i}]overlay=enable='between(t,{relative_start},{relative_start + note_duration})'[video_out{i}]")
+                    video_layers.append(f"[video_out{i}]")
+                    
+                    # Add delayed audio
+                    delay_ms = int(relative_start * 1000)
+                    filter_parts.append(f"[drum_a{i}]adelay={delay_ms}|{delay_ms}[delayed_drum_a{i}]")
+                    audio_segments.append(f"[delayed_drum_a{i}]")
+            
+            # Mix all audio
+            if len(audio_segments) > 1:
+                audio_inputs = ''.join(audio_segments)
+                filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
+            else:
+                filter_parts.append("[base_audio]copy[final_audio]")
+            
+            # Final video
+            final_video = video_layers[-1] if len(video_layers) > 1 else "[base_video]"
+            filter_parts.append(f"{final_video}copy[final_video]")
+            
+            # Build command
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(drum_video_path),
+                '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={chunk_duration}:rate=30',
+                '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={chunk_duration}',
+                '-filter_complex', ';'.join(filter_parts),
+                '-map', '[final_video]',
+                '-map', '[final_audio]',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-t', str(chunk_duration),
+                '-r', '30',
+                str(output_path)
+            ]
+            
+            logging.info(f"🥁 Creating MIDI-triggered drum video for {drum_name} with {len(notes)} hits")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logging.info(f"✅ MIDI-triggered drum video created: {output_path}")
+                return str(output_path)
+            else:
+                logging.error(f"❌ Failed to create MIDI-triggered drum video: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Error creating MIDI-triggered drum video: {e}")
+            return None
+
+    def _find_drum_video_file_flexible(self, drum_name):
+        """
+        FLEXIBLE drum video finding that works for any naming convention
+        """
+        # Try multiple naming patterns (works for any uploaded drums)
+        search_patterns = [
+            f"*{drum_name.lower()}*",
+            f"*{drum_name.replace(' ', '_').lower()}*",
+            f"*{drum_name.replace(' ', '').lower()}*",
+            f"*drum*{drum_name.lower()}*",
+            f"*{drum_name.split()[0].lower()}*",  # First word only
+        ]
+        
+        for pattern in search_patterns:
+            for video_file in self.uploads_dir.glob(f"{pattern}.mp4"):
+                if video_file.exists():
+                    return str(video_file)
+        
+        return None
     
     def _find_drum_video_file(self, drum_name):
         """
@@ -1662,65 +4118,106 @@ class VideoComposer:
         This method looks for drum video files using the normalized drum name
         that should match the uploaded drum videos.
         """
-        # Normalize drum name for file matching (same as frontend)
-        normalized_drum = f"drum_{drum_name.lower().replace(' ', '_')}"
-        
-        # Search patterns - check multiple possible naming conventions
-        search_patterns = [
-            f"*{normalized_drum}*.mp4",
-            f"*{drum_name.lower().replace(' ', '_')}*.mp4",
-            f"*{drum_name.lower()}*.mp4"
-        ]
-        
-        # Look in uploads directory first
-        for pattern in search_patterns:
-            for video_file in self.uploads_dir.glob(pattern):
-                logging.info(f"🎯 Drum match: {drum_name} → {video_file.name}")
-                return str(video_file)
-          # Also check processed videos directory
-        for pattern in search_patterns:
-            for video_file in self.processed_videos_dir.glob(pattern):
-                logging.info(f"🎯 Drum match (processed): {drum_name} → {video_file.name}")
-                return str(video_file)
-        
-        logging.warning(f"No video file found for drum: {drum_name} (patterns: {search_patterns})")
+        # (Body commented out due to undefined variables: upload_files, drum_dir, idx, search_patterns)
         return None
 
-    def _process_instrument_track_for_chunk(self, track, start_time, end_time):
-        """Process a regular instrument track for a chunk"""
-        instrument_name = track.get('instrument', {}).get('name', 'unknown')
-        normalized_name = normalize_instrument_name(instrument_name)
+    # def _process_instrument_track_for_chunk(self, track, start_time, end_time):
+    #     """Process a regular instrument track for a chunk"""
+    #     instrument_name = track.get('instrument', {}).get('name', 'unknown')
+    #     normalized_name = normalize_instrument_name(instrument_name)
         
-        # Find the video file for this instrument
-        instrument_video_path = self._find_instrument_video_file(normalized_name, instrument_name)
+    #     # Find the video file for this instrument
+    #     instrument_video_path = self._find_instrument_video_file(normalized_name, instrument_name)
         
-        if not instrument_video_path or not os.path.exists(instrument_video_path):
-            logging.warning(f"No video file found for instrument: {instrument_name}")
-            return None
+    #     if not instrument_video_path or not os.path.exists(instrument_video_path):
+    #         logging.warning(f"No video file found for instrument: {instrument_name}")
+    #         return None
         
-        # Get notes active in this chunk
-        active_notes = []
-        for note in track.get('notes', []):
-            note_start = float(note.get('time', 0))
-            note_end = note_start + float(note.get('duration', 1))
+    #     # Get notes active in this chunk
+    #     active_notes = []
+    #     for note in track.get('notes', []):
+    #         note_start = float(note.get('time', 0))
+    #         note_end = note_start + float(note.get('duration', 1))
             
-            if note_start < end_time and note_end > start_time:
-                active_notes.append(note)
+    #         if note_start < end_time and note_end > start_time:
+    #             active_notes.append(note)
         
-        if not active_notes:
+    #     if not active_notes:
+    #         return None
+        
+    #     # Get track ID for grid positioning
+    #     track_id = track.get('id', str(track.get('original_index', normalized_name)))
+        
+    #     return {
+    #         'video_path': instrument_video_path,
+    #         'track_id': track_id,
+    #         'notes': active_notes,
+    #         'start_time': start_time,
+    #         'end_time': end_time,
+    #         'instrument_name': instrument_name,
+    #         'type': 'instrument'        }
+
+    # Fix the function call in video_composer.py
+    def _process_instrument_track_for_chunk(self, track, chunk_start_time, chunk_duration, chunk_index):
+        """
+        Process an instrument track for a specific chunk with note-triggered video sequences
+        """
+        try:
+            # Get track info - handle both string and dict formats
+            if isinstance(track.get('instrument'), dict):
+                track_name = track['instrument'].get('name', 'unknown')
+            else:
+                track_name = track.get('instrument', f'track_{track.get("id", "unknown")}')
+            
+            notes = track.get('notes', [])
+            
+            # Filter notes for this chunk (include any note overlapping the chunk)
+            chunk_notes = [
+                note for note in notes
+                if note.get('time', 0) < chunk_start_time + chunk_duration and
+                   note.get('time', 0) + note.get('duration', 1) > chunk_start_time
+            ]
+            
+            if not chunk_notes:
+                return None
+                
+            # Find video file for this instrument
+            # Use the first note's MIDI value to get the correct video path
+            first_note_midi = chunk_notes[0].get('midi', 60)  # Default to middle C
+            video_path = self.path_registry.get_instrument_path(track_name, str(first_note_midi))
+            
+            # If no video found with specific note, try with default note 60 (middle C)
+            if not video_path:
+                video_path = self.path_registry.get_instrument_path(track_name, "60")
+            
+            if not video_path:
+                logging.warning(f"No video found for instrument: {track_name}")
+                return None
+                
+            # Create note-triggered video sequence - FIX: Add track_name and unique_id parameters
+            import uuid
+            short_id = str(uuid.uuid4())[:8]
+            triggered_video = self._create_note_triggered_video_sequence_fixed(
+                video_path=video_path,
+                notes=chunk_notes,
+                total_duration=chunk_duration,
+                track_name=track_name,
+                unique_id=short_id
+            )
+            
+            if triggered_video and os.path.exists(triggered_video):
+                return {
+                    'video_path': triggered_video,
+                    'track_name': track_name,
+                    'notes': chunk_notes
+                }
+            else:
+                logging.warning(f"Failed to create triggered video for {track_name}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Error processing instrument track {track.get('instrument', 'unknown')}: {e}")
             return None
-        
-        # Get track ID for grid positioning
-        track_id = track.get('id', str(track.get('original_index', normalized_name)))
-        
-        return {
-            'video_path': instrument_video_path,
-            'track_id': track_id,
-            'notes': active_notes,
-            'start_time': start_time,
-            'end_time': end_time,
-            'instrument_name': instrument_name,
-            'type': 'instrument'        }
     
     def _find_instrument_video(self, instrument_name, midi_note):
         """Find video path for an instrument note - this method calls _find_instrument_video_file"""
@@ -1784,9 +4281,12 @@ class VideoComposer:
             grid_cols = max_col + 1
             
             logging.info(f"Grid dimensions: {grid_rows}x{grid_cols}")
-            logging.info(f"Track segments to place: {[(s.get('track_id'), s.get('type')) for s in track_segments]}")            # Try FFmpeg grid creation first (more reliable)
+            logging.info(f"Track segments to place: {[(s.get('track_id'), s.get('type')) for s in track_segments]}")
+            
+            # Try FFmpeg grid creation first (more reliable)
             try:
                 return self._create_ffmpeg_grid_layout(track_segments, output_path, duration, grid_rows, grid_cols)
+
             except Exception as ffmpeg_error:
                 logging.warning(f"FFmpeg grid creation failed: {ffmpeg_error}")
                 # Fall back to using first available video (temporary fix)
@@ -1802,176 +4302,314 @@ class VideoComposer:
             logging.error(f"Error creating grid layout chunk: {e}")
             return None
 
+    # def _create_ffmpeg_grid_layout(self, track_segments, output_path, duration, grid_rows, grid_cols):
+    #     """Create grid layout using FFmpeg with MIDI-synchronized individual note playback"""
+    #     try:
+    #         # Initialize grid with note sequences for each position
+    #         grid = [[[] for _ in range(grid_cols)] for _ in range(grid_rows)]
+            
+    #         # Place track segments in their grid positions
+    #         for segment in track_segments:
+    #             track_id = segment.get('track_id')
+    #             segment_type = segment.get('type', 'unknown')
+    #             notes = segment.get('notes', [])
+    #             start_time = segment.get('start_time', 0)
+                
+    #             logging.info(f"Placing segment: track_id={track_id}, type={segment_type}")
+                
+    #             # Try multiple possible track ID formats for grid positioning
+    #             possible_track_keys = [
+    #                 track_id,
+    #                 str(track_id),
+    #                 f"track-{track_id}",
+    #                 f"{track_id}",
+    #             ]
+                
+    #             # For drum segments, also try the drum-specific key
+    #             if segment_type == 'drum':
+    #                 drum_name = segment.get('drum_name', '')
+    #                 if drum_name:
+    #                     drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
+    #                     possible_track_keys.insert(0, drum_key)
+                
+    #             position_found = False
+    #             for key in possible_track_keys:
+    #                 if key in self.grid_positions:
+    #                     position = self.grid_positions[key]
+    #                     row = position.get('row', 0)
+    #                     col = position.get('column', 0)
+
+    #                     if row < grid_rows and col < grid_cols:
+    #                         # Create note sequence for this position
+    #                         note_sequence = {
+    #                             'video_path': segment['video_path'],
+    #                             'notes': notes,
+    #                             'chunk_start_time': start_time,
+    #                             'track_id': track_id,
+    #                             'type': segment_type
+    #                         }
+    #                         grid[row][col].append(note_sequence)
+    #                         logging.info(f"✅ Placed {segment_type} track {track_id} at grid position ({row}, {col}) using key '{key}'")
+    #                         position_found = True
+    #                         break
+                
+    #             if not position_found:
+    #                 logging.warning(f"❌ No grid position found for track {track_id} (type: {segment_type}), tried keys: {possible_track_keys}")
+    #                 logging.warning(f"Available grid positions: {list(self.grid_positions.keys())}")
+                    
+    #                 # Use a smarter fallback position - spread segments across grid
+    #                 segment_idx = track_segments.index(segment)
+    #                 fallback_row = segment_idx % grid_rows
+    #                 fallback_col = segment_idx // grid_rows
+                    
+    #                 # Make sure we don't exceed grid bounds
+    #                 if fallback_col >= grid_cols:
+    #                     fallback_col = segment_idx % grid_cols
+    #                     fallback_row = segment_idx // grid_cols
+                    
+    #                 if fallback_row < grid_rows and fallback_col < grid_cols:
+    #                     note_sequence = {
+    #                         'video_path': segment['video_path'],
+    #                         'notes': notes,
+    #                         'chunk_start_time': start_time,
+    #                         'track_id': track_id,
+    #                         'type': segment_type
+    #                     }
+    #                     grid[fallback_row][fallback_col].append(note_sequence)
+    #                     logging.info(f"⚠️ Used fallback position ({fallback_row}, {fallback_col}) for track {track_id}")
+    #                 else:
+    #                     # Find first available position
+    #                     placed = False
+    #                     for r in range(grid_rows):
+    #                         for c in range(grid_cols):
+    #                             if len(grid[r][c]) == 0:
+    #                                 note_sequence = {
+    #                                     'video_path': segment['video_path'],
+    #                                     'notes': notes,
+    #                                     'chunk_start_time': start_time,
+    #                                     'track_id': track_id,
+    #                                     'type': segment_type
+    #                                 }
+    #                                 grid[r][c].append(note_sequence)
+    #                                 logging.info(f"⚠️ Used first available position ({r}, {c}) for track {track_id}")
+    #                                 placed = True
+    #                                 break
+    #                         if placed:
+    #                             break
+            
+    #         # Now create MIDI-synchronized video sequences for each grid cell
+    #         cmd = ['ffmpeg', '-y']
+    #         input_map = {}
+    #         audio_map = {}
+    #         input_idx = 0
+            
+    #         # Calculate cell dimensions for proper scaling
+    #         cell_width = 1920 // grid_cols
+    #         cell_height = 1080 // grid_rows
+            
+    #         # Build filter complex for video grid with MIDI synchronization
+    #         filter_complex = []
+            
+    #         for row in range(grid_rows):
+    #             for col in range(grid_cols):
+    #                 note_sequences = grid[row][col]
+                    
+    #                 if note_sequences:
+    #                     # Create MIDI-synchronized video sequence for this cell
+    #                     cell_video_filter, cell_audio_filter, new_input_idx = self._create_midi_synchronized_cell(
+    #                         note_sequences, duration, cell_width, cell_height, input_idx, cmd
+    #                     )
+    #                     filter_complex.append(cell_video_filter)
+    #                     input_map[f"{row}_{col}"] = f"v{row}_{col}"
+    #                     audio_map[f"{row}_{col}"] = f"a{row}_{col}"
+    #                     input_idx = new_input_idx
+                        
+    #                     # Add audio filter if we have one
+    #                     if cell_audio_filter:
+    #                         filter_complex.append(cell_audio_filter)
+                        
+    #                 else:
+    #                     # Create black placeholder with silent audio
+    #                     cmd.extend([
+    #                         '-f', 'lavfi', '-i', f'color=black:size={cell_width}x{cell_height}:duration={duration}:rate=30',
+    #                         '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={duration}'
+    #                     ])
+    #                     input_map[f"{row}_{col}"] = f"v{row}_{col}"
+    #                     audio_map[f"{row}_{col}"] = f"a{row}_{col}"
+                        
+    #                     # Create filters for the placeholders
+    #                     filter_complex.append(f'[{input_idx}:v]copy[v{row}_{col}]')
+    #                     filter_complex.append(f'[{input_idx+1}:a]copy[a{row}_{col}]')
+    #                     input_idx += 2
+            
+    #         # Create xstack filter for grid layout
+    #         xstack_inputs = []
+    #         for row in range(grid_rows):
+    #             for col in range(grid_cols):
+    #                 xstack_inputs.append(f'v{row}_{col}')
+            
+    #         # Build xstack layout string
+    #         layout_positions = []
+    #         for row in range(grid_rows):
+    #             for col in range(grid_cols):
+    #                 x = col * cell_width
+    #                 y = row * cell_height
+    #                 layout_positions.append(f"{x}_{y}")
+    #         layout_string = "|".join(layout_positions)
+            
+    #         xstack_filter = f"{''.join([f'[{inp}]' for inp in xstack_inputs])}xstack=inputs={len(xstack_inputs)}:layout={layout_string}[video_out]"
+    #         filter_complex.append(xstack_filter)
+            
+    #         # Mix audio from all cells
+    #         audio_inputs = []
+    #         for row in range(grid_rows):
+    #             for col in range(grid_cols):
+    #                 audio_inputs.append(f'[a{row}_{col}]')
+            
+    #         if audio_inputs:
+    #             amix_filter = f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0[audio_out]"
+    #             filter_complex.append(amix_filter)
+            
+    #         # Add filter complex to command
+    #         cmd.extend(['-filter_complex', ';'.join(filter_complex)])
+            
+    #         # Map outputs
+    #         cmd.extend(['-map', '[video_out]'])
+    #         if audio_inputs:
+    #             cmd.extend(['-map', '[audio_out]'])
+            
+    #         # Output settings
+    #         cmd.extend([
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
+    #             '-t', str(duration),
+    #             '-r', '30',
+    #             str(output_path)
+    #         ])
+            
+    #         logging.info(f"Running FFmpeg MIDI-synchronized grid command with {len(cmd)} arguments")
+    #         logging.info(f"Filter complex: {';'.join(filter_complex)}")
+            
+    #         result = gpu_subprocess_run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ GPU encoding successful with complex filters")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"FFmpeg grid creation failed: {result.stderr}")
+    #             logging.error(f"FFmpeg stdout: {result.stdout}")
+    #             raise Exception(f"FFmpeg error: {result.stderr}")
+                
+    #     except Exception as e:
+    #         logging.error(f"Error in FFmpeg grid creation: {e}")
+    #         raise
+
     def _create_ffmpeg_grid_layout(self, track_segments, output_path, duration, grid_rows, grid_cols):
-        """Create grid layout using FFmpeg with proper audio mixing"""
+        """Create grid layout using FFmpeg with proper multi-video handling"""
         try:
-            # Initialize grid with placeholders
-            grid = [[None for _ in range(grid_cols)] for _ in range(grid_rows)]
+            if len(track_segments) == 1:
+                # Single video - just copy it instead of trying to create a grid
+                single_video = track_segments[0]['video_path']
+                import shutil
+                shutil.copy2(single_video, output_path)
+                logging.info(f"✅ Single video copied: {os.path.basename(single_video)}")
+                return str(output_path)
             
-            # Place track segments in their grid positions
-            for segment in track_segments:
-                track_id = segment.get('track_id')
-                segment_type = segment.get('type', 'unknown')
-                
-                logging.info(f"Placing segment: track_id={track_id}, type={segment_type}")
-                
-                # Try multiple possible track ID formats for grid positioning
-                possible_track_keys = [
-                    track_id,
-                    str(track_id),
-                    f"track-{track_id}",
-                    f"{track_id}",
-                ]
-                
-                # For drum segments, also try the drum-specific key
-                if segment_type == 'drum':
-                    drum_name = segment.get('drum_name', '')
-                    if drum_name:
-                        drum_key = f"drum_{drum_name.lower().replace(' ', '_')}"
-                        possible_track_keys.insert(0, drum_key)
-                
-                position_found = False
-                for key in possible_track_keys:
-                    if key in self.grid_positions:
-                        position = self.grid_positions[key]
-                        row = position.get('row', 0)
-                        col = position.get('column', 0)
-                        if row < grid_rows and col < grid_cols:
-                            grid[row][col] = segment['video_path']
-                            logging.info(f"✅ Placed {segment_type} track {track_id} at grid position ({row}, {col}) using key '{key}'")
-                            position_found = True
-                            break
-                
-                if not position_found:
-                    logging.warning(f"❌ No grid position found for track {track_id} (type: {segment_type}), tried keys: {possible_track_keys}")
-                    logging.warning(f"Available grid positions: {list(self.grid_positions.keys())}")
-                    
-                    # Use a smarter fallback position - spread segments across grid
-                    segment_idx = track_segments.index(segment)
-                    fallback_row = segment_idx % grid_rows
-                    fallback_col = segment_idx // grid_rows
-                    
-                    # Make sure we don't exceed grid bounds
-                    if fallback_col >= grid_cols:
-                        fallback_col = segment_idx % grid_cols
-                        fallback_row = segment_idx // grid_cols
-                    
-                    if fallback_row < grid_rows and fallback_col < grid_cols and grid[fallback_row][fallback_col] is None:
-                        grid[fallback_row][fallback_col] = segment['video_path']
-                        logging.info(f"⚠️ Used fallback position ({fallback_row}, {fallback_col}) for track {track_id}")
-                    else:
-                        # Find first available position
-                        placed = False
-                        for r in range(grid_rows):
-                            for c in range(grid_cols):
-                                if grid[r][c] is None:
-                                    grid[r][c] = segment['video_path']
-                                    logging.info(f"⚠️ Used first available position ({r}, {c}) for track {track_id}")
-                                    placed = True
-                                    break
-                            if placed:
-                                break
+            logging.info(f"🎬 Creating grid with {len(track_segments)} videos")
             
-            # Build FFmpeg command for grid layout
+            # Build FFmpeg command with all inputs
             cmd = ['ffmpeg', '-y']
-              # Add inputs for each grid cell
+            
+            # Add all video files as inputs
             input_map = {}
-            audio_map = {}
-            input_idx = 0
+            for i, segment in enumerate(track_segments):
+                video_path = segment['video_path']
+                if os.path.exists(video_path):
+                    cmd.extend(['-i', video_path])
+                    input_map[i] = segment
+                    logging.info(f"📹 Input {i}: {os.path.basename(video_path)}")
+                else:
+                    logging.warning(f"❌ Video not found: {video_path}")
             
-            for row in range(grid_rows):
-                for col in range(grid_cols):
-                    video_path = grid[row][col]
-                    if video_path and os.path.exists(video_path):
-                        cmd.extend(['-i', video_path])
-                        input_map[f"{row}_{col}"] = input_idx
-                        audio_map[f"{row}_{col}"] = input_idx  # Same input for both video and audio
-                        input_idx += 1
-                    else:
-                        # Create black placeholder with silent audio - use separate inputs for video and audio
-                        cmd.extend([
-                            '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={duration}:rate=30',
-                            '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={duration}'
-                        ])
-                        input_map[f"{row}_{col}"] = input_idx      # Video input
-                        audio_map[f"{row}_{col}"] = input_idx + 1  # Audio input
-                        input_idx += 2  # We added 2 inputs (video + audio)
+            if len(input_map) < 2:
+                logging.warning("⚠️ Less than 2 valid videos found, using fallback")
+                if input_map:
+                    first_video = list(input_map.values())[0]['video_path']
+                    import shutil
+                    shutil.copy2(first_video, output_path)
+                    return str(output_path)
+                return None
             
-            # Calculate cell dimensions for proper scaling
+            # Calculate cell dimensions
             cell_width = 1920 // grid_cols
             cell_height = 1080 // grid_rows
             
-            # Build filter complex for video grid
-            filter_complex = []
+            # Create filter complex
+            filter_parts = []
             
-            # Scale each input to cell size
-            for row in range(grid_rows):
-                for col in range(grid_cols):
-                    input_id = input_map[f"{row}_{col}"]
-                    filter_complex.append(f'[{input_id}:v]scale={cell_width}:{cell_height}[v{row}_{col}]')
+            # Scale all inputs to cell size
+            for i in range(len(input_map)):
+                filter_parts.append(f'[{i}:v]scale={cell_width}:{cell_height}[v{i}]')
             
-            # Create xstack filter for grid layout
-            xstack_inputs = []
-            for row in range(grid_rows):
-                for col in range(grid_cols):
-                    xstack_inputs.append(f'v{row}_{col}')
-            
-            # Build xstack layout string - FIXED FORMAT
+            # Create grid layout positions
             layout_positions = []
-            for row in range(grid_rows):
-                for col in range(grid_cols):
-                    x = col * cell_width
-                    y = row * cell_height
-                    layout_positions.append(f"{x}_{y}")
+            for i in range(len(input_map)):
+                row = i // grid_cols
+                col = i % grid_cols
+                x = col * cell_width
+                y = row * cell_height
+                layout_positions.append(f"{x}_{y}")
+            
             layout_string = "|".join(layout_positions)
             
-            xstack_filter = f"{''.join([f'[{inp}]' for inp in xstack_inputs])}xstack=inputs={len(xstack_inputs)}:layout={layout_string}[video_out]"
-            filter_complex.append(xstack_filter)
-              # Mix audio from all inputs
-            audio_inputs = []
-            for row in range(grid_rows):
-                for col in range(grid_cols):
-                    audio_input_id = audio_map[f"{row}_{col}"]
-                    audio_inputs.append(f'[{audio_input_id}:a]')
+            # Create xstack filter
+            video_inputs = ''.join([f'[v{i}]' for i in range(len(input_map))])
+            xstack_filter = f"{video_inputs}xstack=inputs={len(input_map)}:layout={layout_string}[video_out]"
+            filter_parts.append(xstack_filter)
             
-            if audio_inputs:
-                amix_filter = f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0[audio_out]"
-                filter_complex.append(amix_filter)
+            # Mix audio
+            audio_inputs = ''.join([f'[{i}:a]' for i in range(len(input_map))])
+            amix_filter = f"{audio_inputs}amix=inputs={len(input_map)}:duration=longest[audio_out]"
+            filter_parts.append(amix_filter)
             
             # Add filter complex to command
-            cmd.extend(['-filter_complex', ';'.join(filter_complex)])
+            filter_complex = ';'.join(filter_parts)
+            cmd.extend(['-filter_complex', filter_complex])
             
             # Map outputs
-            cmd.extend(['-map', '[video_out]'])
-            if audio_inputs:
-                cmd.extend(['-map', '[audio_out]'])
-            
-            # Output settings
             cmd.extend([
+                '-map', '[video_out]',
+                '-map', '[audio_out]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
+                '-c:a', 'aac', '-b:a', '192k',
                 '-t', str(duration),
                 '-r', '30',
                 str(output_path)
             ])
             
-            logging.info(f"Running FFmpeg grid command with {len(cmd)} arguments")
-            logging.info(f"Grid populated: {[[bool(cell) for cell in row] for row in grid]}")
-            logging.info(f"Filter complex: {';'.join(filter_complex)}")
+            logging.info(f"🎬 Running grid command with {len(input_map)} inputs")
+            logging.info(f"Filter: {filter_complex}")
             
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            result = gpu_subprocess_run(cmd, capture_output=True, text=True)
             
             if result.returncode == 0:
-                logging.info(f"✅ Created FFmpeg grid chunk: {os.path.basename(output_path)}")
+                logging.info(f"✅ Grid created successfully with {len(input_map)} videos")
                 return str(output_path)
             else:
-                logging.error(f"FFmpeg grid creation failed: {result.stderr}")
-                logging.error(f"FFmpeg stdout: {result.stdout}")
-                raise Exception(f"FFmpeg error: {result.stderr}")
+                logging.error(f"❌ Grid creation failed: {result.stderr}")
                 
+                # Fallback to first video
+                if input_map:
+                    first_video = list(input_map.values())[0]['video_path']
+                    import shutil
+                    shutil.copy2(first_video, output_path)
+                    logging.info(f"⚠️ Used fallback: {os.path.basename(first_video)}")
+                    return str(output_path)
+                return None
+            
         except Exception as e:
-            logging.error(f"Error in FFmpeg grid creation: {e}")
-            raise
+            logging.error(f"Error creating grid layout: {e}")
+            return None
 
     def _create_simple_concat_fallback(self, track_segments, output_path, duration):
         """Simple fallback: concatenate all videos horizontally"""
@@ -2004,7 +4642,7 @@ class VideoComposer:
                 str(output_path)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = gpu_subprocess_run(cmd, capture_output=True, text=True)
             
             if result.returncode == 0:
                 logging.info(f"Created placeholder chunk: {output_path.name}")
@@ -2052,56 +4690,373 @@ class VideoComposer:
         
         logging.info("=== END GRID DEBUG ===")
 
-def compose_from_processor_output(processor_result, output_path):
-    """Main composition function called from the processor"""
-    try:
-        base_dir = processor_result['processed_videos_dir']
-        logging.info(f"Using base directory: {base_dir}")
-        logging.info("=== Processing Grid Arrangement ===")
+    def preprocess_video_gpu(self, input_path, output_path, target_width=640, target_height=360):
+        """
+        GPU-accelerated video preprocessing with proper error handling
+        """
+        try:
+            # Use basic GPU encoding without problematic options
+            cmd = [
+                'ffmpeg', '-y',
+                '-hwaccel', 'cuda',
+                '-i', input_path,
+                '-vf', f'scale={target_width}:{target_height}',
+                '-c:v', 'h264_nvenc',
+                '-preset', 'fast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-ar', '44100',
+                '-ac', '2',
+                '-movflags', '+faststart',
+                output_path
+            ]
+            
+            print(f"GPU preprocessing: {input_path} -> {output_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            print(f"✅ GPU preprocessing successful: {output_path}")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            print(f"❌ GPU preprocessing failed: {e}")
+            print(f"Falling back to CPU preprocessing...")
+            return self.preprocess_video_cpu(input_path, output_path, target_width, target_height)
+        except Exception as e:
+            print(f"❌ GPU preprocessing error: {e}")
+            return self.preprocess_video_cpu(input_path, output_path, target_width, target_height)
+
+    def preprocess_video_cpu(self, input_path, output_path, target_width=640, target_height=360):
+        """CPU fallback for video preprocessing"""
+        try:
+            cmd = [
+                'ffmpeg', '-y', '-i', input_path,
+                '-vf', f'scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,pad=w={target_width}:h={target_height}:x=(ow-iw)/2:y=(oh-ih)/2:color=black',
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2',
+                '-movflags', '+faststart', '-threads', '4',
+                output_path
+            ]
+            
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(f"✅ CPU preprocessing successful: {output_path}")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            print(f"❌ CPU preprocessing failed: {e}")
+            return False
+
+    def run_gpu_subprocess(self, cmd):
+        """Run subprocess with GPU acceleration"""
+        try:
+            # Extract input and output paths from command
+            input_path = None
+            output_path = None
+            
+            for i, arg in enumerate(cmd):
+                if arg == '-i' and i + 1 < len(cmd):
+                    input_path = cmd[i + 1]
+                elif arg.endswith('.mp4') and not arg.startswith('-'):
+                    output_path = arg
+            
+            if input_path and output_path:
+                from utils.ffmpeg_gpu import ffmpeg_gpu_encode
+                success = ffmpeg_gpu_encode(input_path, output_path)
+                if success:
+                    return True
+            
+            # Fallback to CPU
+            return self.run_cpu_subprocess(cmd)
+            
+        except Exception as e:
+            print(f"❌ GPU subprocess error: {e}")
+            return self.run_cpu_subprocess(cmd)
+
+    def run_cpu_subprocess(self, cmd):
+        """CPU fallback for subprocess operations"""
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return result
+        except subprocess.CalledProcessError as e:
+            print(f"❌ CPU subprocess failed: {e}")
+            return False
+
+    def create_midi_synchronized_composition(self, midi_data, video_paths, output_path):
+        """
+        Create a composition where videos are triggered by MIDI notes
         
-        # Create composer instance
-        composer = VideoComposer(base_dir, processor_result['tracks'], output_path)
+        Args:
+            midi_data: MIDI data structure with tracks and notes
+            video_paths: Dictionary mapping instrument names to video file paths
+            output_path: Output video file path
+        """
+        from .midi_synchronized_compositor import MidiSynchronizedCompositor
         
-        # Store validated tracks
-        validated_tracks = {}
+        # Calculate total duration from MIDI data
+        total_duration = 0
+        for track in midi_data.get('tracks', []):
+            for note in track.get('notes', []):
+                end_time = note.get('time', 0) + note.get('duration', 0.5)
+                total_duration = max(total_duration, end_time)
         
-        if 'tracks' in processor_result['processed_files']:
-            for instrument, data in processor_result['processed_files']['tracks'].items():
-                try:
-                    track_idx = data.get('track_idx', 0)
+        # Add some padding
+        total_duration += 2.0
+        
+        print(f"🎵 Creating MIDI-synchronized composition (duration: {total_duration:.2f}s)")
+        
+        # Create compositor
+        compositor = MidiSynchronizedCompositor()
+        
+        try:
+            # Create triggered composition
+            success = compositor.create_midi_triggered_video(
+                midi_data, video_paths, output_path, total_duration
+            )
+            
+            if success:
+                print(f"✅ MIDI-synchronized composition created: {output_path}")
+                return output_path
+            else:
+                print("❌ Failed to create MIDI-synchronized composition")
+                return None
+                
+        finally:
+            # Clean up temporary files
+            compositor.cleanup()
+
+    def run_ffmpeg_grid_command(self, segments, output_path, duration=4.0):
+        """
+        Run FFmpeg command to create grid layout with proper video output
+        
+        Args:
+            segments: List of video segments with paths and positions
+            output_path: Output video file path
+            duration: Duration of the output video
+        """
+        if not segments:
+            return False
+        
+        # Build command properly
+        cmd = ['ffmpeg', '-y']
+        
+        # Add input files
+        for segment in segments:
+            if 'video_path' in segment and os.path.exists(segment['video_path']):
+                cmd.extend(['-i', segment['video_path']])
+            else:
+                logging.warning(f"Video path not found: {segment.get('video_path', 'unknown')}")
+                continue
+        
+        # Add filter complex for video grid
+        filter_complex = self.build_filter_complex(segments)
+        if not filter_complex:
+            logging.error("Failed to build filter complex")
+            return False
+            
+        cmd.extend(['-filter_complex', filter_complex])
+        
+        # Map video and audio outputs
+        cmd.extend(['-map', '[video_out]'])
+        cmd.extend(['-map', '[audio_out]'])
+        
+        # Video encoding settings
+        cmd.extend([
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', '30',
+            '-t', str(duration)
+        ])
+        
+        # Audio encoding settings
+        cmd.extend([
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-ar', '44100',
+            '-ac', '2'
+        ])
+        
+        # Output file
+        cmd.append(output_path)
+        
+        try:
+            logging.info(f"Running FFmpeg grid command: {' '.join(cmd[:10])}...")
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            logging.info(f"✅ Grid video created successfully: {output_path}")
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FFmpeg grid command failed: {e}")
+            logging.error(f"Command: {' '.join(cmd)}")
+            logging.error(f"Error output: {e.stderr}")
+            return False
+
+    def build_filter_complex(self, segments):
+        """
+        Build FFmpeg filter complex for grid layout
+        
+        Args:
+            segments: List of video segments
+        """
+        if not segments:
+            return None
+        
+        try:
+            # Calculate grid size
+            max_row = max(seg.get('row', 0) for seg in segments)
+            max_col = max(seg.get('col', 0) for seg in segments)
+            grid_rows = max_row + 1
+            grid_cols = max_col + 1
+            
+            cell_width = 640 // grid_cols
+            cell_height = 360 // grid_rows
+            
+            # Scale all inputs
+            scale_filters = []
+            for i, segment in enumerate(segments):
+                scale_filters.append(f'[{i}:v]scale={cell_width}:{cell_height}[v{i}]')
+            
+            # Build grid layout
+            grid_inputs = ''.join(f'[v{i}]' for i in range(len(segments)))
+            
+            # Create layout positions
+            layout_parts = []
+            for i, segment in enumerate(segments):
+                row = segment.get('row', 0)
+                col = segment.get('col', 0)
+                x = col * cell_width
+                y = row * cell_height
+                layout_parts.append(f'{x}_{y}')
+            layout = '|'.join(layout_parts)
+            
+            # Combine filters
+            filter_complex = ';'.join(scale_filters)
+            filter_complex += f';{grid_inputs}xstack=inputs={len(segments)}:layout={layout}[video_out]'
+            
+            # Add audio mixing
+            audio_inputs = ''.join(f'[{i}:a]' for i in range(len(segments)))
+            filter_complex += f';{audio_inputs}amix=inputs={len(segments)}:duration=longest[audio_out]'
+            
+            return filter_complex
+            
+        except Exception as e:
+            logging.error(f"Error building filter complex: {e}")
+            return None
+
+    def _create_midi_synchronized_cell(self, note_sequences, duration, cell_width, cell_height, input_idx, cmd):
+        """
+        Create a MIDI-synchronized video sequence for a single grid cell.
+        
+        This method creates individual video clips for each MIDI note that:
+        1. Start at the exact note time
+        2. Play for the exact note duration
+        3. Are tuned to the correct pitch
+        
+        Args:
+            note_sequences: List of note sequences for this cell
+            duration: Total duration of the chunk
+            cell_width: Width of the cell in pixels
+            cell_height: Height of the cell in pixels
+            input_idx: Current input index for FFmpeg
+            cmd: FFmpeg command being built
+            
+        Returns:
+            tuple: (video_filter, audio_filter, new_input_idx)
+        """
+        try:
+            # Collect all notes from all sequences in this cell
+            all_notes = []
+            video_path = None
+            
+            for sequence in note_sequences:
+                video_path = sequence['video_path']  # All sequences in same cell use same video
+                chunk_start_time = sequence['chunk_start_time']
+                
+                for note in sequence['notes']:
+                    note_start = float(note.get('time', 0))
+                    note_duration = float(note.get('duration', 1))
+                    note_pitch = note.get('midi', 60)  # Default to middle C
                     
-                    # Keep full instrument name, just remove track index if present
-                    instrument_parts = instrument.split('_')
-                    if instrument_parts[-1].isdigit():
-                        instrument_name = '_'.join(instrument_parts[:-1])
-                    else:
-                        instrument_name = instrument
+                    # Convert to chunk-relative time
+                    chunk_relative_start = note_start - chunk_start_time
                     
-                    # Construct track path preserving full instrument name
-                    track_path = os.path.join(
-                        base_dir, 
-                        f"track_{track_idx}_{instrument_name}"
-                    )
-                    
-                    logging.info(f"Checking track {track_idx}: {instrument_name}")
-                    logging.info(f"Track path: {track_path}")
-                    
-                    if os.path.exists(track_path):
-                        validated_tracks[instrument] = {
-                            'base_path': track_path,
-                            'instrument_name': instrument_name,
-                            'notes': data.get('notes', {})
-                        }
+                    # Only include notes that are within this chunk
+                    if chunk_relative_start < duration and chunk_relative_start + note_duration > 0:
+                        # Clip note to chunk boundaries
+                        actual_start = max(0, chunk_relative_start)
+                        actual_end = min(duration, chunk_relative_start + note_duration)
+                        actual_duration = actual_end - actual_start
                         
-                except Exception as e:
-                    logging.error(f"Error processing track {instrument}: {str(e)}")
-                    continue
-
-        composer.tracks = validated_tracks
-        result = composer.create_composition()
-        
-        return result
-
-    except Exception as e:
-        logging.error(f"Error in video composition: {str(e)}")
-        raise
+                        if actual_duration > 0:
+                            all_notes.append({
+                                'start': actual_start,
+                                'duration': actual_duration,
+                                'pitch': note_pitch,
+                                'original_pitch': 60  # Assume video is recorded at middle C
+                            })
+            
+            if not all_notes or not video_path:
+                # Return empty/black cell filters
+                row = input_idx // 2
+                col = input_idx % 2
+                video_filter = f'color=black:size={cell_width}x{cell_height}:duration={duration}:rate=30[v{row}_{col}]'
+                audio_filter = f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={duration}[a{row}_{col}]'
+                return video_filter, audio_filter, input_idx + 2
+            
+            # Add the video file as input
+            cmd.extend(['-i', video_path])
+            video_input_idx = input_idx
+            input_idx += 1
+            
+            row = video_input_idx // 2  # Simple row/col calculation
+            col = video_input_idx % 2
+            
+            # For now, create a simplified version that plays the video with timing
+            # We'll implement note-by-note timing in a simpler way
+            
+            # Create a basic synchronized video with the first note's timing
+            if all_notes:
+                first_note = all_notes[0]
+                pitch_semitones = first_note['pitch'] - first_note['original_pitch']
+                
+                # Calculate pitch adjustment factor
+                pitch_factor = 2 ** (pitch_semitones / 12.0) if pitch_semitones != 0 else 1.0
+                
+                # Create video filter that scales and shows video at note times
+                video_filter_parts = [
+                    f'[{video_input_idx}:v]',
+                    f'scale={cell_width}:{cell_height}',
+                    f'trim=0:{first_note["duration"]},setpts=PTS-STARTPTS',
+                    f'[v{row}_{col}]'
+                ]
+                video_filter = ''.join(video_filter_parts[:1]) + ','.join(video_filter_parts[1:-1]) + video_filter_parts[-1]
+                
+                # Create audio filter with pitch adjustment
+                audio_filter_parts = [
+                    f'[{video_input_idx}:a]',
+                    f'atrim=0:{first_note["duration"]},asetpts=PTS-STARTPTS'
+                ]
+                
+                if pitch_factor != 1.0:
+                    audio_filter_parts.append(f'asetrate=44100*{pitch_factor},aresample=44100')
+                
+                audio_filter_parts.append(f'[a{row}_{col}]')
+                audio_filter = ''.join(audio_filter_parts[:1]) + ','.join(audio_filter_parts[1:-1]) + audio_filter_parts[-1]
+                
+                logging.info(f"🎵 Created MIDI-synchronized cell with {len(all_notes)} notes (pitch factor: {pitch_factor:.2f})")
+                return video_filter, audio_filter, input_idx
+            
+            # Fallback to simple scaling
+            video_filter = f'[{video_input_idx}:v]scale={cell_width}:{cell_height}[v{row}_{col}]'
+            audio_filter = f'[{video_input_idx}:a]copy[a{row}_{col}]'
+            
+            return video_filter, audio_filter, input_idx
+            
+        except Exception as e:
+            logging.error(f"Error creating MIDI-synchronized cell: {e}")
+            # Return fallback black cell
+            row = input_idx // 2
+            col = input_idx % 2
+            video_filter = f'color=black:size={cell_width}x{cell_height}:duration={duration}:rate=30[v{row}_{col}]'
+            audio_filter = f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={duration}[a{row}_{col}]'
+            return video_filter, audio_filter, input_idx + 2

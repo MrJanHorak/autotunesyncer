@@ -14,8 +14,9 @@ from typing import Dict, List, Optional, Any
 
 # Add backend to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent))
 
-from utils.video_composer_wrapper import VideoComposerWrapper
+from video_composer_wrapper import VideoComposerWrapper
 
 # Configure logging without Unicode characters to prevent Windows CP1252 encoding errors
 logging.basicConfig(
