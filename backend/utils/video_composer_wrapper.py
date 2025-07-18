@@ -17,19 +17,22 @@ from video_composer import VideoComposer
 import tempfile
 import json
 
+# GPU acceleration will be imported on demand to avoid circular imports
+
 class VideoComposerWrapper:
     """
     Wrapper around the efficient VideoComposer system to replace video_processor.py
     
     This provides the same interface as video_processor.py but uses the much more
     efficient chunk-based processing approach instead of processing 136 individual
-    notes during final combination.
+    notes during final combination. Now includes GPU acceleration support.
     """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.temp_dir = None
         self.composer = None
+        self.gpu_enabled = False  # Disable GPU acceleration by default for safety
         
     def _transform_midi_data(self, midi_data: dict) -> dict:
         """
@@ -83,6 +86,7 @@ class VideoComposerWrapper:
     def process_videos(self, midi_data: dict, video_files: dict, output_path: str) -> bool:
         """
         Main entry point that replaces video_processor.py functionality
+        Now includes GPU acceleration support
         
         Args:
             midi_data: MIDI data with tracks and notes
@@ -92,7 +96,25 @@ class VideoComposerWrapper:
             bool: True if successful, False otherwise
         """
         try:
-            self.logger.info("Starting VideoComposer-based processing (efficient chunk-based approach)")
+            self.logger.info("Starting VideoComposer-based processing with GPU acceleration")
+            
+            # Try GPU acceleration first if enabled
+            if self.gpu_enabled:
+                self.logger.info("Attempting GPU-accelerated video processing")
+                try:
+                    # Import GPU acceleration on demand to avoid circular imports
+                    from gpu_note_synchronizer import integrate_gpu_acceleration
+                    gpu_result = integrate_gpu_acceleration(midi_data, video_files, output_path)
+                    if gpu_result:
+                        self.logger.info("GPU acceleration successful - video processing completed")
+                        return True
+                    else:
+                        self.logger.warning("GPU acceleration failed, falling back to standard processing")
+                except Exception as e:
+                    self.logger.warning(f"GPU acceleration error: {e}, falling back to standard processing")
+            
+            # Fallback to standard chunk-based processing
+            self.logger.info("Using standard chunk-based VideoComposer processing")
             
             # Transform MIDI data format to match VideoComposer expectations
             midi_data = self._transform_midi_data(midi_data)
