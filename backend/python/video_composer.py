@@ -2416,33 +2416,18 @@ class VideoComposer:
             logging.info(f"   - Instrument segments: {len(instrument_segments)}")
             logging.info(f"   - Drum segments: {len(drum_segments)}")
 
-            # Consolidate all collected drum segments into ONE video
-            final_segments_for_grid = instrument_segments
-            logging.info(f"🥁 Consolidating {len(drum_segments)} drum segments...")
-            consolidated_drum_video_path = self._consolidate_drum_segments(drum_segments, chunk_duration, chunk_idx)
-
-            if consolidated_drum_video_path and drum_track_info:
-                # Get the track ID of the main drum track for grid positioning
-                drum_track_id = drum_track_info.get('id', drum_track_info.get('original_index', 'drums'))
-                
-                # Add the single, consolidated drum video as a segment for the final grid
-                final_segments_for_grid.append({
-                    'video_path': consolidated_drum_video_path,
-                    'track_id': drum_track_id,
-                    'track_name': 'Drums',
-                    'type': 'consolidated_drum'
-                })
-                logging.info(f"✅ Drums consolidated into single video for grid positioning")
-            elif drum_segments:
-                logging.warning(f"⚠️ Had {len(drum_segments)} drum segments but consolidation failed")
+            final_segments_for_grid = instrument_segments + drum_segments
+            logging.info("✅ Treating all drum parts as individual instruments for the grid.")
+            # --- END OF FIX ---
 
             logging.info(f"🎬 Final grid composition for chunk {chunk_idx}:")
             logging.info(f"   - Total segments for grid: {len(final_segments_for_grid)}")
-            for i, seg in enumerate(final_segments_for_grid):
-                seg_type = seg.get('type', 'unknown')
-                track_id = seg.get('track_id', 'unknown')
-                video_path = seg.get('video_path', 'missing')
-                logging.info(f"   {i+1}. {seg_type} (Track ID: {track_id}) - {Path(video_path).name if video_path != 'missing' else 'MISSING'}")
+            for i, segment in enumerate(final_segments_for_grid):
+                track_id = segment.get('track_id', 'N/A')
+                # Use 'instrument_name' for instruments and 'drum_name' for drums
+                name = segment.get('instrument_name') or segment.get('drum_name', 'N/A')
+                video_path = os.path.basename(segment.get('video_path', 'N/A'))
+                logging.info(f"   {i+1}. {segment['type']} (Track ID: {track_id}) - {name} - {video_path}")
 
             if not final_segments_for_grid:
                 logging.warning(f"⚪ No final segments for chunk {chunk_idx}, creating placeholder")
@@ -3181,6 +3166,15 @@ class VideoComposer:
                 duration = min(duration, total_duration - start_time)
                 if duration <= 0:
                     continue
+                
+                # FIXED: Enforce minimum duration to prevent FFmpeg precision errors
+                MIN_DURATION = 0.1  # Minimum 0.1 seconds (100ms)
+                if duration < MIN_DURATION:
+                    duration = MIN_DURATION
+                    logging.debug(f"Extended note duration to {MIN_DURATION}s for MIDI {pitch} at {start_time}s")
+                
+                # Ensure duration doesn't exceed chunk boundary after extension
+                duration = min(duration, total_duration - start_time)
                 
                 # Calculate pitch adjustment
                 pitch_semitones = pitch - 60
