@@ -305,6 +305,9 @@ class GPUStreamManager:
 #         return subprocess.run(cmd, **kwargs)
 
 # Fix GPU processing for note-triggered videos
+
+
+
 def gpu_subprocess_run(cmd, **kwargs):
     """
     Enhanced GPU subprocess runner that handles note-triggered video creation
@@ -438,8 +441,8 @@ class VideoComposerConfig:
         self.MIN_VIDEO_DURATION = 1.0
         self.DURATION = 1.0
         self.VOLUME_MULTIPLIERS = {
-            'drums': 0.2,
-            'instruments': 1.5
+            'drums': 1.0,
+            'instruments': 1.0
         }
 
 class VideoComposer:
@@ -1131,67 +1134,180 @@ class VideoComposer:
     #         logging.error(f"Error creating video: {e}")
     #         return None
 
-    def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    # def _create_note_triggered_video_sequence_fixed(self, video_path, notes, total_duration, track_name, unique_id):
+    #     """
+    #     FIXED: Create ACTUAL MIDI-triggered video like drums do
+    #     """
+    #     try:
+    #         output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+    #         if not notes or not os.path.exists(video_path):
+    #             return None
+    #         if output_path.exists():
+    #             output_path.unlink()
+
+    #         notes_with_visual_duration = self._calculate_visual_durations(notes, total_duration)
+
+    #         filter_parts = []
+    #         # Create silent base
+    #         filter_parts.append(f"color=black:size=640x360:duration={total_duration}:rate=30[base_video]")
+    #         filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}[base_audio]")
+
+    #         # Create overlays for each MIDI note (like drums do)
+    #         video_layers = ["[base_video]"]
+    #         audio_segments = ["[base_audio]"]
+
+    #         for i, note in enumerate(notes_with_visual_duration): # Use the new list
+    #             start_time = float(note.get('time', 0))
+    #             audio_duration = float(note.get('duration', 0.5))
+    #             visual_duration = float(note.get('visual_duration', audio_duration)) # Use new visual duration
+    #             pitch = note.get('midi', 60)
+
+    #             if start_time >= total_duration: continue
+                
+    #             # Trim audio to its actual duration, but video to the longer visual duration
+    #             pitch_semitones = pitch - 60
+    #             pitch_factor = 2 ** (pitch_semitones / 12.0)
+                
+    #             # Video segment uses visual_duration
+    #             filter_parts.append(f"[0:v]trim=0:{visual_duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]")
+                
+    #             # Audio segment uses audio_duration
+    #             if abs(pitch_factor - 1.0) > 0.01:
+    #                 filter_parts.append(f"[0:a]atrim=0:{audio_duration},asetpts=PTS-STARTPTS,asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]")
+    #             else:
+    #                 filter_parts.append(f"[0:a]atrim=0:{audio_duration},asetpts=PTS-STARTPTS[note_a{i}]")
+                
+    #             # Overlay uses visual_duration
+    #             prev_video = video_layers[-1]
+    #             filter_parts.append(f"{prev_video}[note_v{i}]overlay=enable='between(t,{start_time},{start_time + visual_duration})'[video_out{i}]")
+    #             video_layers.append(f"[video_out{i}]")
+                
+    #             delay_ms = int(start_time * 1000)
+    #             filter_parts.append(f"[note_a{i}]adelay={delay_ms}|{delay_ms}[delayed_a{i}]")
+    #             audio_segments.append(f"[delayed_a{i}]")
+
+    #         # Mix all audio (like drums)
+    #         if len(audio_segments) > 1:
+    #             audio_inputs = ''.join(audio_segments)
+    #             filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
+    #         else:
+    #             filter_parts.append("[base_audio]copy[final_audio]")
+
+    #         # Final video output
+    #         final_video = video_layers[-1] if len(video_layers) > 1 else "[base_video]"
+    #         filter_parts.append(f"{final_video}copy[final_video]")
+
+    #         # Build command (same as drums)
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-i', str(video_path),
+    #             '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={total_duration}:rate=30',
+    #             '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}',
+    #             '-filter_complex', ';'.join(filter_parts),
+    #             '-map', '[final_video]',
+    #             '-map', '[final_audio]',
+    #             '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    #             '-c:a', 'aac', '-b:a', '192k',
+    #             '-t', str(total_duration),
+    #             '-r', '30',
+    #             str(output_path)
+    #         ]
+
+    #         logging.info(f"🎵 Creating MIDI-triggered video for {track_name} with {len(notes)} notes")
+
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+
+    #         if result.returncode == 0:
+    #             logging.info(f"✅ MIDI-triggered video created: {output_path}")
+    #             return str(output_path)
+    #         else:
+    #             logging.error(f"❌ Failed to create MIDI-triggered video: {result.stderr}")
+    #             return None
+    #     except Exception as e:
+    #         logging.error(f"Error creating MIDI-triggered video: {e}")
+    #         return None
+
+    def _create_note_triggered_video_sequence_fixed(self, video_path, notes, chunk_start_time, chunk_duration, track_name, unique_id):
         """
-        FIXED: Create ACTUAL MIDI-triggered video like drums do
+        FIXED: Create MIDI-triggered video with proper delay validation
         """
         try:
             output_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
+            
             if not notes or not os.path.exists(video_path):
+                logging.warning(f"No notes or video missing for {track_name}")
                 return None
+                
             if output_path.exists():
                 output_path.unlink()
 
-            filter_parts = []
-            # Create silent base
-            filter_parts.append(f"color=black:size=640x360:duration={total_duration}:rate=30[base_video]")
-            filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}[base_audio]")
+            # FIXED: Filter and validate notes for this chunk
+            valid_notes = []
+            for note in notes:
+                note_start_abs = float(note.get('time', 0))
+                relative_start = note_start_abs - chunk_start_time
+                
+                # FIXED: Skip notes that start before chunk (negative relative time)
+                if relative_start < 0:
+                    logging.debug(f"Skipping note at {note_start_abs}s (before chunk start {chunk_start_time}s)")
+                    continue
+                    
+                duration = float(note.get('duration', 0.5))
+                duration = min(duration, chunk_duration - relative_start)
+                
+                # FIXED: Skip notes with zero or negative duration
+                if duration <= 0:
+                    logging.debug(f"Skipping note with invalid duration: {duration}")
+                    continue
+                    
+                # Add adjusted note to valid list
+                adjusted_note = note.copy()
+                adjusted_note['relative_time'] = relative_start
+                adjusted_note['adjusted_duration'] = duration
+                valid_notes.append(adjusted_note)
 
-            # Create overlays for each MIDI note (like drums do)
+            if not valid_notes:
+                logging.info(f"No valid notes for {track_name} in chunk time range")
+                return None
+
+            logging.info(f"🎵 Creating MIDI-triggered video for {track_name} with {len(valid_notes)} valid notes")
+
+            # Create filter complex with validated delays
+            filter_parts = []
+            filter_parts.append(f"color=black:size=640x360:duration={chunk_duration}:rate=30[base_video]")
+            filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={chunk_duration}[base_audio]")
+
             video_layers = ["[base_video]"]
             audio_segments = ["[base_audio]"]
 
-            for i, note in enumerate(notes):
-                start_time = float(note.get('time', 0))
-                duration = float(note.get('duration', 0.5))
+            for i, note in enumerate(valid_notes):
+                relative_start = note['relative_time']
+                audio_duration = note['adjusted_duration']
+                visual_duration = max(audio_duration, 0.5)  # Minimum visual duration
                 pitch = note.get('midi', 60)
 
-                # Convert to chunk-relative time (already done in rel_notes)
-                if start_time >= total_duration:
-                    continue
-
-                # Limit duration to not exceed chunk boundary
-                duration = min(duration, total_duration - start_time)
-                if duration <= 0:
-                    continue
-
-                # Calculate pitch adjustment
-                pitch_semitones = pitch - 60
-                pitch_factor = 2 ** (pitch_semitones / 12.0)
-
-                # Create video segment for this note (like drums)
-                filter_parts.append(f"[0:v]trim=0:{duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]")
-
+                # Create video segment
+                filter_parts.append(f"[0:v]trim=0:{visual_duration},setpts=PTS-STARTPTS,scale=640:360[note_v{i}]")
+                
                 # Create audio segment with pitch adjustment
-                if abs(pitch_factor - 1.0) > 0.01:
-                    filter_parts.append(
-                        f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS,"
-                        f"asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]"
-                    )
+                pitch_semitones = pitch - 60
+                if abs(pitch_semitones) > 0.1:  # Apply pitch shift if needed
+                    pitch_factor = 2 ** (pitch_semitones / 12.0)
+                    filter_parts.append(f"[0:a]atrim=0:{audio_duration},asetpts=PTS-STARTPTS,asetrate=44100*{pitch_factor},aresample=44100[note_a{i}]")
                 else:
-                    filter_parts.append(f"[0:a]atrim=0:{duration},asetpts=PTS-STARTPTS[note_a{i}]")
-
-                # Overlay at exact note time (like drums)
+                    filter_parts.append(f"[0:a]atrim=0:{audio_duration},asetpts=PTS-STARTPTS[note_a{i}]")
+                
+                # Video overlay with validated timing
                 prev_video = video_layers[-1]
-                filter_parts.append(f"{prev_video}[note_v{i}]overlay=enable='between(t,{start_time},{start_time + duration})'[video_out{i}]")
+                filter_parts.append(f"{prev_video}[note_v{i}]overlay=enable='between(t,{relative_start},{relative_start + visual_duration})'[video_out{i}]")
                 video_layers.append(f"[video_out{i}]")
-
-                # Add delayed audio (like drums)
-                delay_ms = int(start_time * 1000)
+                
+                # FIXED: Ensure delay is non-negative
+                delay_ms = max(0, int(relative_start * 1000))
                 filter_parts.append(f"[note_a{i}]adelay={delay_ms}|{delay_ms}[delayed_a{i}]")
                 audio_segments.append(f"[delayed_a{i}]")
 
-            # Mix all audio (like drums)
+            # Mix audio segments
             if len(audio_segments) > 1:
                 audio_inputs = ''.join(audio_segments)
                 filter_parts.append(f"{audio_inputs}amix=inputs={len(audio_segments)}:duration=longest[final_audio]")
@@ -1202,23 +1318,21 @@ class VideoComposer:
             final_video = video_layers[-1] if len(video_layers) > 1 else "[base_video]"
             filter_parts.append(f"{final_video}copy[final_video]")
 
-            # Build command (same as drums)
+            # Build FFmpeg command
             cmd = [
                 'ffmpeg', '-y',
                 '-i', str(video_path),
-                '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={total_duration}:rate=30',
-                '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}',
+                '-f', 'lavfi', '-i', f'color=black:size=640x360:duration={chunk_duration}:rate=30',
+                '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={chunk_duration}',
                 '-filter_complex', ';'.join(filter_parts),
                 '-map', '[final_video]',
                 '-map', '[final_audio]',
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '192k',
-                '-t', str(total_duration),
+                '-t', str(chunk_duration),
                 '-r', '30',
                 str(output_path)
             ]
-
-            logging.info(f"🎵 Creating MIDI-triggered video for {track_name} with {len(notes)} notes")
 
             result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -1228,9 +1342,41 @@ class VideoComposer:
             else:
                 logging.error(f"❌ Failed to create MIDI-triggered video: {result.stderr}")
                 return None
+                
         except Exception as e:
             logging.error(f"Error creating MIDI-triggered video: {e}")
             return None
+
+    def _calculate_visual_durations(self, notes, chunk_duration):
+        """Calculates a more natural visual duration for each note."""
+        if not notes:
+            return []
+
+        # Sort notes by time to ensure correct lookahead
+        sorted_notes = sorted(notes, key=lambda n: float(n.get('time', 0)))
+        
+        for i, note in enumerate(sorted_notes):
+            note_start = float(note.get('time', 0))
+            audio_duration = float(note.get('duration', 0.5))
+            
+            # Define a minimum visual time and a release tail
+            MIN_VISUAL_TIME = 0.5  # Note is visible for at least 0.5s
+            RELEASE_TAIL = 1.5    # Add up to 0.8s of visual decay
+
+            visual_duration = audio_duration + RELEASE_TAIL
+
+            # If there's a next note, don't let the visual overlap it
+            if i + 1 < len(sorted_notes):
+                next_note_start = float(sorted_notes[i+1].get('time', 0))
+                visual_duration = min(visual_duration, next_note_start - note_start)
+
+            # Enforce minimum visual time and ensure it doesn't exceed the chunk boundary
+            visual_duration = max(visual_duration, MIN_VISUAL_TIME)
+            visual_duration = min(visual_duration, chunk_duration - note_start)
+            
+            note['visual_duration'] = max(0, visual_duration) # Ensure non-negative
+        
+        return sorted_notes
 
     def _normalize_track(self, track):
         """Convert track data to standard format"""
@@ -1617,36 +1763,386 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"❌ Autotune error for {video_path} → MIDI {midi_note}: {e}")
             return None
+
+    # def _normalize_final_audio(self, input_path, output_path):
+    #     """
+    #     Applies a two-pass loudness normalization to the final video.
+    #     This ensures consistent volume throughout the entire composition.
+    #     Includes robust error handling and fallbacks.
+    #     """
+    #     try:
+    #         # Two-pass loudnorm is recommended for best results.
+    #         # Pass 1: Analyze the audio and log the results.
+    #         logging.info("   (Loudnorm Pass 1/2) Analyzing audio...")
+    #         pass1_cmd = [
+    #             'ffmpeg', '-y', '-i', str(input_path),
+    #             '-af', 'loudnorm=I=-16:LRA=11:TP=-1.5:print_format=json',
+    #             '-f', 'null', '-'
+    #         ]
+    #         result1 = subprocess.run(pass1_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+    #         if result1.returncode != 0:
+    #             logging.error("❌ Loudnorm Pass 1 failed. FFmpeg returned a non-zero exit code.")
+    #             logging.error(f"   Stderr: {result1.stderr}")
+    #             raise Exception("Loudnorm analysis pass failed.")
+
+    #         # FFmpeg prints loudnorm stats to stderr. We find the JSON part and parse it.
+    #         # The JSON block is usually at the end of the stderr output.
+    #         json_output = None
+    #         for line in reversed(result1.stderr.strip().split('\n')):
+    #             if line.strip().startswith('{') and line.strip().endswith('}'):
+    #                 json_output = line.strip()
+    #                 break
             
-    def create_composition(self):
+    #         if not json_output:
+    #             logging.error("❌ Could not find loudnorm JSON stats in FFmpeg output.")
+    #             logging.error(f"   Full stderr: {result1.stderr}")
+    #             raise Exception("Failed to parse loudnorm stats.")
+
+    #         stats = json.loads(json_output)
+    #         logging.info(f"   Loudnorm stats: {stats}")
+
+    #         # Pass 2: Apply the calculated normalization values.
+    #         logging.info("   (Loudnorm Pass 2/2) Applying normalization...")
+    #         pass2_cmd = [
+    #             'ffmpeg', '-y', '-i', str(input_path),
+    #             '-af', f"loudnorm=I=-16:LRA=11:TP=-1.5:"
+    #                    f"measured_I={stats['input_i']}:"
+    #                    f"measured_LRA={stats['input_lra']}:"
+    #                    f"measured_tp={stats['input_tp']}:"
+    #                    f"measured_thresh={stats['input_thresh']}:"
+    #                    f"offset={stats['target_offset']}",
+    #             '-c:v', 'copy',
+    #             '-c:a', 'aac', '-b:a', '320k',
+    #             str(output_path)
+    #         ]
+            
+    #         result2 = subprocess.run(pass2_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+    #         if result2.returncode == 0:
+    #             logging.info("✅ Final audio normalized successfully.")
+    #             return str(output_path)
+    #         else:
+    #             logging.error("❌ Loudnorm Pass 2 failed. FFmpeg returned a non-zero exit code.")
+    #             logging.error(f"   Stderr: {result2.stderr}")
+    #             raise Exception("Loudnorm application pass failed.")
+
+    #     except Exception as e:
+    #         logging.error(f"An error occurred during audio normalization: {e}")
+    #         logging.error("❌ Final audio normalization failed. Returning unnormalized video.")
+    #         # Fallback: copy the unnormalized video to the final destination
+    #         try:
+    #             shutil.copy2(input_path, output_path)
+    #             logging.info(f"   Fallback successful: Copied unnormalized video to {output_path}")
+    #             return str(output_path)
+    #         except Exception as copy_error:
+    #             logging.error(f"   Fallback failed: Could not copy file. {copy_error}")
+    #             return None
+
+    def _normalize_final_audio(self, input_path, output_path):
         """
-        SIMPLIFIED MAIN COMPOSITION METHOD
-        
-        This method eliminates the complex optimization layers that were causing
-        cache misses and performance degradation. Returns to proven direct processing
-        approach with proper drum handling and fast performance.
-        
-        Returns:
-            str: Path to the final composed video, or None if failed
+        FIXED: Applies two-pass loudness normalization with robust JSON parsing
         """
         try:
-            logging.info("🎬 Starting SIMPLIFIED video composition...")
+            logging.info("🔊 Normalizing audio for the entire composition for consistent volume...")
+            logging.info("   (Loudnorm Pass 1/2) Analyzing audio...")
+            
+            pass1_cmd = [
+                'ffmpeg', '-y', '-i', str(input_path),
+                '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json',
+                '-f', 'null', '-'
+            ]
+            
+            result1 = subprocess.run(pass1_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+            if result1.returncode != 0:
+                logging.error("❌ Loudnorm analysis failed")
+                raise Exception("Loudnorm analysis pass failed")
+
+            # FIXED: More robust JSON extraction from stderr
+            stderr_output = result1.stderr
+            logging.debug(f"FFmpeg stderr length: {len(stderr_output)} chars")
+            
+            # Look for JSON block more reliably
+            import re
+            
+            # Try multiple patterns to find the JSON stats
+            json_patterns = [
+                r'\{[^{}]*"input_i"[^{}]*"input_tp"[^{}]*"input_lra"[^{}]*"input_thresh"[^{}]*"target_offset"[^{}]*\}',
+                r'\{[^{}]*"input_i"[^{}]*\}',
+                r'(\{(?:[^{}]|{[^{}]*})*"input_i"(?:[^{}]|{[^{}]*})*\})'
+            ]
+            
+            stats = None
+            for pattern in json_patterns:
+                matches = re.findall(pattern, stderr_output, re.DOTALL)
+                for match in matches:
+                    try:
+                        potential_stats = json.loads(match)
+                        if all(key in potential_stats for key in ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset']):
+                            stats = potential_stats
+                            logging.info(f"✅ Found valid loudnorm stats: {stats}")
+                            break
+                    except json.JSONDecodeError:
+                        continue
+                if stats:
+                    break
+            
+            if not stats:
+                # Fallback: Try line-by-line parsing
+                lines = stderr_output.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith('{') and 'input_i' in line:
+                        try:
+                            stats = json.loads(line)
+                            if 'input_i' in stats and 'target_offset' in stats:
+                                logging.info(f"✅ Found stats via line parsing: {stats}")
+                                break
+                        except json.JSONDecodeError:
+                            continue
+            
+            if not stats:
+                logging.error("❌ Could not find loudnorm JSON stats in FFmpeg output.")
+                logging.error(f"   Full stderr: {stderr_output}")
+                raise Exception("Failed to parse loudnorm stats.")
+
+            # Pass 2: Apply normalization with extracted stats
+            logging.info("   (Loudnorm Pass 2/2) Applying normalization...")
+            pass2_cmd = [
+                'ffmpeg', '-y', '-i', str(input_path),
+                '-af', f'loudnorm=I=-16:TP=-1.5:LRA=11:'
+                    f'measured_I={stats["input_i"]}:'
+                    f'measured_LRA={stats["input_lra"]}:'
+                    f'measured_tp={stats["input_tp"]}:'
+                    f'measured_thresh={stats["input_thresh"]}:'
+                    f'offset={stats["target_offset"]}',
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-b:a', '320k',
+                str(output_path)
+            ]
+            
+            result2 = subprocess.run(pass2_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+            if result2.returncode == 0:
+                logging.info("✅ Final audio normalized successfully.")
+                return str(output_path)
+            else:
+                logging.error("❌ Loudnorm application failed")
+                logging.error(f"   Stderr: {result2.stderr}")
+                raise Exception("Loudnorm application pass failed.")
+
+        except Exception as e:
+            logging.error(f"An error occurred during audio normalization: {e}")
+            logging.error("❌ Final audio normalization failed. Returning unnormalized video.")
+            
+            # Fallback: copy unnormalized video
+            try:
+                shutil.copy2(input_path, output_path)
+                logging.info(f"   Fallback successful: Copied unnormalized video to {output_path}")
+                return str(output_path)
+            except Exception as copy_error:
+                logging.error(f"   Fallback failed: {copy_error}")
+                return None
+
+            
+    # def create_composition(self):
+    #     """
+    #     SIMPLIFIED MAIN COMPOSITION METHOD
+        
+    #     This method eliminates the complex optimization layers that were causing
+    #     cache misses and performance degradation. Returns to proven direct processing
+    #     approach with proper drum handling and fast performance.
+        
+    #     Returns:
+    #         str: Path to the final composed video, or None if failed
+    #     """
+    #     try:
+    #         logging.info("🎬 Starting SIMPLIFIED video composition...")
+    #         start_time = time.time()
+            
+    #         # Use the proven chunk-based approach without complex optimization layers
+    #         logging.info("🎥 Setting up composition parameters...")
+            
+    #         # Calculate composition duration
+    #         total_duration = self._calculate_total_duration()
+    #         total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
+            
+    #         logging.info(f"Composition: {total_duration:.2f}s, {total_chunks} chunks")
+            
+    #         # Create chunks directory
+    #         chunks_dir = self.processed_videos_dir / "simple_chunks"
+    #         chunks_dir.mkdir(exist_ok=True)
+            
+    #         # Process chunks with simplified approach
+    #         chunk_paths = []
+    #         for chunk_idx in range(total_chunks):
+    #             chunk_start = chunk_idx * self.CHUNK_DURATION
+    #             chunk_end = min(chunk_start + self.CHUNK_DURATION, total_duration)
+                
+    #             logging.info(f"Processing chunk {chunk_idx + 1}/{total_chunks} ({chunk_start:.1f}s - {chunk_end:.1f}s)")
+                
+    #             chunk_path = self._create_simplified_chunk(chunk_idx, chunk_start, chunk_end, chunks_dir)
+                
+    #             if chunk_path and os.path.exists(chunk_path):
+    #                 chunk_paths.append(chunk_path)
+    #                 logging.info(f"✅ Chunk {chunk_idx + 1} completed")
+    #             else:
+    #                 logging.warning(f"⚠️  Chunk {chunk_idx + 1} failed, creating placeholder")
+    #                 placeholder_path = self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_end - chunk_start)
+    #                 if placeholder_path:
+    #                     chunk_paths.append(placeholder_path)
+            
+    #         if not chunk_paths:
+    #             raise Exception("No chunks were created successfully")
+    #           # Concatenate chunks into final video
+    #         logging.info(f"Concatenating {len(chunk_paths)} chunks...")
+    #         concatenated_path = self._concatenate_chunks(chunk_paths)
+
+    #         if not concatenated_path or not os.path.exists(concatenated_path):
+    #             raise Exception("Chunk concatenation failed, cannot proceed to normalization.")
+
+    #         # --- START OF VOLUME NORMALIZATION REFACTOR ---
+    #         logging.info("🔊 Normalizing audio for the entire composition for consistent volume...")
+            
+    #         final_output_path = self.output_path # The user's desired final path
+    #         normalized_video_path = self._normalize_final_audio(concatenated_path, final_output_path)
+            
+    #         total_time = time.time() - start_time
+            
+    #         if normalized_video_path and os.path.exists(normalized_video_path):
+    #             file_size = os.path.getsize(normalized_video_path)
+    #             logging.info(f"🎉 COMPOSITION SUCCESSFUL!")
+    #             logging.info(f"   📁 Final Output: {normalized_video_path}")
+    #             logging.info(f"   🔊 Audio has been normalized for consistent loudness.")
+    #             logging.info(f"   📏 Size: {file_size:,} bytes")
+    #             logging.info(f"   ⏱️  Total time: {total_time:.2f}s")
+    #             logging.info(f"   🚀 Fast direct processing - no cache misses!")
+                
+    #             return str(normalized_video_path)
+    #         else:
+    #             logging.error("❌ Final audio normalization failed. Returning unnormalized video.")
+    #             return str(concatenated_path)
+                
+    #     except Exception as e:
+    #         logging.error(f"❌ Composition error: {e}")
+    #         import traceback
+    #         logging.error(f"Full traceback: {traceback.format_exc()}")
+    #         return None
+
+    # def create_composition(self):
+    #     """
+    #     SIMPLIFIED MAIN COMPOSITION METHOD
+        
+    #     This method eliminates the complex optimization layers that were causing
+    #     cache misses and performance degradation. Returns to proven direct processing
+    #     approach with proper drum handling and fast performance.
+        
+    #     Returns:
+    #         str: Path to the final composed video, or None if failed
+    #     """
+    #     try:
+    #         logging.info("🎬 Starting SIMPLIFIED video composition...")
+    #         start_time = time.time()
+            
+    #         # Use the proven chunk-based approach without complex optimization layers
+    #         logging.info("🎥 Setting up composition parameters...")
+            
+    #         # Calculate composition duration
+    #         total_duration = self._calculate_total_duration()
+    #         total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
+            
+    #         logging.info(f"Composition: {total_duration:.2f}s, {total_chunks} chunks")
+            
+    #         # Create chunks directory
+    #         chunks_dir = self.processed_videos_dir / "simple_chunks"
+    #         chunks_dir.mkdir(exist_ok=True)
+            
+    #         # Process chunks with simplified approach
+    #         chunk_paths = []
+    #         for chunk_idx in range(total_chunks):
+    #             logging.info(f"Processing chunk {chunk_idx + 1}/{total_chunks} ({(chunk_idx * self.CHUNK_DURATION):.1f}s - {((chunk_idx + 1) * self.CHUNK_DURATION):.1f}s)")
+    #             start_time_chunk = chunk_idx * self.CHUNK_DURATION
+    #             end_time_chunk = (chunk_idx + 1) * self.CHUNK_DURATION
+    #             chunk_path = self._create_simplified_chunk(chunk_idx, start_time_chunk, end_time_chunk, chunks_dir)
+    #             if chunk_path and os.path.exists(chunk_path):
+    #                 chunk_paths.append(chunk_path)
+    #                 logging.info(f"✅ Chunk {chunk_idx + 1} completed")
+    #             else:
+    #                 logging.warning(f"⚠️ Chunk {chunk_idx} failed to create or was empty.")
+            
+    #         if not chunk_paths:
+    #             logging.error("❌ No video chunks were created. Composition failed.")
+    #             return None
+    #           # Concatenate chunks into final video
+    #         logging.info(f"Concatenating {len(chunk_paths)} chunks...")
+    #         # Create a temporary path for the concatenated but unnormalized video
+    #         concatenated_path = self.temp_dir / "concatenated_unnormalized.mp4"
+    #         concatenated_path = self._concatenate_chunks(chunk_paths, concatenated_path)
+
+
+    #         if not concatenated_path or not os.path.exists(concatenated_path):
+    #             logging.error("❌ Concatenation failed. Cannot proceed to normalization.")
+    #             return None
+
+    #         # --- START OF VOLUME NORMALIZATION REFACTOR ---
+    #         logging.info("🔊 Normalizing audio for the entire composition for consistent volume...")
+            
+    #         final_output_path = self.output_path # The user's desired final path
+    #         normalized_video_path = self._normalize_final_audio(concatenated_path, final_output_path)
+            
+    #         total_time = time.time() - start_time
+            
+    #         if normalized_video_path and os.path.exists(normalized_video_path):
+    #             logging.info(f"🎉 Video composition complete! Total time: {total_time:.2f}s")
+    #             logging.info(f"   Final video saved to: {normalized_video_path}")
+    #             return str(normalized_video_path)
+    #         else:
+    #             logging.error("❌ Composition failed after normalization step.")
+    #             return None
+                
+    #     except Exception as e:
+    #         logging.error(f"❌ Composition error: {e}")
+    #         logging.error(f"Full traceback: {traceback.format_exc()}")
+    #         return None
+
+    def create_composition(self):
+        """
+        ENHANCED composition with all fixes applied
+        """
+        try:
+            logging.info("🎬 Starting ENHANCED video composition with fixes...")
             start_time = time.time()
             
-            # Use the proven chunk-based approach without complex optimization layers
-            logging.info("🎥 Setting up composition parameters...")
-            
-            # Calculate composition duration
+            # Decide between parallel and sequential processing
             total_duration = self._calculate_total_duration()
             total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
             
-            logging.info(f"Composition: {total_duration:.2f}s, {total_chunks} chunks")
+            # Use parallel processing for compositions with multiple chunks
+            if total_chunks > 2 and self.max_workers > 1:
+                logging.info(f"Using parallel processing for {total_chunks} chunks")
+                return self.create_composition_with_parallel_processing()
+            else:
+                logging.info(f"Using sequential processing for {total_chunks} chunks")
+                return self._create_composition_sequential()
+                
+        except Exception as e:
+            logging.error(f"❌ Enhanced composition error: {e}")
+            return None
+
+    def _create_composition_sequential(self):
+        """Sequential composition with all fixes applied"""
+        try:
+            start_time = time.time()
             
-            # Create chunks directory
-            chunks_dir = self.processed_videos_dir / "simple_chunks"
+            total_duration = self._calculate_total_duration()
+            total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
+            
+            logging.info(f"Sequential composition: {total_duration:.2f}s, {total_chunks} chunks")
+            
+            chunks_dir = self.processed_videos_dir / "enhanced_chunks"
             chunks_dir.mkdir(exist_ok=True)
             
-            # Process chunks with simplified approach
             chunk_paths = []
             for chunk_idx in range(total_chunks):
                 chunk_start = chunk_idx * self.CHUNK_DURATION
@@ -1654,43 +2150,193 @@ class VideoComposer:
                 
                 logging.info(f"Processing chunk {chunk_idx + 1}/{total_chunks} ({chunk_start:.1f}s - {chunk_end:.1f}s)")
                 
-                chunk_path = self._create_simplified_chunk(chunk_idx, chunk_start, chunk_end, chunks_dir)
+                chunk_path = self._create_enhanced_chunk(chunk_idx, chunk_start, chunk_end, chunks_dir)
                 
                 if chunk_path and os.path.exists(chunk_path):
                     chunk_paths.append(chunk_path)
-                    logging.info(f"✅ Chunk {chunk_idx + 1} completed")
+                    logging.info(f"✅ Enhanced chunk {chunk_idx + 1} completed")
                 else:
-                    logging.warning(f"⚠️  Chunk {chunk_idx + 1} failed, creating placeholder")
-                    placeholder_path = self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_end - chunk_start)
-                    if placeholder_path:
-                        chunk_paths.append(placeholder_path)
+                    logging.warning(f"⚠️ Chunk {chunk_idx + 1} failed, creating placeholder")
+                    placeholder = self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_end - chunk_start)
+                    if placeholder:
+                        chunk_paths.append(placeholder)
             
             if not chunk_paths:
                 raise Exception("No chunks were created successfully")
-              # Concatenate chunks into final video
-            logging.info(f"Concatenating {len(chunk_paths)} chunks...")
-            final_path = self._concatenate_chunks(chunk_paths)
             
-            total_time = time.time() - start_time
+            # Concatenate chunks
+            concatenated_path = self.temp_dir / "concatenated_enhanced.mp4"
+            final_path = self._concatenate_chunks(chunk_paths, concatenated_path)
             
             if final_path and os.path.exists(final_path):
-                file_size = os.path.getsize(final_path)
-                logging.info(f"🎉 COMPOSITION SUCCESSFUL!")
-                logging.info(f"   📁 Output: {final_path}")
-                logging.info(f"   📏 Size: {file_size:,} bytes")
-                logging.info(f"   ⏱️  Total time: {total_time:.2f}s")
-                logging.info(f"   🚀 Fast direct processing - no cache misses!")
+                # Apply enhanced normalization
+                normalized_path = self._normalize_final_audio(final_path, self.output_path)
                 
-                return str(final_path)
+                total_time = time.time() - start_time
+                logging.info(f"🎉 Enhanced composition complete! Total time: {total_time:.2f}s")
+                
+                return normalized_path
             else:
-                logging.error("❌ Final concatenation failed")
-                return None
+                raise Exception("Enhanced concatenation failed")
                 
         except Exception as e:
-            logging.error(f"❌ Composition error: {e}")
-            import traceback
-            logging.error(f"Full traceback: {traceback.format_exc()}")
+            logging.error(f"❌ Sequential composition error: {e}")
             return None
+
+    def _create_enhanced_chunk(self, chunk_idx, start_time, end_time, chunks_dir):
+        """Create chunk with all enhancements applied"""
+        try:
+            chunk_path = chunks_dir / f"enhanced_chunk_{chunk_idx}.mp4"
+            chunk_duration = end_time - start_time
+            
+            # Use enhanced note processing with delay validation
+            active_tracks = self._find_tracks_in_timerange(start_time, end_time)
+            
+            if not active_tracks:
+                return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
+            
+            track_video_segments = []
+            
+            for track in active_tracks:
+                track_id = track.get('id', track.get('original_index', 'unknown'))
+                
+                if track.get('isDrum') or track.get('channel') == 9:
+                    drum_segments = self._process_drum_track_for_chunk(track, start_time, end_time)
+                    if drum_segments:
+                        track_video_segments.extend(drum_segments)
+                else:
+                    # Use enhanced note-triggered processing
+                    result = self._process_instrument_track_enhanced(track, start_time, chunk_duration, chunk_idx, track_id)
+                    if result:
+                        track_video_segments.append(result)
+            
+            if not track_video_segments:
+                return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
+            
+            # Create final chunk with optimal encoding
+            return self._create_optimized_chunk_layout(track_video_segments, chunk_path, chunk_duration)
+            
+        except Exception as e:
+            logging.error(f"Error creating enhanced chunk {chunk_idx}: {e}")
+            return None
+
+    def create_composition_with_parallel_processing(self):
+        """
+        Enhanced composition with parallel chunk processing for better performance
+        """
+        try:
+            logging.info("🚀 Starting PARALLEL video composition...")
+            start_time = time.time()
+            
+            total_duration = self._calculate_total_duration()
+            total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
+            
+            logging.info(f"Composition: {total_duration:.2f}s, {total_chunks} chunks")
+            logging.info(f"Using parallel processing with {self.max_workers} workers")
+            
+            chunks_dir = self.processed_videos_dir / "parallel_chunks"
+            chunks_dir.mkdir(exist_ok=True)
+            
+            # Create chunk tasks
+            chunk_tasks = []
+            for chunk_idx in range(total_chunks):
+                start_time_chunk = chunk_idx * self.CHUNK_DURATION
+                end_time_chunk = min(start_time_chunk + self.CHUNK_DURATION, total_duration)
+                chunk_tasks.append((chunk_idx, start_time_chunk, end_time_chunk, chunks_dir))
+            
+            # Process chunks in parallel
+            chunk_paths = []
+            successful_chunks = 0
+            
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_chunk = {
+                    executor.submit(self._create_chunk_parallel, task): task 
+                    for task in chunk_tasks
+                }
+                
+                for future in as_completed(future_to_chunk):
+                    chunk_idx, start_time_chunk, end_time_chunk, chunks_dir = future_to_chunk[future]
+                    try:
+                        chunk_path = future.result()
+                        if chunk_path and os.path.exists(chunk_path):
+                            chunk_paths.append((chunk_idx, chunk_path))
+                            successful_chunks += 1
+                            logging.info(f"✅ Parallel chunk {chunk_idx + 1}/{total_chunks} completed")
+                        else:
+                            logging.warning(f"⚠️ Chunk {chunk_idx + 1} failed, creating placeholder")
+                            placeholder = self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, end_time_chunk - start_time_chunk)
+                            if placeholder:
+                                chunk_paths.append((chunk_idx, placeholder))
+                    except Exception as e:
+                        logging.error(f"❌ Chunk {chunk_idx + 1} error: {e}")
+            
+            # Sort chunks by index to maintain correct order
+            chunk_paths.sort(key=lambda x: x[0])
+            ordered_chunk_paths = [path for _, path in chunk_paths]
+            
+            if not ordered_chunk_paths:
+                raise Exception("No chunks were created successfully")
+            
+            logging.info(f"✅ Parallel processing complete: {successful_chunks}/{total_chunks} chunks successful")
+            
+            # Concatenate chunks
+            concatenated_path = self.temp_dir / "concatenated_parallel.mp4"
+            final_path = self._concatenate_chunks(ordered_chunk_paths, concatenated_path)
+            
+            if final_path and os.path.exists(final_path):
+                # Apply normalization
+                normalized_path = self._normalize_final_audio(final_path, self.output_path)
+                
+                total_time = time.time() - start_time
+                logging.info(f"🎉 Parallel composition complete! Total time: {total_time:.2f}s")
+                logging.info(f"   Performance improvement: ~{max(1, total_chunks/self.max_workers):.1f}x faster with parallel processing")
+                
+                return normalized_path
+            else:
+                raise Exception("Chunk concatenation failed")
+                
+        except Exception as e:
+            logging.error(f"❌ Parallel composition error: {e}")
+            return None
+
+    def _create_chunk_parallel(self, task):
+        """Create a single chunk for parallel processing"""
+        chunk_idx, start_time, end_time, chunks_dir = task
+        return self._create_simplified_chunk(chunk_idx, start_time, end_time, chunks_dir)
+    
+
+    def _get_optimal_encoding_params(self):
+        """Get optimal encoding parameters based on available hardware"""
+        try:
+            # Test NVIDIA GPU availability
+            result = subprocess.run(['nvidia-smi'], capture_output=True, text=True)
+            if result.returncode == 0:
+                logging.info("✅ NVIDIA GPU detected, using hardware acceleration")
+                return {
+                    'video_codec': 'h264_nvenc',
+                    'preset': 'p4',  # Balanced preset for NVENC
+                    'additional_params': [
+                        '-hwaccel', 'cuda',
+                        '-hwaccel_output_format', 'cuda',
+                        '-b:v', '8M',
+                        '-maxrate', '12M',
+                        '-bufsize', '16M'
+                    ]
+                }
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        
+        # Fallback to CPU encoding with fast preset
+        logging.info("Using CPU encoding with optimized settings")
+        return {
+            'video_codec': 'libx264',
+            'preset': 'ultrafast',
+            'additional_params': [
+                '-crf', '23',
+                '-threads', str(min(8, os.cpu_count())),
+                '-tune', 'fastdecode'
+            ]
+        }
 
     def _calculate_composition_duration(self):
         """Calculate the total duration needed for the composition"""
@@ -1804,6 +2450,45 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Error creating optimized chunk {chunk_idx}: {e}")
             return None
+        
+    def _create_optimized_ffmpeg_command(self, inputs, filter_complex, output_path, duration):
+        """Create optimized FFmpeg command with hardware acceleration"""
+        encoding_params = self._get_optimal_encoding_params()
+        
+        cmd = ['ffmpeg', '-y']
+        
+        # Add hardware acceleration if available
+        if 'additional_params' in encoding_params:
+            for param in encoding_params['additional_params'][:2]:  # Add hwaccel params first
+                if param in ['-hwaccel', '-hwaccel_output_format']:
+                    cmd.extend([param, encoding_params['additional_params'][encoding_params['additional_params'].index(param) + 1]])
+        
+        # Add inputs
+        for input_path in inputs:
+            cmd.extend(['-i', str(input_path)])
+        
+        # Add filter complex
+        if filter_complex:
+            cmd.extend(['-filter_complex', filter_complex])
+        
+        # Add encoding parameters
+        cmd.extend([
+            '-c:v', encoding_params['video_codec'],
+            '-preset', encoding_params['preset'],
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-t', str(duration),
+            '-r', '30'
+        ])
+        
+        # Add remaining optimization parameters
+        if 'additional_params' in encoding_params:
+            remaining_params = encoding_params['additional_params'][2:]  # Skip hwaccel params already added
+            cmd.extend(remaining_params)
+        
+        cmd.append(str(output_path))
+        
+        return cmd
 
     def _create_track_chunk_optimized(self, track_id, instrument_name, notes, start_time, end_time):
         """Create track chunk using OPTIMIZED autotune retrieval (no individual processing)"""
@@ -2074,7 +2759,109 @@ class VideoComposer:
     #         return None
 
 
-    def _concatenate_chunks(self, chunk_paths):
+    # def _concatenate_chunks(self, chunk_paths):
+    #     """
+    #     FIXED: Robust chunk concatenation with proper validation
+    #     """
+    #     try:
+    #         logging.info(f"\n🔗 === CHUNK CONCATENATION START ===")
+    #         logging.info(f"   Input chunks: {len(chunk_paths)}")
+            
+    #         final_path = Path(self.output_path)
+    #         logging.info(f"   Final output: {final_path.name}")
+            
+    #         # Validate and filter chunk paths
+    #         valid_chunks = []
+    #         logging.info(f"🔍 Validating chunk files...")
+            
+    #         for i, chunk_path in enumerate(chunk_paths):
+    #             chunk_file = Path(chunk_path)
+    #             if chunk_file.exists():
+    #                 file_size = chunk_file.stat().st_size
+    #                 if file_size > 50000:  # At least 50KB for valid video
+    #                     valid_chunks.append(str(chunk_file.resolve()))
+    #                     logging.info(f"   ✅ Chunk {i+1}: {chunk_file.name} ({file_size:,} bytes)")
+    #                 else:
+    #                     logging.warning(f"   ⚠️ Chunk {i+1}: {chunk_file.name} too small ({file_size} bytes) - SKIPPED")
+    #             else:
+    #                 logging.warning(f"   ❌ Chunk {i+1}: {chunk_path} - FILE NOT FOUND")
+            
+    #         logging.info(f"📊 Validation summary: {len(valid_chunks)}/{len(chunk_paths)} chunks are valid")
+            
+    #         if not valid_chunks:
+    #             raise Exception("No valid chunks found for concatenation")
+            
+    #         if len(valid_chunks) == 1:
+    #             import shutil
+    #             logging.info(f"📋 Single chunk detected, copying directly...")
+    #             shutil.copy2(valid_chunks[0], final_path)
+    #             output_size = final_path.stat().st_size
+    #             logging.info(f"✅ Single chunk used as final output: {output_size:,} bytes")
+    #             logging.info(f"🔗 === CHUNK CONCATENATION END ===\n")
+    #             return str(final_path)
+            
+    #         # Create concat file with proper format
+    #         concat_file = self.temp_dir / "concat_final.txt"
+    #         logging.info(f"📝 Creating concatenation file: {concat_file.name}")
+            
+    #         with open(concat_file, 'w', encoding='utf-8') as f:
+    #             for chunk_path in valid_chunks:
+    #                 # Use absolute paths with forward slashes for FFmpeg
+    #                 abs_path = Path(chunk_path).resolve().as_posix()
+    #                 f.write(f"file '{abs_path}'\n")
+            
+    #         # Log what we're concatenating
+    #         logging.info(f"🎬 Concatenating {len(valid_chunks)} chunks:")
+    #         for i, chunk in enumerate(valid_chunks):
+    #             chunk_size = Path(chunk).stat().st_size
+    #             logging.info(f"   {i+1}. {Path(chunk).name} ({chunk_size:,} bytes)")
+            
+    #         # FFmpeg concat command with stream copy
+    #         cmd = [
+    #             'ffmpeg', '-y',
+    #             '-f', 'concat',
+    #             '-safe', '0',
+    #             '-i', str(concat_file),
+    #             '-c', 'copy',  # Stream copy preserves quality and is fast
+    #             '-avoid_negative_ts', 'make_zero',  # Handle timing issues
+    #             str(final_path)
+    #         ]
+            
+    #         logging.info(f"� Executing FFmpeg concatenation...")
+    #         logging.info(f"   Command: ffmpeg -f concat -safe 0 -i {concat_file.name} -c copy {final_path.name}")
+            
+    #         result = subprocess.run(cmd, capture_output=True, text=True)
+            
+    #         if result.returncode == 0 and final_path.exists():
+    #             final_size = final_path.stat().st_size
+    #             total_input_size = sum(Path(chunk).stat().st_size for chunk in valid_chunks)
+    #             logging.info(f"✅ Concatenation successful!")
+    #             logging.info(f"   Final size: {final_size:,} bytes")
+    #             logging.info(f"   Total input size: {total_input_size:,} bytes")
+    #             logging.info(f"   Size efficiency: {(final_size/total_input_size)*100:.1f}%")
+    #             logging.info(f"🔗 === CHUNK CONCATENATION END ===\n")
+    #             return str(final_path)
+    #         else:
+    #             logging.error(f"❌ Concatenation failed!")
+    #             logging.error(f"   Return code: {result.returncode}")
+    #             logging.error(f"   STDERR: {result.stderr}")
+    #             if result.stdout:
+    #                 logging.error(f"   STDOUT: {result.stdout}")
+                
+    #             # Emergency fallback - use first chunk
+    #             import shutil
+    #             logging.warning(f"⚠️ Attempting emergency fallback: using first chunk only")
+    #             shutil.copy2(valid_chunks[0], final_path)
+    #             fallback_size = final_path.stat().st_size
+    #             logging.warning(f"⚠️ Emergency fallback complete: {fallback_size:,} bytes")
+    #             logging.info(f"🔗 === CHUNK CONCATENATION END (FALLBACK) ===\n")
+    #             return str(final_path)
+                
+    #     except Exception as e:
+    #         logging.error(f"Critical concatenation error: {e}")
+    #         return None
+
+    def _concatenate_chunks(self, chunk_paths, output_path):
         """
         FIXED: Robust chunk concatenation with proper validation
         """
@@ -2082,37 +2869,30 @@ class VideoComposer:
             logging.info(f"\n🔗 === CHUNK CONCATENATION START ===")
             logging.info(f"   Input chunks: {len(chunk_paths)}")
             
-            final_path = Path(self.output_path)
-            logging.info(f"   Final output: {final_path.name}")
+            final_path = Path(output_path)
+            logging.info(f"   Concatenated output: {final_path.name}")
             
             # Validate and filter chunk paths
             valid_chunks = []
             logging.info(f"🔍 Validating chunk files...")
             
             for i, chunk_path in enumerate(chunk_paths):
-                chunk_file = Path(chunk_path)
-                if chunk_file.exists():
-                    file_size = chunk_file.stat().st_size
-                    if file_size > 50000:  # At least 50KB for valid video
-                        valid_chunks.append(str(chunk_file.resolve()))
-                        logging.info(f"   ✅ Chunk {i+1}: {chunk_file.name} ({file_size:,} bytes)")
-                    else:
-                        logging.warning(f"   ⚠️ Chunk {i+1}: {chunk_file.name} too small ({file_size} bytes) - SKIPPED")
+                p = Path(chunk_path)
+                if p.exists() and p.stat().st_size > 1000: # Check for existence and reasonable size
+                    valid_chunks.append(str(p))
+                    logging.info(f"   - Chunk {i}: OK ({p.name})")
                 else:
-                    logging.warning(f"   ❌ Chunk {i+1}: {chunk_path} - FILE NOT FOUND")
+                    logging.warning(f"   - Chunk {i}: SKIPPED (Not found or empty: {p.name})")
             
             logging.info(f"📊 Validation summary: {len(valid_chunks)}/{len(chunk_paths)} chunks are valid")
             
             if not valid_chunks:
-                raise Exception("No valid chunks found for concatenation")
+                logging.error("❌ No valid chunks to concatenate.")
+                return None
             
             if len(valid_chunks) == 1:
-                import shutil
-                logging.info(f"📋 Single chunk detected, copying directly...")
+                logging.info("   Only one valid chunk, copying directly.")
                 shutil.copy2(valid_chunks[0], final_path)
-                output_size = final_path.stat().st_size
-                logging.info(f"✅ Single chunk used as final output: {output_size:,} bytes")
-                logging.info(f"🔗 === CHUNK CONCATENATION END ===\n")
                 return str(final_path)
             
             # Create concat file with proper format
@@ -2120,16 +2900,14 @@ class VideoComposer:
             logging.info(f"📝 Creating concatenation file: {concat_file.name}")
             
             with open(concat_file, 'w', encoding='utf-8') as f:
-                for chunk_path in valid_chunks:
-                    # Use absolute paths with forward slashes for FFmpeg
-                    abs_path = Path(chunk_path).resolve().as_posix()
-                    f.write(f"file '{abs_path}'\n")
+                for chunk in valid_chunks:
+                    # Use absolute posix path for max compatibility
+                    f.write(f"file '{Path(chunk).resolve().as_posix()}'\n")
             
             # Log what we're concatenating
             logging.info(f"🎬 Concatenating {len(valid_chunks)} chunks:")
             for i, chunk in enumerate(valid_chunks):
-                chunk_size = Path(chunk).stat().st_size
-                logging.info(f"   {i+1}. {Path(chunk).name} ({chunk_size:,} bytes)")
+                logging.info(f"   {i+1}: {Path(chunk).name}")
             
             # FFmpeg concat command with stream copy
             cmd = [
@@ -2137,40 +2915,23 @@ class VideoComposer:
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', str(concat_file),
-                '-c', 'copy',  # Stream copy preserves quality and is fast
-                '-avoid_negative_ts', 'make_zero',  # Handle timing issues
+                '-c', 'copy',
+                '-avoid_negative_ts', 'make_zero',
                 str(final_path)
             ]
             
-            logging.info(f"� Executing FFmpeg concatenation...")
+            logging.info(f"🚀 Executing FFmpeg concatenation...")
             logging.info(f"   Command: ffmpeg -f concat -safe 0 -i {concat_file.name} -c copy {final_path.name}")
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
             
             if result.returncode == 0 and final_path.exists():
-                final_size = final_path.stat().st_size
-                total_input_size = sum(Path(chunk).stat().st_size for chunk in valid_chunks)
-                logging.info(f"✅ Concatenation successful!")
-                logging.info(f"   Final size: {final_size:,} bytes")
-                logging.info(f"   Total input size: {total_input_size:,} bytes")
-                logging.info(f"   Size efficiency: {(final_size/total_input_size)*100:.1f}%")
-                logging.info(f"🔗 === CHUNK CONCATENATION END ===\n")
+                logging.info(f"✅ Concatenation successful: {final_path.name}")
                 return str(final_path)
             else:
-                logging.error(f"❌ Concatenation failed!")
-                logging.error(f"   Return code: {result.returncode}")
-                logging.error(f"   STDERR: {result.stderr}")
-                if result.stdout:
-                    logging.error(f"   STDOUT: {result.stdout}")
-                
-                # Emergency fallback - use first chunk
-                import shutil
-                logging.warning(f"⚠️ Attempting emergency fallback: using first chunk only")
-                shutil.copy2(valid_chunks[0], final_path)
-                fallback_size = final_path.stat().st_size
-                logging.warning(f"⚠️ Emergency fallback complete: {fallback_size:,} bytes")
-                logging.info(f"🔗 === CHUNK CONCATENATION END (FALLBACK) ===\n")
-                return str(final_path)
+                logging.error("❌ FFmpeg concatenation failed.")
+                logging.error(f"   Stderr: {result.stderr}")
+                return None
                 
         except Exception as e:
             logging.error(f"Critical concatenation error: {e}")
