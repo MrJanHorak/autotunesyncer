@@ -4,11 +4,20 @@ import logging
 import os
 import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import psutil
+import time
 
 # Use absolute imports
 from backend.src.processing.segments import process_video_segments
 from backend.src.utils.logging import setup_logging
 from backend.src.utils.audio import validate_audio_stream
+
+# Enhanced logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 def validate_input_files(midi_path: str, video_path: str) -> bool:
     """Validate that input files exist and have required streams"""
@@ -67,42 +76,75 @@ def ensure_video_format(input_path: str, output_path: str = None) -> str:
         logging.error(f"Error ensuring video format: {e}")
         return input_path
 
-def process_video_segments(midi_data, video_files, output_path):
-    """Process video segments with format standardization"""
+def process_video_segments_enhanced(midi_data, video_files, output_path):
+    """Enhanced video segments processing with parallel format standardization"""
     try:
+        start_time = time.time()
+        logging.info(f"Starting enhanced video segments processing for {len(video_files)} files")
+        
         # Create temp directory for processed videos
         temp_dir = Path(output_path).parent / 'temp_processed'
         temp_dir.mkdir(exist_ok=True)
         
-        # Process each video file
+        # Process videos in parallel with format standardization
         processed_videos = {}
-        for track_id, track_data in video_files.items():
-            video_path = track_data['path']
-            processed_path = temp_dir / f"{Path(video_path).stem}_processed.mp4"
+        max_workers = min(4, len(video_files), psutil.cpu_count(logical=False))
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_track = {}
             
-            # Ensure video is in correct format
-            standardized_path = ensure_video_format(video_path, str(processed_path))
-            processed_videos[track_id] = {
-                **track_data,
-                'path': standardized_path
-            }
+            for track_id, track_data in video_files.items():
+                video_path = track_data['path']
+                processed_path = temp_dir / f"{Path(video_path).stem}_processed.mp4"
+                
+                future = executor.submit(
+                    ensure_video_format, 
+                    video_path, 
+                    str(processed_path)
+                )
+                future_to_track[future] = (track_id, track_data, str(processed_path))
+            
+            # Collect results
+            for future in as_completed(future_to_track):
+                track_id, track_data, processed_path = future_to_track[future]
+                try:
+                    standardized_path = future.result()
+                    processed_videos[track_id] = {
+                        **track_data,
+                        'path': standardized_path
+                    }
+                    logging.info(f"Successfully processed {track_id}")
+                except Exception as e:
+                    logging.error(f"Failed to process {track_id}: {e}")
+                    # Use original path as fallback
+                    processed_videos[track_id] = track_data
         
         # Continue with existing processing logic using processed_videos
-        # ...existing processing code...
+        success = process_video_segments(midi_data, processed_videos, output_path)
         
         # Cleanup temp files
+        cleanup_temp_files(temp_dir)
+        
+        total_time = time.time() - start_time
+        logging.info(f"Enhanced video segments processing completed in {total_time:.2f}s")
+        
+        return success
+        
+    except Exception as e:
+        logging.error(f"Error in enhanced video processing: {e}")
+        return False
+
+def cleanup_temp_files(temp_dir):
+    """Cleanup temporary files with error handling"""
+    try:
         for file in temp_dir.glob('*'):
             try:
                 file.unlink()
             except Exception as e:
                 logging.warning(f"Failed to cleanup temp file {file}: {e}")
         temp_dir.rmdir()
-        
-        return True
-        
     except Exception as e:
-        logging.error(f"Error in video processing: {e}")
-        return False
+        logging.warning(f"Failed to cleanup temp directory {temp_dir}: {e}")
 
 def main():
     if len(sys.argv) != 4:

@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from typing import Optional, Dict, Union
 import psutil
@@ -20,47 +21,55 @@ class GPUManager:
         self.handle = None
         self.pynvml_available = False
         self.streams = []
-        if torch.cuda.is_available():
-            self.streams = [torch.cuda.Stream() for _ in range(4)]
         self.current_stream = 0
         self.stream_lock = threading.RLock()
         
-        # Try to initialize CUDA
+        # Use enhanced GPU detection
         try:
-            self.has_gpu = torch.cuda.is_available() and torch.version.cuda is not None
-            if self.has_gpu:
+            from gpu_setup import gpu_available, torch_cuda_available
+            self.has_gpu = gpu_available and torch_cuda_available
+            if self.has_gpu and torch.cuda.is_available():
+                self.streams = [torch.cuda.Stream() for _ in range(4)]
                 self._init_streams()
-        except:
-            self.has_gpu = False
-            logging.warning("CUDA initialization failed, falling back to CPU")
-            
+                logging.info(f"[GPU] GPU Manager initialized with {len(self.streams)} CUDA streams")
+        except ImportError:
+            # Fallback to direct torch detection
+            try:
+                self.has_gpu = torch.cuda.is_available() and torch.version.cuda is not None
+                if self.has_gpu:
+                    self.streams = [torch.cuda.Stream() for _ in range(4)]
+                    self._init_streams()
+            except:
+                self.has_gpu = False
+                logging.warning("CUDA initialization failed, falling back to CPU")
+        
         self._init_gpu()
     
     def _init_gpu(self) -> bool:
-      """Initialize GPU and NVML"""
-      try:
-          # Try NVML first
-          import pynvml
-          pynvml.nvmlInit()
-          device_count = pynvml.nvmlDeviceGetCount()
-          if device_count > 0:
-              self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-              self.has_gpu = True
-              self.pynvml_available = True
-              gpu_name = pynvml.nvmlDeviceGetName(self.handle).decode()
-              logging.info(f"GPU initialized: {gpu_name}")
-              return True
-      except:
-          # Fallback to direct nvidia-smi check
-          try:
-              result = subprocess.run(['nvidia-smi'], capture_output=True, check=True)
-              self.has_gpu = True
-              logging.info("GPU detected via nvidia-smi")
-              return True
-          except:
-              logging.warning("No GPU detected, falling back to CPU processing")
-              self.has_gpu = False
-              return False
+        """Initialize GPU and NVML"""
+        try:
+            # Try NVML first
+            import pynvml
+            pynvml.nvmlInit()
+            device_count = pynvml.nvmlDeviceGetCount()
+            if device_count > 0:
+                self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self.has_gpu = True
+                self.pynvml_available = True
+                gpu_name = pynvml.nvmlDeviceGetName(self.handle).decode()
+                logging.info(f"GPU initialized: {gpu_name}")
+                return True
+        except:
+            # Fallback to direct nvidia-smi check
+            try:
+                result = subprocess.run(['nvidia-smi'], capture_output=True, check=True)
+                self.has_gpu = True
+                logging.info("GPU detected via nvidia-smi")
+                return True
+            except:
+                logging.warning("No GPU detected, falling back to CPU processing")
+                self.has_gpu = False
+                return False
           
     def get_stream(self):
         # Implement CUDA stream management
@@ -73,8 +82,7 @@ class GPUManager:
         if self.has_gpu:
             self.streams = [torch.cuda.Stream() for _ in range(4)]
             logging.info(f"Initialized {len(self.streams)} CUDA streams")
-
-
+    
     def get_next_stream(self):
         """Get next available CUDA stream with proper locking"""
         with self.stream_lock:  # Use fine-grained lock just for stream selection
@@ -120,26 +128,27 @@ class GPUManager:
             }
         except:
             return None
-
+    
     @contextmanager
     def gpu_context(self):
         """Context manager for GPU operations with proper cleanup"""
-        if not self.has_gpu:
-            yield None
-            return
-
         stream = None
+        
         try:
-            stream = self._get_next_stream()
-            if stream:
-                with torch.cuda.stream(stream):
-                    yield stream
+            if self.has_gpu:
+                stream = self._get_next_stream()
+                if stream:
+                    with torch.cuda.stream(stream):
+                        yield stream
+                else:
+                    yield None
             else:
                 yield None
                 
         except Exception as e:
             logging.warning(f"GPU context error: {e}, falling back to CPU")
-            yield None
+            # Let the calling code handle fallback, don't try to yield again
+            raise
             
         finally:
             if stream and torch.cuda.is_available():
@@ -147,6 +156,7 @@ class GPUManager:
                     torch.cuda.current_stream().synchronize()
                 except Exception as e:
                     logging.error(f"CUDA synchronization error: {e}")
+
 
 class ProgressTracker:
     def __init__(self, total_notes):
@@ -168,26 +178,30 @@ class ProgressTracker:
     def close(self):
         self.progress_bar.close()
 
-# Replace your current EncoderQueue with:
+
 class EncoderQueue:
-    def __init__(self, max_concurrent=2):
+    def __init__(self, num_workers=4, queue_size=32, max_concurrent=None):
+        self.queue = Queue(maxsize=queue_size)
+        self.pool = ThreadPoolExecutor(max_workers=num_workers)
+        self.futures = []
         self.lock = RLock()
         cpu_count = os.cpu_count() or 2
-        self.max_concurrent = max_concurrent
-        self.queue = Queue()
-        self.semaphore = threading.Semaphore(max_concurrent)
+        self.max_concurrent = max_concurrent if max_concurrent is not None else cpu_count
+        self.semaphore = threading.Semaphore(self.max_concurrent)
         
     def encode(self, ffmpeg_command):
         with self.semaphore:
             logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
             try:
-                result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
+                result = subprocess.run(ffmpeg_command, capture_output=True, text=True, 
+                                      encoding='utf-8', errors='replace')
                 if result.returncode != 0:
                     logging.error(f"EncoderQueue: Command failed: {result.stderr}")
                 return result
             except Exception as e:
                 logging.error(f"EncoderQueue: Error executing command: {str(e)}")
                 raise
+
 
 class EnhancedEncoderQueue(EncoderQueue):
     def __init__(self):
@@ -208,7 +222,9 @@ class EnhancedEncoderQueue(EncoderQueue):
         try:
             nvidia_smi = subprocess.run(['nvidia-smi', '-L'], 
                                       capture_output=True, 
-                                      text=True)
+                                      text=True,
+                                      encoding='utf-8',
+                                      errors='replace')
             return len(nvidia_smi.stdout.splitlines())
         except:
             return 0
@@ -222,7 +238,6 @@ class EnhancedEncoderQueue(EncoderQueue):
             return info.total // (1024*1024)  # Convert to MB
         except:
             return 4096  # Default 4GB
-        
     
     def _get_cache_key(self, ffmpeg_command):
         """Generate a cache key from ffmpeg command"""
@@ -250,7 +265,8 @@ class EnhancedEncoderQueue(EncoderQueue):
                 logging.info(f"EncoderQueue: Running command: {' '.join(ffmpeg_command)}")
                 try:
                     with self.gpu_manager.gpu_context():
-                        result = subprocess.run(ffmpeg_command, capture_output=True, text=True)
+                        result = subprocess.run(ffmpeg_command, capture_output=True, text=True,
+                                              encoding='utf-8', errors='replace')
                         if result.returncode == 0:
                             self.result_cache[cache_key] = result
                         return result
@@ -266,12 +282,15 @@ class EnhancedEncoderQueue(EncoderQueue):
             nvidia_smi = subprocess.run(
                 ['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader'],
                 capture_output=True,
-                text=True
+                text=True,
+                encoding='utf-8',
+                errors='replace'
             )
             utils = [int(x.strip(' %')) for x in nvidia_smi.stdout.splitlines()]
             return utils.index(min(utils))
         except:
             return None
 
-# Then replace your current encoder_queue instantiation with:
+
+# Global encoder queue instance
 encoder_queue = EnhancedEncoderQueue()
