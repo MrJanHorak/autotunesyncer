@@ -24,13 +24,15 @@ app.use((req, res, next) => {
 });
 
 // Enable CORS with specific options
-app.use(cors({
-  origin: 'http://localhost:5173', // Your frontend URL
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Content-Disposition'],
-  maxAge: 600,
-  exposedHeaders: ['Content-Length', 'Content-Type', 'Content-Disposition']
-}));
+app.use(
+  cors({
+    origin: 'http://localhost:5173', // Your frontend URL
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Content-Disposition'],
+    maxAge: 600,
+    exposedHeaders: ['Content-Length', 'Content-Type', 'Content-Disposition'],
+  })
+);
 
 // Use routes
 app.use('/api/midi', midiRoutes);
@@ -50,10 +52,10 @@ app.use((err, req, res, next) => {
 });
 
 // Error handling middleware
-app.use((err, req, res) => {
+app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(err.status || 500).json({
-    error: err.message || 'Internal Server Error'
+    error: err.message || 'Internal Server Error',
   });
 });
 
