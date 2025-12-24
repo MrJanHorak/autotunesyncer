@@ -428,6 +428,9 @@ class SimpleVideoComposer:
                 '-t', str(duration),
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-avoid_negative_ts', 'make_zero',
                 str(output_path)
             ]
             
