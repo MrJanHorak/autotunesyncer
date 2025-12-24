@@ -1614,6 +1614,9 @@ class VideoComposer:
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
                 "-r", "30",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-avoid_negative_ts", "make_zero",
                 str(out_path)
             ]
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -2731,42 +2734,18 @@ class VideoComposer:
         
     def _create_optimized_ffmpeg_command(self, inputs, filter_complex, output_path, duration):
         """Create optimized FFmpeg command with hardware acceleration"""
-        encoding_params = self._get_optimal_encoding_params()
+        from video_utils import build_ffmpeg_command
         
-        cmd = ['ffmpeg', '-y']
-        
-        # Add hardware acceleration if available
-        if 'additional_params' in encoding_params:
-            for param in encoding_params['additional_params'][:2]:  # Add hwaccel params first
-                if param in ['-hwaccel', '-hwaccel_output_format']:
-                    cmd.extend([param, encoding_params['additional_params'][encoding_params['additional_params'].index(param) + 1]])
-        
-        # Add inputs
-        for input_path in inputs:
-            cmd.extend(['-i', str(input_path)])
-        
-        # Add filter complex
-        if filter_complex:
-            cmd.extend(['-filter_complex', filter_complex])
-        
-        # Add encoding parameters
-        cmd.extend([
-            '-c:v', encoding_params['video_codec'],
-            '-preset', encoding_params['preset'],
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-t', str(duration),
-            '-r', '30'
-        ])
-        
-        # Add remaining optimization parameters
-        if 'additional_params' in encoding_params:
-            remaining_params = encoding_params['additional_params'][2:]  # Skip hwaccel params already added
-            cmd.extend(remaining_params)
-        
-        cmd.append(str(output_path))
-        
-        return cmd
+        # Use the standardized command builder
+        return build_ffmpeg_command(
+            inputs=inputs,
+            output=output_path,
+            filter_complex=filter_complex,
+            preset='fast',
+            crf=23,
+            audio_bitrate='192k',
+            use_gpu=True
+        )
 
     def _create_track_chunk_optimized(self, track_id, instrument_name, notes, start_time, end_time):
         """Create track chunk using OPTIMIZED autotune retrieval (no individual processing)"""

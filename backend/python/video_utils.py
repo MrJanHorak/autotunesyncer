@@ -18,6 +18,116 @@ from gpu_config import FFMPEG_GPU_CONFIG
 
 gpu_manager = GPUManager()
 
+# Codec Detection and FFmpeg Command Builder
+def get_optimal_video_codec():
+    """Detect available hardware encoders with fallback"""
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-encoders', '-hide_banner'],
+            capture_output=True, text=True, timeout=5
+        )
+        output = result.stdout.lower()
+        
+        # Priority order: NVIDIA > Intel > AMD > CPU
+        if 'h264_nvenc' in output:
+            return 'h264_nvenc'  # NVIDIA GPU
+        elif 'h264_qsv' in output:
+            return 'h264_qsv'    # Intel QuickSync
+        elif 'h264_amf' in output:
+            return 'h264_amf'    # AMD VCE
+    except Exception as e:
+        logging.debug(f"Codec detection failed: {e}")
+    
+    return 'libx264'  # Fallback CPU codec
+
+
+def build_ffmpeg_command(
+    inputs,
+    output,
+    filter_complex=None,
+    preset='fast',
+    crf=23,
+    audio_bitrate='192k',
+    use_gpu=True
+):
+    """
+    Build optimized FFmpeg command with hardware acceleration support.
+    
+    Args:
+        inputs: List of input file paths
+        output: Output file path
+        filter_complex: FFmpeg filter complex string
+        preset: Encoding preset (fast/medium/slow)
+        crf: Quality (0-51, lower is better)
+        audio_bitrate: Audio bitrate (e.g., '192k')
+        use_gpu: Enable GPU acceleration if available
+    
+    Returns:
+        List of command arguments for subprocess.run()
+    """
+    cmd = ['ffmpeg', '-y']
+    
+    # Add inputs
+    if isinstance(inputs, str):
+        cmd.extend(['-i', str(inputs)])
+    else:
+        for input_file in inputs:
+            cmd.extend(['-i', str(input_file)])
+    
+    # Filter complex
+    if filter_complex:
+        cmd.extend(['-filter_complex', filter_complex])
+    
+    # Video codec selection
+    codec = get_optimal_video_codec() if use_gpu else 'libx264'
+    
+    if codec == 'h264_nvenc':
+        # NVIDIA GPU encoding
+        cmd.extend([
+            '-c:v', 'h264_nvenc',
+            '-preset', 'p4',  # NVIDIA preset
+            '-b:v', '5M',
+            '-maxrate', '8M'
+        ])
+    elif codec in ['h264_qsv', 'h264_amf']:
+        # Intel/AMD GPU encoding
+        cmd.extend([
+            '-c:v', codec,
+            '-preset', 'fast',
+            '-b:v', '5M'
+        ])
+    else:
+        # CPU encoding with multi-threading
+        cpu_count = min(os.cpu_count() or 4, 8)
+        cmd.extend([
+            '-threads', str(cpu_count),
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', str(crf)
+        ])
+    
+    # Audio encoding
+    cmd.extend([
+        '-c:a', 'aac',
+        '-b:a', audio_bitrate,
+        '-ar', '44100',
+        '-ac', '2'
+    ])
+    
+    # Compatibility and streaming optimization
+    cmd.extend([
+        '-pix_fmt', 'yuv420p',        # Maximum compatibility
+        '-movflags', '+faststart',    # Enable progressive download
+        '-avoid_negative_ts', 'make_zero',  # Fix timing issues
+        '-g', '30',                   # GOP size
+        '-bf', '3',                   # B-frames
+        '-refs', '3'                  # Reference frames
+    ])
+    
+    cmd.append(str(output))
+    return cmd
+
+
 # Performance monitoring
 @contextmanager
 def performance_monitor(operation_name):

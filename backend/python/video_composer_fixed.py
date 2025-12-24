@@ -529,6 +529,8 @@ class VideoComposerFixed:
                 '-ss', '0',  # Start from beginning
                 '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
                 '-avoid_negative_ts', 'make_zero',
                 str(output_path)
             ]
@@ -557,6 +559,9 @@ class VideoComposerFixed:
                 '-t', str(duration),
                 '-c:v', 'libx264', '-preset', 'fast',
                 '-c:a', 'aac', '-b:a', '128k',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-avoid_negative_ts', 'make_zero',
                 str(chunk_path)
             ]
             
@@ -594,6 +599,8 @@ class VideoComposerFixed:
                 '-safe', '0',
                 '-i', str(concat_file),
                 '-c', 'copy',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
                 str(self.output_path)
             ]
             
