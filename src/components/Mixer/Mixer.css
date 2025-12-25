@@ -28,7 +28,7 @@
   flex-direction: column;
   align-items: center;
   min-width: 100px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 .mixer-track label {
@@ -42,7 +42,7 @@
   max-width: 120px;
 }
 
-.mixer-track input[type="range"] {
+.mixer-track input[type='range'] {
   -webkit-appearance: slider-vertical;
   width: 8px;
   height: 100px;
