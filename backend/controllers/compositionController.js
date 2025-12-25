@@ -281,6 +281,14 @@ async function processVideoWithPython(
         '4',
       ];
 
+      // Add preview mode if requested
+      if (req.body.preview) {
+        console.log(
+          'Enabling preview mode (lower resolution, faster processing)'
+        );
+        pythonArgs.push('--preview');
+      }
+
       console.log('Starting enhanced Python process:', pythonArgs);
       const pythonProcess = spawn('python', pythonArgs, {
         stdio: ['pipe', 'pipe', 'pipe'],

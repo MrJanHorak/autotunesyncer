@@ -28,11 +28,12 @@ class VideoComposerWrapper:
     notes during final combination. Now includes GPU acceleration support.
     """
     
-    def __init__(self):
+    def __init__(self, preview_mode=False):
         self.logger = logging.getLogger(__name__)
         self.temp_dir = None
         self.composer = None
         self.gpu_enabled = False  # Disable GPU acceleration by default for safety
+        self.preview_mode = preview_mode
         
     def _transform_midi_data(self, midi_data: dict) -> dict:
         """
@@ -140,11 +141,20 @@ class VideoComposerWrapper:
             
             # Initialize VideoComposer with the correct path structure
             # The VideoComposer will access gridArrangement from midi_data during __init__
-            self.composer = VideoComposer(
-                processed_videos_dir=str(processed_dir),
-                midi_data=midi_data,
-                output_path=output_path
-            )
+            try:
+                self.composer = VideoComposer(
+                    processed_videos_dir=str(processed_dir),
+                    midi_data=midi_data,
+                    output_path=output_path,
+                    preview_mode=self.preview_mode
+                )
+            except TypeError:
+                self.logger.warning("VideoComposer does not accept preview_mode, initializing without it")
+                self.composer = VideoComposer(
+                    processed_videos_dir=str(processed_dir),
+                    midi_data=midi_data,
+                    output_path=output_path
+                )
             
             self.logger.info("VideoComposer initialized successfully")
             
