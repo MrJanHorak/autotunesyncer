@@ -1,4 +1,3 @@
- 
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState } from 'react';
 
@@ -130,7 +129,7 @@ function App() {
       ...prev,
       [key]: blob,
     }));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Add handleVideoReady function
@@ -144,7 +143,7 @@ function App() {
       ...prev,
       [instrumentKey]: videoUrl,
     }));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Add click handler to initialize audio context
