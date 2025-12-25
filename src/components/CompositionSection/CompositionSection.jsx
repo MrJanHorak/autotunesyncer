@@ -2,7 +2,7 @@ import { useState } from 'react';
 import PropTypes from 'prop-types';
 import VideoComposer from '../VideoComposer/VideoComposer';
 
-const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap, gridArrangement }) => {
+const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap, gridArrangement, trackVolumes }) => {
   const [composing, setComposing] = useState(false);
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -44,6 +44,7 @@ const CompositionSection = ({ videoFiles, midiData, instrumentTrackMap, gridArra
         midiData={midiData}
         instrumentTrackMap={instrumentTrackMap}
         gridArrangement={gridArrangement}
+        trackVolumes={trackVolumes}
         onProgress={handleCompositionProgress}
         onError={handleCompositionError}
         onStart={() => setComposing(true)}
