@@ -195,6 +195,25 @@ const Grid = ({ midiData, onArrangementChange }) => {
     }
   }, [calculateOptimalColumns]);
 
+  // Initialize arrangement on load
+  useEffect(() => {
+    if (items.length > 0) {
+      const arrangement = items.reduce((acc, item, index) => {
+        if (!item.isEmpty) {
+          const id = item.id.replace(/^(track-|drum-)/, '');
+          acc[id] = {
+            position: index,
+            row: Math.floor(index / columnCount),
+            column: index % columnCount,
+            type: item.id.startsWith('drum-') ? 'drum' : 'track',
+          };
+        }
+        return acc;
+      }, {});
+      onArrangementChange(arrangement);
+    }
+  }, [items, columnCount, onArrangementChange]);
+
   return (
     <div className='grid-container'>
       <div className='grid-controls'>

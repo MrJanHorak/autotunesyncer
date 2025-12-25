@@ -2,8 +2,14 @@
 import { useState, useEffect } from 'react';
 import { composeVideos } from '../../../services/videoServices.js';
 
-const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
+const VideoComposer = ({
+  videoFiles,
+  midiData,
+  gridArrangement,
+  trackVolumes,
+}) => {
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingMode, setProcessingMode] = useState(null);
   const [progress, setProgress] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
   const [error, setError] = useState(null);
@@ -12,9 +18,10 @@ const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
     console.log('VideoFiles received:', videoFiles);
   }, [videoFiles]);
 
-  const startComposition = async () => {
+  const startComposition = async (isPreview = false) => {
     console.log('Grid arrangement:', gridArrangement);
     setIsProcessing(true);
+    setProcessingMode(isPreview ? 'preview' : 'full');
     setProgress(0);
     setError(null);
 
@@ -24,11 +31,17 @@ const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
       // Add MIDI data
       const midiJsonString = JSON.stringify({
         ...midiData,
-        gridArrangement, 
+        gridArrangement,
+        trackVolumes,
       });
       console.log('Midi data being sent:', JSON.parse(midiJsonString));
       const midiBlob = new Blob([midiJsonString], { type: 'application/json' });
       formData.append('midiData', midiBlob);
+
+      // Add preview flag if requested
+      if (isPreview) {
+        formData.append('preview', 'true');
+      }
 
       // Process and append videos
       for (const [instrumentName, videoData] of Object.entries(videoFiles)) {
@@ -108,6 +121,7 @@ const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
       }
     } finally {
       setIsProcessing(false);
+      setProcessingMode(null);
     }
   };
 
@@ -122,23 +136,41 @@ const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
 
   return (
     <div className='video-composer'>
-      <button
-        onClick={startComposition}
-        disabled={isProcessing || Object.keys(videoFiles).length === 0}
-        className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50'
-      >
-        {isProcessing ? 'Processing...' : 'Start Composition'}
-      </button>
+      <div className='flex gap-4 mb-4'>
+        <button
+          onClick={() => startComposition(true)}
+          disabled={isProcessing || Object.keys(videoFiles).length === 0}
+          className='px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 disabled:opacity-50 font-medium'
+        >
+          {isProcessing && processingMode === 'preview'
+            ? 'Generating Preview...'
+            : 'Generate Preview (Fast)'}
+        </button>
+        <button
+          onClick={() => startComposition(false)}
+          disabled={isProcessing || Object.keys(videoFiles).length === 0}
+          className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 font-medium'
+        >
+          {isProcessing && processingMode === 'full'
+            ? 'Processing Full Video...'
+            : 'Start Full Composition'}
+        </button>
+      </div>
 
       {isProcessing && (
         <div className='mt-4'>
           <div className='w-full h-2 bg-gray-200 rounded'>
             <div
-              className='h-full bg-blue-500 rounded'
+              className={`h-full rounded transition-all duration-300 ${
+                processingMode === 'preview' ? 'bg-yellow-500' : 'bg-blue-500'
+              }`}
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className='text-sm text-gray-600 mt-1'>{progress}% complete</p>
+          <p className='text-sm text-gray-600 mt-1'>
+            {processingMode === 'preview' ? 'Preview' : 'Full'} Progress:{' '}
+            {progress}%
+          </p>
         </div>
       )}
 

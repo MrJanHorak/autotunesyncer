@@ -17,6 +17,8 @@ import CompositionSection from './components/CompositionSection/CompositionSecti
 import MidiParser from './components/MidiParser/MidiParser';
 import ProgressBar from './components/ProgressBar/ProgressBar';
 import Grid from './components/Grid/Grid';
+import Mixer from './components/Mixer/Mixer';
+import PreviewPlayer from './components/PreviewPlayer/PreviewPlayer';
 
 import './App.css';
 
@@ -76,6 +78,14 @@ function App() {
   const [parsedMidiData, setParsedMidiData] = useState(null);
   const [midiFile, setMidiFile] = useState(null);
   const [gridArrangement, setGridArrangement] = useState({});
+  const [trackVolumes, setTrackVolumes] = useState({});
+
+  const handleVolumeChange = (trackKey, volume) => {
+    setTrackVolumes((prev) => ({
+      ...prev,
+      [trackKey]: volume,
+    }));
+  };
 
   const handleMidiProcessed = (file) => {
     setMidiFile(file);
@@ -165,6 +175,34 @@ function App() {
           {instruments.length > 0 && (
             <InstrumentList instruments={instruments} />
           )}
+
+          {instruments.length > 0 && (
+            <div
+              className='audio-control-section'
+              style={{
+                margin: '20px 0',
+                padding: '20px',
+                background: '#f5f5f5',
+                borderRadius: '8px',
+              }}
+            >
+              <Mixer
+                instruments={instruments}
+                volumes={trackVolumes}
+                onVolumeChange={handleVolumeChange}
+              />
+
+              <div style={{ marginTop: '15px' }}>
+                <PreviewPlayer
+                  midiData={parsedMidiData}
+                  videoFiles={videoFiles}
+                  volumes={trackVolumes}
+                  instruments={instruments}
+                />
+              </div>
+            </div>
+          )}
+
           <Grid
             midiData={parsedMidiData}
             onArrangementChange={setGridArrangement}
@@ -193,6 +231,7 @@ function App() {
           midiData={parsedMidiData}
           instrumentTrackMap={instrumentTrackMap}
           gridArrangement={gridArrangement}
+          trackVolumes={trackVolumes}
         />
       )}
     </div>
