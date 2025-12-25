@@ -157,11 +157,11 @@ def performance_monitor(operation_name):
 def get_optimized_ffmpeg_params(use_gpu=True, preset="fast", quality="high"):
     """Get optimized FFmpeg parameters based on system capabilities"""
     
-    # Enable GPU acceleration using our verified GPU functions
+    # Enable GPU encoding (NVENC encode-only, no forced CUDA decode for compatibility)
     if use_gpu and gpu_manager.has_gpu:
-        # Use our GPU config settings
+        # Use NVENC encoding without forced CUDA decode (better WebM/VP8/VP9 compatibility on Windows)
         params = {
-            'hwaccel': 'cuda',
+            # No 'hwaccel' key - avoid forced CUDA decode which fails on WebM
             'video_codec': FFMPEG_GPU_CONFIG['encoder'],
             'preset': FFMPEG_GPU_CONFIG['preset'],
             'crf': 23 if quality == "high" else 28,
@@ -201,8 +201,8 @@ def get_optimized_ffmpeg_params_list(use_gpu=True, preset="fast", quality="high"
     base_params = []
     
     if use_gpu and gpu_manager.has_gpu:
+        # NVENC encode-only (no forced CUDA decode for WebM compatibility)
         base_params.extend([
-            '-hwaccel', params['hwaccel'],
             '-c:v', params['video_codec'],
             '-preset', params['preset'],
             '-crf', str(params['crf'])

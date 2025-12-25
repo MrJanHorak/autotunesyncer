@@ -461,12 +461,23 @@ class VideoComposer:
         'drums': 0.2,        'instruments': 1.5
     }
 
-    def __init__(self, processed_videos_dir, midi_data, output_path):
+    def __init__(self, processed_videos_dir, midi_data, output_path, preview_mode=False):
         """Initialize VideoComposer with proper path handling"""
         try:
             logging.info("=== VideoComposer Initialization ===")
+            self.preview_mode = preview_mode
+            
+            # Initialize render configuration for preview vs production
+            self.render_config = self._get_render_config()
+            if self.preview_mode:
+                logging.info(f"🚀 PREVIEW MODE ENABLED: {self.render_config}")
+
             logging.info(f"Received MIDI data structure: {list(midi_data.keys())}")
             logging.info(f"Grid arrangement from MIDI: {midi_data.get('gridArrangement')}")
+
+            # Extract track volumes from midi_data
+            self.track_volumes = midi_data.get('trackVolumes', {})
+            logging.info(f"Initialized VideoComposer with track volumes: {self.track_volumes}")
 
             self.processed_videos_dir = Path(processed_videos_dir)
             
@@ -517,7 +528,6 @@ class VideoComposer:
             self.chunk_cache = {}
             self.chunk_cache_locks = {i: threading.Lock() for i in range(1000)} # Pre-allocate locks
             self.chunk_cache = LRUCache(128)  # Example: Cache up to 128 chunks
-            # self.chunk_cache = {}  # This would overwrite the LRUCache
             self.max_cached_chunks = 4
             self.metrics_log = []
             self.encoder_params = {
@@ -530,11 +540,18 @@ class VideoComposer:
                     "-b:v", "5M",
                     "-maxrate", "10M",
                     "-bufsize", "10M",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-ar", "44100",
+                    "-ac", "2",
+                    "-movflags", "+faststart",
+                    "-threads", "4",
                     "-profile:v", "high"
                 ]
             }
             self.chunk_size = max(1, min(16, os.cpu_count()))  # Smaller chunk size
-            self.max_workers = min(2, os.cpu_count())  # Limit workers            self.use_gpu = True
+            self.max_workers = min(2, os.cpu_count())  # Limit workers
+            self.use_gpu = True
             self.lock = RLock()  # Add class-level lock
             self.clip_pool = ClipPool(max_size=8)  # Add clip pool
             self.chunk_cache_lock = RLock()  # Add dedicated cache lock
@@ -581,7 +598,99 @@ class VideoComposer:
             logging.error(f"VideoComposer init error: {str(e)}")
             raise
 
+    def _get_render_config(self):
+        """
+        Clean separation of rendering configurations for Preview vs Production.
+        Returns a dictionary of encoding settings.
+        """
+        if self.preview_mode:
+            return {
+                'resolution': '640x360',
+                'preset': 'ultrafast',  # CPU: ultrafast, GPU: p1/p2
+                'crf': '28',            # Lower quality
+                'audio_bitrate': '128k',
+                'video_bitrate': '1M',
+                'scale_filter': 'scale=640:360'
+            }
+        else:
+            return {
+                'resolution': '1920x1080',
+                'preset': 'fast',       # CPU: fast, GPU: p4
+                'crf': '23',            # Standard quality
+                'audio_bitrate': '320k',
+                'video_bitrate': '8M',
+                'scale_filter': 'scale=1920:1080'
+            }
+
+    def _get_encoding_settings(self):
+        """Get FFmpeg encoding arguments based on configuration and hardware"""
+        config = self.render_config
         
+        # Check for GPU
+        has_gpu = False
+        try:
+            import torch
+            has_gpu = torch.cuda.is_available()
+        except ImportError:
+            pass
+
+        if has_gpu:
+            # GPU Settings - h264_nvenc with preview/production differences
+            return [
+                '-c:v', 'h264_nvenc',
+                '-preset', 'fast' if not self.preview_mode else 'p1',  # p1 for preview (fastest), fast for production
+                '-rc', 'vbr',  # Variable bitrate mode
+                '-cq', config['crf'],  # Use config CRF
+                '-b:v', config['video_bitrate'],  # Use config bitrate
+            ]
+        else:
+            # CPU Settings
+            return [
+                '-c:v', 'libx264',
+                '-preset', config['preset'],
+                '-crf', config['crf'],
+            ]
+
+    def _resolve_segment_volume(self, segment):
+        """
+        Resolve the volume (in dB) for a given segment using trackVolumes.
+        Supports keys by track_id, normalized instrument name, and drum name.
+        """
+        try:
+            volumes = self.track_volumes or {}
+
+            # Try direct by track_id
+            track_id = str(segment.get('track_id', '')).lower()
+            if track_id:
+                val = volumes.get(track_id)
+                if isinstance(val, (int, float)):
+                    logging.info(f"Resolved volume via track_id '{track_id}': {val} dB")
+                    return float(val)
+
+            seg_type = segment.get('type')
+            # Drums: use 'drum_<normalized>' key
+            if seg_type == 'drum':
+                drum_name = segment.get('drum_name') or segment.get('track_name') or ''
+                drum_key = f"drum_{str(drum_name).lower().replace(' ', '_')}"
+                val = volumes.get(drum_key)
+                if isinstance(val, (int, float)):
+                    logging.info(f"Resolved volume via drum key '{drum_key}': {val} dB")
+                    return float(val)
+
+            # Instruments: normalized instrument name
+            track_name = segment.get('track_name') or segment.get('instrument') or ''
+            if isinstance(track_name, str) and track_name:
+                norm_name = normalize_instrument_name(track_name)
+                val = volumes.get(norm_name)
+                if isinstance(val, (int, float)):
+                    logging.info(f"Resolved volume via instrument '{norm_name}': {val} dB")
+                    return float(val)
+
+            # Fallback: 0 dB
+            return 0.0
+        except Exception as e:
+            logging.warning(f"Volume resolve error: {e}; defaulting to 0 dB")
+            return 0.0
 
     @staticmethod
     def normalize_midi_timing(midi_data):
@@ -4578,9 +4687,12 @@ class VideoComposer:
                 logging.error("❌ Grid dimensions are zero, cannot create layout.")
                 return None
 
-            cell_width = 1920 // grid_cols
-            cell_height = 1080 // grid_rows
+            # Use render config resolution for cell calculations
+            target_width, target_height = map(int, self.render_config['resolution'].split('x'))
+            cell_width = target_width // grid_cols
+            cell_height = target_height // grid_rows
             
+            logging.info(f"   Target resolution: {target_width}x{target_height} ({'PREVIEW' if self.preview_mode else 'PRODUCTION'})")
             logging.info(f"   Cell dimensions: {cell_width}x{cell_height} pixels")
 
             # Create a placeholder for each cell in the grid
@@ -4639,11 +4751,19 @@ class VideoComposer:
                         # Scale the video and prepare for stacking/mixing
                         filter_parts.append(f"[{input_idx}:v]scale={cell_width}:{cell_height}[v{r}_{c}]")
                         video_inputs_for_stack.append(f"[v{r}_{c}]")
-                        # Apply volume balancing to audio
-                        # (Your existing volume logic can be re-inserted here if needed)
-                        filter_parts.append(f"[{input_idx}:a]volume=1.0[a{r}_{c}]")
+                        
+                        # --- VOLUME FIX START ---
+                        # Get volume in dB for this segment (supports keys by track_id or normalized name)
+                        vol_db = float(self._resolve_segment_volume(cell_segment))
+                        # Convert dB to linear: 10 ^ (db / 20)
+                        vol_linear = 10 ** (vol_db / 20.0)
+                        
+                        # Apply volume filter
+                        filter_parts.append(f"[{input_idx}:a]volume={vol_linear:.2f}[a{r}_{c}]")
                         audio_inputs_for_mix.append(f"[a{r}_{c}]")
-                        logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name}")
+                        # --- VOLUME FIX END ---
+
+                        logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB")
                         input_idx += 1
                     else:
                         # Use the black placeholder for empty cells
@@ -4665,10 +4785,15 @@ class VideoComposer:
 
             # Finalize and run the command
             cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+            
+            # Get encoding settings based on preview mode and GPU availability
+            encoding_args = self._get_encoding_settings()
+            
             cmd.extend([
                 '-map', '[video_out]', '-map', '[audio_out]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '320k',
+                *encoding_args,
+                '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
+                '-pix_fmt', 'yuv420p',  # Compatible pixel format
                 '-t', str(duration), '-r', '30', str(output_path)
             ])
 

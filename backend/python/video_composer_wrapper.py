@@ -31,10 +31,10 @@ class VideoComposerWrapper:
     Wrapper class that delegates to SimpleVideoComposer
     This provides the exact class name that external code might expect
     """
-    def __init__(self, processed_videos_dir=None, midi_data=None, output_path=None, *args, **kwargs):
+    def __init__(self, processed_videos_dir=None, midi_data=None, output_path=None, preview_mode=False, *args, **kwargs):
         # Handle both positional and keyword arguments
         if processed_videos_dir is not None and midi_data is not None and output_path is not None:
-            self._composer = SimpleVideoComposer(processed_videos_dir, midi_data, output_path)
+            self._composer = SimpleVideoComposer(processed_videos_dir, midi_data, output_path, preview_mode=preview_mode)
         else:
             # For cases where it might be instantiated differently, create with defaults
             # and set attributes later
@@ -42,6 +42,7 @@ class VideoComposerWrapper:
             self._processed_videos_dir = processed_videos_dir
             self._midi_data = midi_data
             self._output_path = output_path
+            self._preview_mode = preview_mode
     
     def __getattr__(self, name):
         """Delegate all attribute access to the underlying composer"""
@@ -51,7 +52,8 @@ class VideoComposerWrapper:
                 self._composer = SimpleVideoComposer(
                     self._processed_videos_dir, 
                     self._midi_data, 
-                    self._output_path
+                    self._output_path,
+                    preview_mode=getattr(self, '_preview_mode', False)
                 )
             else:
                 raise AttributeError(f"VideoComposerWrapper not properly initialized. Missing required parameters.")
@@ -68,29 +70,30 @@ class VideoComposerWrapper:
                 self._composer = SimpleVideoComposer(
                     self._processed_videos_dir, 
                     self._midi_data, 
-                    self._output_path
+                    self._output_path,
+                    preview_mode=getattr(self, '_preview_mode', False)
                 )
             else:
                 raise RuntimeError("VideoComposerWrapper not properly initialized. Cannot compose.")
         
         return self._composer.create_composition()
     
-    def initialize(self, processed_videos_dir, midi_data, output_path):
+    def initialize(self, processed_videos_dir, midi_data, output_path, preview_mode=False):
         """Manual initialization method for compatibility"""
-        self._composer = SimpleVideoComposer(processed_videos_dir, midi_data, output_path)
+        self._composer = SimpleVideoComposer(processed_videos_dir, midi_data, output_path, preview_mode=preview_mode)
         return self
 
 # Export the class for external imports
 __all__ = ['VideoComposer', 'VideoComposerFixed', 'VideoComposerWrapper', 'SimpleVideoComposer']
 
-def create_video_composer(processed_videos_dir, midi_data, output_path):
+def create_video_composer(processed_videos_dir, midi_data, output_path, preview_mode=False):
     """Factory function for creating a video composer instance"""
-    return SimpleVideoComposer(processed_videos_dir, midi_data, output_path)
+    return SimpleVideoComposer(processed_videos_dir, midi_data, output_path, preview_mode=preview_mode)
 
 # For backward compatibility with any existing code
-def VideoComposer(processed_videos_dir, midi_data, output_path):
+def VideoComposer(processed_videos_dir, midi_data, output_path, preview_mode=False):
     """Backward compatible VideoComposer function"""
-    return SimpleVideoComposer(processed_videos_dir, midi_data, output_path)
+    return SimpleVideoComposer(processed_videos_dir, midi_data, output_path, preview_mode=preview_mode)
 
 def main():
     """Main function for testing"""

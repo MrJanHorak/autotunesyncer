@@ -4,6 +4,7 @@ import { runPythonProcessor, preprocessVideo } from '../js/pythonBridge.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = express.Router();
@@ -103,9 +104,23 @@ router.post(
   async (req, res) => {
     try {
       console.log('Received request files:', req.files);
+      console.log('Request body fields:', Object.keys(req.body));
+      console.log('Preview mode requested:', req.body.preview);
 
       if (!req.files || req.files.length === 0) {
         throw new Error('No files were uploaded');
+      }
+
+      // Check if preview mode is requested
+      const isPreviewMode =
+        req.body.preview === 'true' || req.body.preview === true;
+
+      if (isPreviewMode) {
+        console.log(
+          '🎬 PREVIEW MODE ENABLED - Using faster, lower quality settings'
+        );
+      } else {
+        console.log('🎬 PRODUCTION MODE - Using full quality settings');
       }
 
       // Find MIDI file
@@ -130,23 +145,56 @@ router.post(
       const maxCol = Math.max(
         ...Object.values(gridArrangement).map((pos) => pos.column)
       );
-      const targetWidth = Math.floor(1920 / (maxCol + 1));
-      const targetHeight = Math.floor(1080 / (maxRow + 1)); // Process each video
+      // Use preview resolution (640x360) or production (1920x1080)
+      const totalWidth = isPreviewMode ? 640 : 1920;
+      const totalHeight = isPreviewMode ? 360 : 1080;
+      const targetWidth = Math.floor(totalWidth / (maxCol + 1));
+      const targetHeight = Math.floor(totalHeight / (maxRow + 1));
+      console.log(
+        `Preprocessing target cell size: ${targetWidth}x${targetHeight} (${
+          isPreviewMode ? 'PREVIEW' : 'PRODUCTION'
+        })`
+      );
+      // Process each video
       for (const file of videoFiles) {
         const instrumentName = path.parse(file.originalname).name;
         const originalPath = file.path;
+        // Build a stable cache key based on file content + target size + mode
+        const fileBuffer = fs.readFileSync(originalPath);
+        const cacheKey = crypto
+          .createHash('sha1')
+          .update(fileBuffer)
+          .update(
+            `${targetWidth}x${targetHeight}:${
+              isPreviewMode ? 'preview' : 'prod'
+            }`
+          )
+          .digest('hex')
+          .slice(0, 16);
         const processedPath = path.join(
           uploadsDir,
-          `processed_${path.basename(file.path)}`
+          `processed_${cacheKey}-${instrumentName}.mp4`
         );
 
         try {
-          // Preprocess video with correct dimensions
-          await preprocessVideo(
-            originalPath,
-            processedPath,
-            `${targetWidth}x${targetHeight}`
-          );
+          // If cached preprocessed file exists, reuse it
+          if (fs.existsSync(processedPath)) {
+            console.log(
+              `Using cached preprocessed file for ${instrumentName}: ${processedPath}`
+            );
+          } else {
+            // Preprocess video with correct dimensions
+            await preprocessVideo(
+              originalPath,
+              processedPath,
+              `${targetWidth}x${targetHeight}`,
+              {
+                performanceMode: true,
+                quality: isPreviewMode ? 'low' : 'high',
+                memoryLimit: 4,
+              }
+            );
+          }
 
           // Structure data to match Python processor expectations
           videos[instrumentName] = {
@@ -158,7 +206,11 @@ router.post(
           console.log(`Processed ${instrumentName}: ${processedPath}`);
 
           // Cleanup original
-          fs.unlinkSync(originalPath);
+          try {
+            fs.unlinkSync(originalPath);
+          } catch (e) {
+            console.warn('Failed to cleanup original upload:', e.message);
+          }
         } catch (err) {
           console.error(`Error preprocessing ${instrumentName}:`, err);
           throw err;
@@ -355,14 +407,21 @@ router.post(
         'positions'
       );
 
+      // Extract track volumes from midiData
+      const trackVolumes = midiData.trackVolumes || {};
+      console.log('Track volumes received:', trackVolumes);
+
       // Create temp config file
       const config = {
         tracks: midiData.tracks,
         header: midiData.header,
         gridArrangement: midiData.gridArrangement, // Move to top level
+        trackVolumes: trackVolumes, // Pass volumes to Python
         videos: videos,
+        preview: isPreviewMode, // Pass preview flag to Python
       };
       console.log('Grid arrangement in config:', config.gridArrangement);
+      console.log('Preview mode in config:', config.preview);
       const configPath = path.join(
         os.tmpdir(),
         `video-config-${uuidv4()}.json`

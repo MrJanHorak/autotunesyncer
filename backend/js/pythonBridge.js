@@ -24,6 +24,8 @@ export const runPythonProcessor = async (configPath) => {
       const midiData = {
         tracks: config.tracks || [],
         gridArrangement: config.gridArrangement || {},
+        // Include track volumes from config so Python can apply them
+        trackVolumes: config.trackVolumes || {},
       };
 
       // Add validation to ensure grid arrangement is not empty
@@ -61,7 +63,7 @@ export const runPythonProcessor = async (configPath) => {
 
       // Use the enhanced video processor
       const pythonScript = path.join(__dirname, '../utils/video_processor.py');
-      const process = spawn('python', [
+      const pythonArgs = [
         pythonScript,
         '--midi-json',
         midiJsonPath,
@@ -72,7 +74,17 @@ export const runPythonProcessor = async (configPath) => {
         '--performance-mode',
         '--memory-limit',
         '4',
-      ]);
+      ];
+
+      // Add preview flag if requested
+      if (config.preview === true) {
+        console.log(
+          'Python Bridge - Adding --preview flag for faster processing'
+        );
+        pythonArgs.push('--preview');
+      }
+
+      const process = spawn('python', pythonArgs);
 
       let output = '';
       let errorOutput = '';

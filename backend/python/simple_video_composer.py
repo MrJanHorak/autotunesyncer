@@ -48,11 +48,12 @@ class SimpleVideoComposer:
     CHUNK_DURATION = 4.0
     FRAME_RATE = 30
     
-    def __init__(self, processed_videos_dir, midi_data, output_path):
+    def __init__(self, processed_videos_dir, midi_data, output_path, preview_mode=False):
         self.processed_videos_dir = Path(processed_videos_dir)
         self.uploads_dir = self._find_uploads_dir()
         self.output_path = Path(output_path)
         self.midi_data = midi_data
+        self.preview_mode = preview_mode
         
         # Simple track organization
         self.regular_tracks = []
@@ -69,6 +70,7 @@ class SimpleVideoComposer:
         logging.info(f"   📁 Videos dir: {self.uploads_dir}")
         logging.info(f"   🎵 Regular tracks: {len(self.regular_tracks)}")
         logging.info(f"   🥁 Drum tracks: {len(self.drum_tracks)}")
+        logging.info(f"   👁️ Preview mode: {self.preview_mode}")
     
     def _find_uploads_dir(self):
         """Find the uploads directory containing video files"""
@@ -422,12 +424,23 @@ class SimpleVideoComposer:
             
             # Simple ffmpeg command to create composition
             # This can be enhanced with proper grid layout based on grid_positions
+            
+            # Determine settings based on preview mode
+            if self.preview_mode:
+                # Preview settings: Lower resolution, faster preset, lower bitrate
+                video_settings = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-s', '640x360']
+                audio_settings = ['-c:a', 'aac', '-b:a', '96k']
+            else:
+                # Production settings: Full resolution, better quality
+                video_settings = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
+                audio_settings = ['-c:a', 'aac', '-b:a', '128k']
+            
             cmd = [
                 'ffmpeg', '-y',
                 '-i', base_video,
                 '-t', str(duration),
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '128k',
+                *video_settings,
+                *audio_settings,
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart',
                 '-avoid_negative_ts', 'make_zero',
@@ -447,13 +460,26 @@ class SimpleVideoComposer:
     
     def _create_silent_chunk(self, output_path, duration):
         """Create a silent video chunk"""
+        
+        # Determine settings based on preview mode
+        if self.preview_mode:
+            # Preview settings: Lower resolution
+            resolution = '640x360'
+            video_settings = ['-c:v', 'libx264', '-preset', 'ultrafast']
+            audio_settings = ['-c:a', 'aac', '-b:a', '96k']
+        else:
+            # Production settings: Full resolution
+            resolution = '1920x1080'
+            video_settings = ['-c:v', 'libx264', '-preset', 'fast']
+            audio_settings = ['-c:a', 'aac', '-b:a', '128k']
+            
         cmd = [
             'ffmpeg', '-y',
-            '-f', 'lavfi', '-i', 'color=black:s=1920x1080:r=30',
+            '-f', 'lavfi', f'-i', f'color=black:s={resolution}:r=30',
             '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
             '-t', str(duration),
-            '-c:v', 'libx264', '-preset', 'fast',
-            '-c:a', 'aac', '-b:a', '128k',
+            *video_settings,
+            *audio_settings,
             str(output_path)
         ]
         
