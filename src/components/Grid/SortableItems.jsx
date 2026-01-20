@@ -2,14 +2,15 @@
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-export const SortableItem = ({ id, item, getHeatColor, accentColor, isEmpty }) => {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-  } = useSortable({ id });
+export const SortableItem = ({
+  id,
+  item,
+  getHeatColor,
+  accentColor,
+  isEmpty,
+}) => {
+  const { attributes, listeners, setNodeRef, transform, transition } =
+    useSortable({ id });
 
   const style = {
     transform: transform ? CSS.Transform.toString(transform) : '',
@@ -32,9 +33,9 @@ export const SortableItem = ({ id, item, getHeatColor, accentColor, isEmpty }) =
       {...listeners}
     >
       {!isEmpty && (
-        <div className="cell-content" style={cellContentStyle}>
-          <span className="cell-name">{item.name}</span>
-          <span className="cell-count">{item.count} notes</span>
+        <div className='cell-content' style={cellContentStyle}>
+          <span className='cell-name'>{item.name}</span>
+          <span className='cell-count'>{item.count} notes</span>
         </div>
       )}
     </div>
