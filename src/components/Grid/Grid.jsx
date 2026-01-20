@@ -170,15 +170,52 @@ const Grid = ({ midiData, onArrangementChange }) => {
     );
   };
 
-  // Heat map calculations
+  // Heat map calculations with modern spectrum gradient - 10 tier system for maximum distinction
   const getHeatColor = (intensity) => {
-    const hue = (1 - intensity) * 240;
-    return `hsl(${hue}, 70%, 50%)`;
+    // Creates smooth gradient backgrounds through the full thermal spectrum
+    // Blue (cold) → Cyan → Green → Yellow → Orange → Red (hot)
+    // Maximum visual distinction across entire activity range
+    if (intensity < 0.1) {
+      // Extreme low (0-10%) - pale blue
+      return 'linear-gradient(135deg, #bfdbfe 0%, #93c5fd 100%)';
+    } else if (intensity < 0.2) {
+      // Very minimal (10-20%) - sky blue
+      return 'linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%)';
+    } else if (intensity < 0.3) {
+      // Minimal (20-30%) - bright blue
+      return 'linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%)';
+    } else if (intensity < 0.4) {
+      // Very low (30-40%) - cyan
+      return 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%)';
+    } else if (intensity < 0.5) {
+      // Low (40-50%) - cyan-green
+      return 'linear-gradient(135deg, #14b8a6 0%, #10b981 100%)';
+    } else if (intensity < 0.6) {
+      // Medium-low (50-60%) - green
+      return 'linear-gradient(135deg, #22c55e 0%, #84cc16 100%)';
+    } else if (intensity < 0.7) {
+      // Medium (60-70%) - yellow-green
+      return 'linear-gradient(135deg, #84cc16 0%, #eab308 100%)';
+    } else if (intensity < 0.8) {
+      // Medium-high (70-80%) - yellow-orange
+      return 'linear-gradient(135deg, #eab308 0%, #f59e0b 100%)';
+    } else if (intensity < 0.9) {
+      // High (80-90%) - orange
+      return 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)';
+    } else {
+      // Extreme high (90-100%) - orange to red
+      return 'linear-gradient(135deg, #ea580c 0%, #dc2626 100%)';
+    }
   };
 
   const getHeatIntensity = (count) => {
-    const maxCount = Math.max(...items.map((item) => item.count));
-    return count / maxCount;
+    const maxCount = Math.max(...items.map((item) => item.count || 0));
+    return maxCount > 0 ? count / maxCount : 0;
+  };
+
+  // Get accent color for text - always white for readability
+  const getAccentColor = () => {
+    return '#ffffff'; // Always white for best readability
   };
   console.log('columnCount', columnCount);
   console.log('calculateOptimalColumns', calculateOptimalColumns);
@@ -250,19 +287,27 @@ const Grid = ({ midiData, onArrangementChange }) => {
           }}
         >
           <SortableContext items={items} strategy={rectSortingStrategy}>
-            {items.map((item) => (
-              <SortableItem
-                key={item.id}
-                id={item.id}
-                item={item}
-                getHeatColor={
-                  item.isEmpty
-                    ? 'transparent'
-                    : getHeatColor(getHeatIntensity(item.count))
-                }
-                isEmpty={item.isEmpty}
-              />
-            ))}
+            {items.map((item) => {
+              const intensity = getHeatIntensity(item.count);
+              return (
+                <SortableItem
+                  key={item.id}
+                  id={item.id}
+                  item={item}
+                  getHeatColor={
+                    item.isEmpty
+                      ? 'transparent'
+                      : getHeatColor(intensity)
+                  }
+                  accentColor={
+                    item.isEmpty
+                      ? '#9ca3af'
+                      : getAccentColor(intensity)
+                  }
+                  isEmpty={item.isEmpty}
+                />
+              );
+            })}
           </SortableContext>
         </div>
       </DndContext>
