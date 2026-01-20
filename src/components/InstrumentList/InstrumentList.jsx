@@ -22,11 +22,16 @@ const InstrumentList = ({ instruments, onInstrumentSelect }) => {
               key={index} 
               onClick={() => onInstrumentSelect(instrument)}
             >
-              {instrument.isDrum ? (
-                `Drums - ${instrument.group} - Midi Channel: ${instrument.number}`
-              ) : (
-                `${instrument.family} - ${instrument.name} - Midi Channel: ${instrument.number}`
-              )}
+              <div className='instrument-name-line'>
+                {instrument.isDrum ? (
+                  <>🥁 {instrument.group}</>
+                ) : (
+                  <>{instrument.family} - {instrument.name}</>
+                )}
+              </div>
+              <div className='instrument-channel-line'>
+                Midi Channel: {instrument.number}
+              </div>
             </li>
           ))}
         </ul>
