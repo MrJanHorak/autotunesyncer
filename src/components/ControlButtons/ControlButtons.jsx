@@ -10,28 +10,22 @@ const ControlButtons = ({
   onReRecord,
   instrument
 }) => (
-  <div className="controls-container">
-    {isRecording ? (
-      <button className="control-button" onClick={onStopRecording}>
-        Stop Recording
-      </button>
-    ) : (
-      <>
-        <button className="control-button" onClick={onStartRecording}>
-          Start Recording
-        </button>
-        {hasRecordedVideo && (
-          <button className="control-button" onClick={onReRecord}>
-            Re-record
-          </button>
-        )}
-        <SampleSoundButton 
-          instrument={instrument}
-          className="control-button"
-        />
-      </>
+  <>
+    <button className="control-button" onClick={isRecording ? onStopRecording : onStartRecording}>
+      {isRecording ? 'Stop Recording' : 'Start Recording'}
+    </button>
+    {!isRecording && (
+      <SampleSoundButton 
+        instrument={instrument}
+        className="control-button"
+      />
     )}
-  </div>
+    {hasRecordedVideo && !isRecording && (
+      <button className="control-button" onClick={onReRecord}>
+        Re-record
+      </button>
+    )}
+  </>
 );
 
 export default ControlButtons;

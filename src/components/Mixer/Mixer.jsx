@@ -28,6 +28,9 @@ const Mixer = ({ instruments, volumes, onVolumeChange }) => {
         <h3>Master Mixer</h3>
         <div className='mixer-info'>
           <span className='channel-count'>{instruments.length} channels</span>
+          {instruments.length > 8 && (
+            <span className='scroll-hint'>← Scroll →</span>
+          )}
         </div>
       </div>
 

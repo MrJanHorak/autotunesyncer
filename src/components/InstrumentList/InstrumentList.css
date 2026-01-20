@@ -37,13 +37,35 @@
 .instrument-list-content {
   max-height: 0;
   overflow: hidden;
-  transition: max-height 0.3s ease-out;
+  transition: max-height 0.3s ease-out, padding 0.3s ease-out;
   padding: 0 1.5rem;
 }
 
 .instrument-list-content.expanded {
-  max-height: 600px;
+  max-height: 2000px;
   padding: 1.5rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3b82f6 #e5e7eb;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar {
+  width: 8px;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar-track {
+  background: #f3f4f6;
+  border-radius: 4px;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+  border-radius: 4px;
+  border: 2px solid #f3f4f6;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
 }
 
 .instrument-list {
@@ -64,6 +86,29 @@
   border: 1.5px solid #e5e7eb;
   font-weight: 500;
   color: #1a1a1a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.instrument-list-item:hover {
+  background: linear-gradient(135deg, #e5e7eb 0%, #d1d5db 100%);
+  border-color: #2563eb;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
+}
+
+.instrument-name-line {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.instrument-channel-line {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #6b7280;
+  font-family: 'Courier New', monospace;
 }
 
 .instrument-list-item:hover {
