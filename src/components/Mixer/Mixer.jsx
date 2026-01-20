@@ -37,32 +37,34 @@ const Mixer = ({ instruments, volumes, onVolumeChange }) => {
             const key = inst.isDrum
               ? `drum_${inst.group.toLowerCase().replace(/\s+/g, '_')}`
               : inst.name.toLowerCase().replace(/\s+/g, '_');
-            
+
             const volume = volumes[key] || 0;
             const isMuted = muteStates[key];
             const isSolo = soloTrack === key;
 
             return (
-              <div 
-                key={`${key}-${index}`} 
+              <div
+                key={`${key}-${index}`}
                 className={`channel-strip ${isMuted ? 'muted' : ''} ${isSolo ? 'solo' : ''}`}
               >
                 {/* Channel Label */}
                 <div className='channel-label'>
-                  <span className='track-name'>{inst.isDrum ? inst.group : inst.name}</span>
+                  <span className='track-name'>
+                    {inst.isDrum ? inst.group : inst.name}
+                  </span>
                 </div>
 
                 {/* Fader Section */}
                 <div className='fader-section'>
                   <div className='level-meter'>
-                    <div 
-                      className='meter-fill' 
+                    <div
+                      className='meter-fill'
                       style={{
-                        height: `${((volume + 60) / 70) * 100}%`
+                        height: `${((volume + 60) / 70) * 100}%`,
                       }}
                     ></div>
                   </div>
-                  
+
                   <input
                     type='range'
                     min='-60'
