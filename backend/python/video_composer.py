@@ -103,7 +103,7 @@ from processing_utils import encoder_queue, GPUManager
 # Import GPU acceleration functions
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
-from ffmpeg_gpu import ffmpeg_gpu_encode
+# Removed unresolved import; GPU encode is imported lazily from utils.ffmpeg_gpu where used
 
 # Import CUDA compositing if available
 try:
@@ -557,6 +557,11 @@ class VideoComposer:
             self.chunk_cache_lock = RLock()  # Add dedicated cache lock
             self.max_cache_size = 1024 * 1024 * 100
             self.active_readers = set()  # Add reader tracking
+            # Onset alignment cache and toggle
+            self.onset_trim_cache = {}
+            self.trim_leading_silence = os.environ.get('ATS_TRIM_LEADING_SILENCE', '1') == '1'
+            # Onset offset cache for non-destructive alignment
+            self.onset_offset_cache = {}
             # Initialize path registry - use singleton instance
             self.path_registry = PathRegistry.get_instance()
             
@@ -691,6 +696,245 @@ class VideoComposer:
         except Exception as e:
             logging.warning(f"Volume resolve error: {e}; defaulting to 0 dB")
             return 0.0
+
+    def _detect_leading_silence(self, media_path, threshold_db=-35, min_duration=0.08):
+        """
+        Detect leading silence at the start of the audio stream using ffmpeg's silencedetect.
+        Returns trim_start seconds or 0.0 if no leading silence.
+        """
+        try:
+            if not media_path or not os.path.exists(media_path):
+                return 0.0
+
+            cmd = [
+                'ffmpeg', '-hide_banner', '-i', str(media_path),
+                '-af', f'silencedetect=noise={threshold_db}dB:duration={min_duration}',
+                '-f', 'null', '-'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return 0.0
+
+            silence_start = None
+            for line in (result.stderr or '').splitlines():
+                if 'silence_start:' in line and silence_start is None:
+                    try:
+                        silence_start = float(line.split('silence_start:')[1].strip())
+                    except:
+                        silence_start = None
+                if 'silence_end:' in line and silence_start is not None:
+                    try:
+                        silence_end = float(line.split('silence_end:')[1].split('|')[0].strip())
+                        if silence_start is not None and silence_start <= 0.2:
+                            return max(0.0, silence_end)
+                        else:
+                            return 0.0
+                    except:
+                        return 0.0
+            return 0.0
+        except Exception as e:
+            logging.debug(f"Silence detect failed: {e}")
+            return 0.0
+
+    def _auto_crop_silence(self, media_path, threshold_db=-35, min_duration=0.08):
+        """
+        Trim leading silence from the media using stream copy for speed.
+        Returns path to trimmed file or original path on failure.
+        """
+        try:
+            trim_start = self._detect_leading_silence(media_path, threshold_db, min_duration)
+            if trim_start <= 0.0:
+                return str(media_path)
+
+            media_path = Path(media_path)
+            cropped_path = media_path.parent / f"cropped_{media_path.name}"
+            crop_cmd = [
+                'ffmpeg', '-y',
+                '-ss', f'{trim_start}',
+                '-i', str(media_path),
+                '-c', 'copy',
+                str(cropped_path)
+            ]
+            crop_result = subprocess.run(crop_cmd, capture_output=True, text=True)
+            if crop_result.returncode == 0 and cropped_path.exists():
+                logging.info(f"Trimmed leading silence ({trim_start:.3f}s) for {media_path.name}")
+                return str(cropped_path)
+            return str(media_path)
+        except Exception as e:
+            logging.debug(f"Auto-crop failed: {e}")
+            return str(media_path)
+
+    def _get_onset_aligned_video(self, video_path):
+        """
+        Return onset-aligned version of video by trimming initial silence; cached per path.
+        Controlled by self.trim_leading_silence.
+        """
+        try:
+            if not self.trim_leading_silence:
+                return video_path
+            if not video_path or not os.path.exists(video_path):
+                return video_path
+            if video_path in self.onset_trim_cache and os.path.exists(self.onset_trim_cache[video_path]):
+                return self.onset_trim_cache[video_path]
+
+            aligned = self._auto_crop_silence(video_path)
+            self.onset_trim_cache[video_path] = aligned
+            return aligned
+        except Exception as e:
+            logging.debug(f"Onset align error: {e}")
+            return video_path
+
+    def _extract_temp_audio(self, video_path):
+        """Extract mono 44.1kHz WAV to temp for onset analysis."""
+        try:
+            if not video_path or not os.path.exists(video_path):
+                return None
+            if not hasattr(self, 'temp_dir') or self.temp_dir is None:
+                import tempfile
+                self.temp_dir = Path(tempfile.mkdtemp(prefix='composer_tmp_'))
+            out_wav = Path(self.temp_dir) / f"onset_{Path(video_path).stem}.wav"
+            cmd = [
+                'ffmpeg', '-hide_banner', '-y',
+                '-i', str(video_path),
+                '-vn', '-ac', '1', '-ar', '44100',
+                '-acodec', 'pcm_s16le',
+                str(out_wav)
+            ]
+            subprocess.run(cmd, capture_output=True)
+            return str(out_wav) if out_wav.exists() else None
+        except Exception:
+            return None
+
+    def _get_onset_offset(self, video_path):
+        """
+        Detect first audible onset time (seconds) using librosa; fallback to RMS.
+        Cached per video_path.
+        """
+        try:
+            if not video_path or not os.path.exists(video_path):
+                return 0.0
+            if video_path in self.onset_offset_cache:
+                return self.onset_offset_cache[video_path]
+
+            wav_path = self._extract_temp_audio(video_path)
+            if not wav_path:
+                self.onset_offset_cache[video_path] = 0.0
+                return 0.0
+
+            import librosa, numpy as np
+            y, sr = librosa.load(wav_path, sr=44100, mono=True)
+
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+            onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, units='time')
+            if onsets is not None and len(onsets) > 0:
+                offset = float(onsets[0])
+                if offset < 0.02 and len(onsets) > 1:
+                    offset = float(onsets[1])
+                offset = max(0.0, min(offset, 5.0))
+                self.onset_offset_cache[video_path] = offset
+                logging.info(f"Detected onset offset {offset:.3f}s for {Path(video_path).name}")
+                return offset
+
+            rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+            times = librosa.times_like(rms, sr=sr, hop_length=512)
+            thresh = max(0.01, float(np.median(rms) * 3.0))
+            sustain_frames = max(1, int((0.05 * sr) / 512))
+            for i in range(len(rms) - sustain_frames):
+                if np.all(rms[i:i + sustain_frames] > thresh):
+                    offset = float(times[i])
+                    offset = max(0.0, min(offset, 5.0))
+                    self.onset_offset_cache[video_path] = offset
+                    logging.info(f"Fallback onset offset {offset:.3f}s for {Path(video_path).name}")
+                    return offset
+
+            self.onset_offset_cache[video_path] = 0.0
+            return 0.0
+
+        except Exception as e:
+            logging.debug(f"Onset offset detect error: {e}")
+            try:
+                # cache fallback
+                if video_path:
+                    self.onset_offset_cache[video_path] = 0.0
+            except Exception:
+                pass
+            return 0.0
+
+    def _get_media_duration(self, media_path):
+        """Return media duration in seconds using ffprobe, or 0.0 on failure."""
+        try:
+            if not media_path or not os.path.exists(media_path):
+                return 0.0
+            cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                str(media_path)
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                return 0.0
+            import json as _json
+            data = _json.loads(r.stdout or '{}')
+            # Prefer audio stream duration if present, else format duration
+            duration = 0.0
+            streams = data.get('streams', [])
+            for s in streams:
+                if s.get('codec_type') == 'audio' and s.get('duration'):
+                    try:
+                        duration = float(s['duration'])
+                        break
+                    except:
+                        pass
+            if duration <= 0.0:
+                fmt = data.get('format', {})
+                try:
+                    duration = float(fmt.get('duration', 0.0))
+                except:
+                    duration = 0.0
+            return max(0.0, duration)
+        except Exception:
+            return 0.0
+
+    def _normalize_name_token(self, name: str) -> str:
+        """Normalize instrument names for robust filename matching."""
+        try:
+            import re
+            s = (name or '').lower()
+            s = s.replace(' ', '_')
+            s = re.sub(r'[^a-z0-9_]+', '_', s)
+            s = re.sub(r'_+', '_', s).strip('_')
+            return s
+        except Exception:
+            return (name or '').lower()
+
+    def _find_instrument_video_file(self, instrument_name: str) -> str | None:
+        """
+        Find a preprocessed instrument video by matching normalized tokens against files in uploads.
+        Prefers files starting with 'processed_'.
+        """
+        try:
+            norm = self._normalize_name_token(instrument_name)
+            candidates = list(self.uploads_dir.glob('processed_*.mp4')) or list(self.uploads_dir.glob('*.mp4'))
+            # Prefer processed files
+            for f in candidates:
+                stem = self._normalize_name_token(f.stem)
+                if norm in stem or stem.endswith(norm):
+                    return str(f)
+            # Fallback: partial token match
+            tokens = [t for t in norm.split('_') if t]
+            for f in candidates:
+                stem = self._normalize_name_token(f.stem)
+                if any(tok in stem for tok in tokens):
+                    return str(f)
+            avail = [p.name for p in candidates]
+            logging.warning(f"❌ No instrument file match for '{instrument_name}' (norm='{norm}'). Samples: {avail[:8]}...")
+            return None
+        except Exception as e:
+            logging.warning(f"Error finding instrument file for '{instrument_name}': {e}")
+            return None
 
     @staticmethod
     def normalize_midi_timing(midi_data):
@@ -979,23 +1223,23 @@ class VideoComposer:
             end = min(end, chunk_end)
 
             # Quantize
-            start = round(start / TIME_QUANTUM) * TIME_QUANTUM
-            end = round(end / TIME_QUANTUM) * TIME_QUANTUM
+            start = round(start / VideoComposer.TIME_QUANTUM) * VideoComposer.TIME_QUANTUM
+            end = round(end / VideoComposer.TIME_QUANTUM) * VideoComposer.TIME_QUANTUM
 
             # Enforce ordering
             if end <= start:
-                end = start + MIN_NOTE_DURATION
+                end = start + VideoComposer.MIN_NOTE_DURATION
 
             # Clamp again to chunk_end
             if end > chunk_end:
                 end = chunk_end
 
             # Enforce minimum duration
-            if (end - start) < MIN_NOTE_DURATION:
-                end = min(start + MIN_NOTE_DURATION, chunk_end)
+            if (end - start) < VideoComposer.MIN_NOTE_DURATION:
+                end = min(start + VideoComposer.MIN_NOTE_DURATION, chunk_end)
 
             duration = end - start
-            if duration < MIN_NOTE_DURATION * 0.5:
+            if duration < VideoComposer.MIN_NOTE_DURATION * 0.5:
                 # Still too tiny after attempts → skip to avoid ffmpeg trim errors
                 continue
 
@@ -1598,7 +1842,8 @@ class VideoComposer:
         total_duration,
         track_name,
         unique_id,
-        chunk_start_time=0.0
+        chunk_start_time=0.0,
+        onset_offset=0.0
     ):
         """
         WORKING unified note-triggered clip builder.
@@ -1676,19 +1921,31 @@ class VideoComposer:
             video_chain = "[base_v]"
             audio_streams = ["[base_a]"]
 
+            # Base onset offset
+            onset_base = 0.0 if onset_offset is None else max(0.0, min(float(onset_offset), 5.0))
+            source_duration = self._get_media_duration(video_path)
+
             for i, (start, dur, midi_note) in enumerate(valid):
                 # Pitch factor relative to C4 (60)
                 pitch_factor = 2 ** ((midi_note - 60) / 12.0)
 
-                # Trim source for dur
-                filter_parts.append(f"[0:v]trim=0:{dur},setpts=PTS-STARTPTS,scale=640:360[v{i}]")
+                # Compute safe onset per note so trim doesn't overshoot
+                safe_onset = onset_base
+                if source_duration > 0.0:
+                    max_start = max(0.0, source_duration - dur - 0.01)
+                    safe_onset = min(onset_base, max_start)
+                if safe_onset < 0.0:
+                    safe_onset = 0.0
+                logging.info(f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, safe_onset={safe_onset:.3f}s, dur={dur:.3f}s")
+                # Video trim at safe onset
+                filter_parts.append(f"[0:v]trim=start={safe_onset}:duration={dur},setpts=PTS-STARTPTS,scale=640:360[v{i}]")
                 if abs(pitch_factor - 1.0) > 0.01:
                     filter_parts.append(
-                        f"[0:a]atrim=0:{dur},asetpts=PTS-STARTPTS,"
+                        f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS,"
                         f"asetrate=44100*{pitch_factor},aresample=44100[a{i}]"
                     )
                 else:
-                    filter_parts.append(f"[0:a]atrim=0:{dur},asetpts=PTS-STARTPTS[a{i}]")
+                    filter_parts.append(f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]")
 
                 # Overlay enable window
                 end = start + dur
@@ -3721,7 +3978,7 @@ class VideoComposer:
             # Try multiple strategies to find the video
             video_path = None
 
-            # Strategy 1: Try with first note's MIDI value
+            # Strategy 1: Try with first note's MIDI value via PathRegistry
             if chunk_notes:
                 first_note_midi = chunk_notes[0].get('midi', 60)
                 video_path = registry.get_instrument_path(track_name, str(first_note_midi))
@@ -3730,13 +3987,17 @@ class VideoComposer:
             if not video_path:
                 video_path = registry.get_instrument_path(track_name, "60")
 
-            # Strategy 3: Try fallback approach - find any video for this instrument
+            # Strategy 3: Fallback approach - find any video for this instrument in registry
             if not video_path:
                 normalized_name = normalize_instrument_name(track_name)
                 instrument_paths = registry.instrument_paths.get(normalized_name, {})
                 if instrument_paths:
                     video_path = next(iter(instrument_paths.values()))
-                    logging.info(f"Instrument fallback used: {track_name}:{first_note_midi} -> {video_path}")
+                    logging.info(f"Instrument fallback used from registry: {track_name} -> {video_path}")
+
+            # Strategy 4: Robust filename search in uploads directory
+            if not video_path:
+                video_path = self._find_instrument_video_file(track_name)
 
             if not video_path or not os.path.exists(video_path):
                 logging.warning(f"No video found for instrument: {track_name}")
@@ -3745,13 +4006,16 @@ class VideoComposer:
             # Always use a unique_id for the note-triggered video
             import uuid
             short_id = str(uuid.uuid4())[:8]
+            # Compute onset offset (non-destructive)
+            onset_offset = self._get_onset_offset(video_path)
             triggered_video = self._create_note_triggered_video_sequence_fixed(
                 video_path=video_path,
                 notes=chunk_notes,
                 total_duration=chunk_duration,
                 track_name=track_name,
                 unique_id=short_id,
-                chunk_start_time=chunk_start_time
+                chunk_start_time=chunk_start_time,
+                onset_offset=onset_offset
             )
 
             if not triggered_video:
@@ -3760,7 +4024,7 @@ class VideoComposer:
             if triggered_video and os.path.exists(triggered_video):
                 return {
                     'video_path': triggered_video,
-                    'track_id': track_id,  # Use original track ID for grid positioning
+                    'track_id': str(track_id),  # Use original track ID (string) for grid positioning
                     'track_name': track_name,
                     'notes': chunk_notes,
                     'type': 'instrument'
@@ -4768,7 +5032,6 @@ class VideoComposer:
                     else:
                         # Use the black placeholder for empty cells
                         video_inputs_for_stack.append(f"[{black_video_input_idx}:v]")
-                        audio_inputs_for_mix.append(f"[{silent_audio_input_idx}:a]")
                         logging.info(f"      Cell ({r},{c}): EMPTY (using placeholder)")
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
@@ -4776,7 +5039,12 @@ class VideoComposer:
             # Create the xstack and amix filters
             layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
             filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[video_out]")
-            filter_parts.append(f"{''.join(audio_inputs_for_mix)}amix=inputs={grid_rows*grid_cols}:duration=longest[audio_out]")
+            # Mix only actual audio inputs to avoid normalization over empty streams
+            audio_input_count = len(audio_inputs_for_mix)
+            if audio_input_count == 0:
+                audio_inputs_for_mix = [f"[{silent_audio_input_idx}:a]"]
+                audio_input_count = 1
+            filter_parts.append(f"{''.join(audio_inputs_for_mix)}amix=inputs={audio_input_count}:duration=longest:normalize=0[audio_out]")
             
             logging.info(f"🎬 Final FFmpeg command construction:")
             logging.info(f"   Total inputs: {input_idx}")
@@ -5117,12 +5385,15 @@ class VideoComposer:
                     note_copy['time'] = float(note_copy.get('time', 0)) - start_time
                     chunk_notes.append(note_copy)
                 # Use the same note-triggered overlay method as instruments
+                # Align drum source to onset to capture attack
+                onset_offset = self._get_onset_offset(drum_video_path)
                 triggered_video = self._create_note_triggered_video_sequence_fixed(
                     video_path=drum_video_path,
                     notes=chunk_notes,
                     total_duration=chunk_duration,
                     track_name=drum_track_id,
-                    unique_id=short_id
+                    unique_id=short_id,
+                    onset_offset=onset_offset
                 )
                 if triggered_video and os.path.exists(triggered_video):
                     drum_segment = {
@@ -5367,30 +5638,47 @@ class VideoComposer:
             instrument_name
         )
 
-    def _find_instrument_video_file(self, normalized_name, original_name):
-        """Find the video file for an instrument"""
-        # Search patterns - try multiple naming conventions
+    def _find_instrument_video_file(self, name_or_normalized, original_name: str | None = None):
+        """Find the video file for an instrument.
+
+        Accepts either a normalized instrument name or an original display name.
+        The second param is optional to preserve older call sites.
+        """
+        # Derive both original and normalized tokens safely
+        if original_name is None:
+            original_name = str(name_or_normalized)
+        normalized_name = normalize_instrument_name(str(name_or_normalized))
+
+        # Build robust search patterns covering common variations
+        safe_original_underscore = original_name.lower().replace(' ', '_')
         search_patterns = [
             f"*{normalized_name}*.mp4",
-            f"*{original_name.lower().replace(' ', '_')}*.mp4",
+            f"*{safe_original_underscore}*.mp4",
             f"*{original_name.lower()}*.mp4",
-            f"processed_{normalized_name}*.mp4",
-            f"processed_{original_name.lower().replace(' ', '_')}*.mp4"
+            f"processed_*{normalized_name}*.mp4",
+            f"processed_*{safe_original_underscore}*.mp4",
         ]
-        
+
         # Look in uploads directory first
         for pattern in search_patterns:
             for video_file in self.uploads_dir.glob(pattern):
-                if 'drum' not in video_file.name.lower():  # Exclude drum files
-                    logging.info(f"🎹 Instrument match: {original_name} → {video_file.name}")
-                    return str(video_file)
-        
+                # Exclude drum files from instrument lookup
+                if 'drum' in video_file.name.lower():
+                    continue
+                logging.info(f"🎹 Instrument match: {original_name} → {video_file.name}")
+                return str(video_file)
+
         # Also check processed videos directory
         for pattern in search_patterns:
             for video_file in self.processed_videos_dir.glob(pattern):
-                if 'drum' not in video_file.name.lower():  # Exclude drum files
-                    logging.info(f"🎹 Instrument match (processed): {original_name} → {video_file.name}")
-                    return str(video_file)
+                if 'drum' in video_file.name.lower():
+                    continue
+                logging.info(f"🎹 Instrument match (processed): {original_name} → {video_file.name}")
+                return str(video_file)
+
+        # No match found
+        logging.warning(f"No instrument video found for: original='{original_name}', normalized='{normalized_name}'")
+        return None
         
         logging.warning(f"No video file found for instrument: {original_name} (tried patterns: {search_patterns})")
         return None
