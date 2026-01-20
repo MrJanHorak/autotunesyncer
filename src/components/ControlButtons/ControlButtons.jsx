@@ -2,26 +2,26 @@
 import SampleSoundButton from '../SampleSoundButton/SampleSoundButton';
 import '../styles.css';
 
-const ControlButtons = ({ 
-  isRecording, 
+const ControlButtons = ({
+  isRecording,
   hasRecordedVideo,
-  onStartRecording, 
-  onStopRecording, 
+  onStartRecording,
+  onStopRecording,
   onReRecord,
-  instrument
+  instrument,
 }) => (
   <>
-    <button className="control-button" onClick={isRecording ? onStopRecording : onStartRecording}>
+    <button
+      className='control-button'
+      onClick={isRecording ? onStopRecording : onStartRecording}
+    >
       {isRecording ? 'Stop Recording' : 'Start Recording'}
     </button>
     {!isRecording && (
-      <SampleSoundButton 
-        instrument={instrument}
-        className="control-button"
-      />
+      <SampleSoundButton instrument={instrument} className='control-button' />
     )}
     {hasRecordedVideo && !isRecording && (
-      <button className="control-button" onClick={onReRecord}>
+      <button className='control-button' onClick={onReRecord}>
         Re-record
       </button>
     )}

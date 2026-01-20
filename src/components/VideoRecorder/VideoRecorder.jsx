@@ -159,10 +159,13 @@ const VideoRecorder = ({
         videoElement.play();
         mediaRecorder.start();
 
-        setTimeout(() => {
-          mediaRecorder.stop();
-          videoElement.pause();
-        }, (end - start) * 1000);
+        setTimeout(
+          () => {
+            mediaRecorder.stop();
+            videoElement.pause();
+          },
+          (end - start) * 1000,
+        );
       });
     } catch (error) {
       console.error('Error trimming video:', error);
@@ -170,11 +173,14 @@ const VideoRecorder = ({
     }
   };
 
-  const handleAutotuneToggle = useCallback((e) => {
-    console.log('Toggle clicked, previous state:', isAutotuneEnabled);
-    setIsAutotuneEnabled(e.target.checked);
-    console.log('New state:', e.target.checked);
-  }, [isAutotuneEnabled]);
+  const handleAutotuneToggle = useCallback(
+    (e) => {
+      console.log('Toggle clicked, previous state:', isAutotuneEnabled);
+      setIsAutotuneEnabled(e.target.checked);
+      console.log('New state:', e.target.checked);
+    },
+    [isAutotuneEnabled],
+  );
 
   useEffect(() => {
     if (recordingState.autotunedURL && !recordingState.isProcessing) {
@@ -351,13 +357,13 @@ const VideoRecorder = ({
       const url = URL.createObjectURL(blob);
       onVideoReady?.(url, instrument);
     },
-    [instrument, onRecordingComplete, onVideoReady]
+    [instrument, onRecordingComplete, onVideoReady],
   );
 
   const stopRecording = useCallback(() => {
     console.log(
       'Stopping recording at duration:',
-      recordingState.recordingDuration
+      recordingState.recordingDuration,
     );
 
     if (recordingTimer.current) {
@@ -467,7 +473,7 @@ const VideoRecorder = ({
             // Explicitly pass the instrument parameter to onVideoReady
             onVideoReady?.(autotunedURL, instrument);
           },
-          instrument // Add instrument as parameter if needed by handleUploadedVideoAutotune
+          instrument, // Add instrument as parameter if needed by handleUploadedVideoAutotune
         );
       }
     } catch (error) {
@@ -579,19 +585,36 @@ const VideoRecorder = ({
                 style={{ display: 'none' }}
               />
               <label htmlFor={uploadId} className='control-button'>
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" style={{width: '20px', height: '20px'}}>
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                <svg
+                  xmlns='http://www.w3.org/2000/svg'
+                  fill='none'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                  style={{ width: '20px', height: '20px' }}
+                >
+                  <path
+                    strokeLinecap='round'
+                    strokeLinejoin='round'
+                    strokeWidth='2'
+                    d='M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12'
+                  />
                 </svg>
-                {recordingState.hasVideo ? 'Replace Video' : 'Choose Video File'}
+                {recordingState.hasVideo
+                  ? 'Replace Video'
+                  : 'Choose Video File'}
               </label>
             </>
           ) : (
-            <button 
-              className='control-button' 
-              onClick={recordingState.isRecording ? stopRecording : startRecording}
+            <button
+              className='control-button'
+              onClick={
+                recordingState.isRecording ? stopRecording : startRecording
+              }
               disabled={recordingState.isCountingDown}
             >
-              {recordingState.isRecording ? 'Stop Recording' : 'Start Recording'}
+              {recordingState.isRecording
+                ? 'Stop Recording'
+                : 'Start Recording'}
             </button>
           )}
 
@@ -605,32 +628,40 @@ const VideoRecorder = ({
             ) : (
               <div className='button-spacer'></div>
             )
+          ) : hasValidVideo ? (
+            <button className='control-button' onClick={handleReRecord}>
+              Re-record
+            </button>
           ) : (
-            hasValidVideo ? (
-              <button className='control-button' onClick={handleReRecord}>
-                Re-record
-              </button>
-            ) : (
-              <SampleSoundButton 
-                instrument={instrumentName}
-                className='control-button'
-              />
-            )
+            <SampleSoundButton
+              instrument={instrumentName}
+              className='control-button'
+            />
           )}
 
           {/* Toggle Link */}
-          <button 
+          <button
             onClick={() => setIsUploadMode(!isUploadMode)}
             className='upload-toggle'
           >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg
+              xmlns='http://www.w3.org/2000/svg'
+              fill='none'
+              viewBox='0 0 24 24'
+              stroke='currentColor'
+            >
               {isUploadMode ? (
                 <>
-                  <circle cx="12" cy="12" r="9" strokeWidth="2"/>
-                  <circle cx="12" cy="12" r="3" fill="currentColor"/>
+                  <circle cx='12' cy='12' r='9' strokeWidth='2' />
+                  <circle cx='12' cy='12' r='3' fill='currentColor' />
                 </>
               ) : (
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                <path
+                  strokeLinecap='round'
+                  strokeLinejoin='round'
+                  strokeWidth='2'
+                  d='M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12'
+                />
               )}
             </svg>
             {isUploadMode ? 'Switch to recording' : 'or upload a video instead'}
@@ -659,15 +690,27 @@ const VideoRecorder = ({
     <>
       <div className='recorder-wrapper' style={style}>
         <div className='video-container'>
-          {!recordingState.isRecording && !recordingState.hasVideo && minDuration > 0 && (
-            <div className='duration-badge'>
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <circle cx="12" cy="12" r="10" strokeWidth="2"/>
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6l4 2"/>
-              </svg>
-              {minDuration}s minimum
-            </div>
-          )}
+          {!recordingState.isRecording &&
+            !recordingState.hasVideo &&
+            minDuration > 0 && (
+              <div className='duration-badge'>
+                <svg
+                  xmlns='http://www.w3.org/2000/svg'
+                  fill='none'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                >
+                  <circle cx='12' cy='12' r='10' strokeWidth='2' />
+                  <path
+                    strokeLinecap='round'
+                    strokeLinejoin='round'
+                    strokeWidth='2'
+                    d='M12 6v6l4 2'
+                  />
+                </svg>
+                {minDuration}s minimum
+              </div>
+            )}
           {recordingState.showCountdown &&
             !recordingState.isRecording &&
             !isUploadMode && (
