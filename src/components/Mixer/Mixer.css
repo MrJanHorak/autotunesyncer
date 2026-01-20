@@ -6,7 +6,9 @@
   border-radius: 16px;
   color: white;
   margin: 0;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow:
+    0 20px 50px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
   transition: all 0.3s ease;
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -82,7 +84,11 @@
   align-items: center;
   width: 80px;
   padding: 1rem 0.75rem;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(255, 255, 255, 0.02) 100%
+  );
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
   transition: all 0.2s ease;
@@ -91,7 +97,11 @@
 }
 
 .channel-strip:hover {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.1) 0%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
   border-color: rgba(255, 255, 255, 0.2);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
 }
@@ -103,7 +113,11 @@
 
 .channel-strip.solo {
   border-color: #fbbf24;
-  background: linear-gradient(180deg, rgba(251, 191, 36, 0.1) 0%, rgba(251, 191, 36, 0.05) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(251, 191, 36, 0.1) 0%,
+    rgba(251, 191, 36, 0.05) 100%
+  );
   box-shadow: 0 8px 20px rgba(251, 191, 36, 0.2);
 }
 
@@ -147,7 +161,11 @@
 .level-meter {
   width: 100%;
   height: 120px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.8) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.5) 0%,
+    rgba(0, 0, 0, 0.8) 100%
+  );
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
   overflow: hidden;
@@ -167,7 +185,11 @@
   appearance: slider-vertical;
   width: 6px;
   height: 120px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2) 0%, rgba(255, 255, 255, 0.1) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.2) 0%,
+    rgba(255, 255, 255, 0.1) 100%
+  );
   border-radius: 3px;
   cursor: pointer;
   outline: none;
@@ -178,7 +200,11 @@
 .fader:hover {
   width: 8px;
   accent-color: #60a5fa;
-  background: linear-gradient(180deg, rgba(96, 165, 250, 0.3) 0%, rgba(96, 165, 250, 0.2) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(96, 165, 250, 0.3) 0%,
+    rgba(96, 165, 250, 0.2) 100%
+  );
 }
 
 .fader:focus {
