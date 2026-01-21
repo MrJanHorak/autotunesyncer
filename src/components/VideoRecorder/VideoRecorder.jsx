@@ -82,6 +82,7 @@ const VideoRecorder = ({
   onVideoReady,
   minDuration,
   currentVideo,
+  midiData,
 }) => {
   const {
     videoRef,
@@ -634,8 +635,11 @@ const VideoRecorder = ({
             </button>
           ) : (
             <SampleSoundButton
-              instrument={instrumentName}
+              instrument={instrument}
+              instrumentName={instrumentName}
               className='control-button'
+              isDrumTrack={isDrum}
+              midiData={midiData}
             />
           )}
 

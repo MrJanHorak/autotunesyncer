@@ -97,7 +97,7 @@ function App() {
       // Call MIDI processing hook with parsed data
       processMidiData(midiInfo);
     },
-    [processMidiData]
+    [processMidiData],
   );
 
   // Add handleRecordingComplete function
@@ -112,7 +112,7 @@ function App() {
     }
     console.log(
       'Handle Recording is complete Instrument after adding drum name:',
-      instrument
+      instrument,
     );
     const key = instrument.isDrum
       ? `drum_${instrument.name.toLowerCase().replace(/\s+/g, '_')}`
@@ -122,7 +122,7 @@ function App() {
       'Recording complete for instrument:',
       key,
       'blob size:',
-      blob.size
+      blob.size,
     );
 
     setVideoFiles((prev) => ({
@@ -220,6 +220,7 @@ function App() {
             onRecordingComplete={handleRecordingComplete}
             onVideoReady={handleVideoReady}
             instrumentVideos={instrumentVideos}
+            midiData={parsedMidiData}
           />
         </>
       )}
