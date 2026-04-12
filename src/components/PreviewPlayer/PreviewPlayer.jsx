@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as Tone from 'tone';
 import PropTypes from 'prop-types';
 
-const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments }) => {
+const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const samplersRef = useRef({});
@@ -80,14 +80,19 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoFiles, instruments]); // Re-run if files change
 
-  // 2. Update Volumes in real-time
+  // 2. Update Volumes in real-time, applying mute/solo
   useEffect(() => {
-    Object.entries(volumes).forEach(([key, vol]) => {
-      if (channelsRef.current[key]) {
-        channelsRef.current[key].volume.rampTo(vol, 0.1);
+    const hasSolo = soloTrack !== null;
+    Object.entries(channelsRef.current).forEach(([key, channel]) => {
+      const isMuted = muteStates[key];
+      const isSolo = key === soloTrack;
+      if (isMuted || (hasSolo && !isSolo)) {
+        channel.volume.rampTo(-Infinity, 0.05);
+      } else {
+        channel.volume.rampTo(volumes[key] ?? 0, 0.1);
       }
     });
-  }, [volumes]);
+  }, [volumes, muteStates, soloTrack]);
 
   // 3. Handle Playback
   const togglePlayback = async () => {
@@ -177,6 +182,8 @@ PreviewPlayer.propTypes = {
   videoFiles: PropTypes.object,
   volumes: PropTypes.object,
   instruments: PropTypes.array,
+  muteStates: PropTypes.object,
+  soloTrack: PropTypes.string,
 };
 
 export default PreviewPlayer;

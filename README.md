@@ -241,6 +241,50 @@ FRONTEND_PORT=5173
 
 ## Running the Application
 
+### Quick Start (Local Development)
+
+From the project root, start the backend and frontend in separate terminals.
+
+1. **Terminal 1 - Backend (Node + Python environment):**
+
+**Windows (PowerShell):**
+
+```powershell
+Set-Location backend
+if (Test-Path .venv\Scripts\Activate.ps1) { .\.venv\Scripts\Activate.ps1 }
+npm install
+pip install -r requirements.txt
+npm start
+```
+
+**macOS/Linux:**
+
+```bash
+cd backend
+if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi
+npm install
+pip install -r requirements.txt
+npm start
+```
+
+2. **Terminal 2 - Frontend (Vite):**
+
+```bash
+npm install
+npm run dev
+```
+
+3. **Open the app:**
+
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:3000`
+
+4. **Optional validation:**
+
+```bash
+npm run test:quick
+```
+
 ### Development Mode (Recommended)
 
 **Terminal 1 - Backend API Server:**

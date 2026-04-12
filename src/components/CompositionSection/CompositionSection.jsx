@@ -8,6 +8,8 @@ const CompositionSection = ({
   instrumentTrackMap,
   gridArrangement,
   trackVolumes,
+  muteStates,
+  soloTrack,
 }) => {
   const [composing, setComposing] = useState(false);
   const [error, setError] = useState(null);
@@ -51,6 +53,8 @@ const CompositionSection = ({
         instrumentTrackMap={instrumentTrackMap}
         gridArrangement={gridArrangement}
         trackVolumes={trackVolumes}
+        muteStates={muteStates}
+        soloTrack={soloTrack}
         onProgress={handleCompositionProgress}
         onError={handleCompositionError}
         onStart={() => setComposing(true)}

@@ -9,6 +9,73 @@ import { v4 as uuidv4 } from 'uuid';
 
 const router = express.Router();
 
+class ValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValidationError';
+    this.statusCode = 400;
+  }
+}
+
+const isFiniteNumber = (value) => Number.isFinite(Number(value));
+
+const normalizeVelocity = (value) => {
+  if (!isFiniteNumber(value)) return 100;
+  const v = Number(value);
+  // Handle normalized 0..1 velocity from some MIDI parsers.
+  if (v > 0 && v <= 1) {
+    return Math.max(1, Math.min(127, Math.round(v * 127)));
+  }
+  return Math.max(1, Math.min(127, Math.round(v)));
+};
+
+const validateComposeInputs = (midiData, videoFiles) => {
+  if (!midiData || typeof midiData !== 'object') {
+    return 'Invalid MIDI payload';
+  }
+
+  if (!Array.isArray(midiData.tracks) || midiData.tracks.length === 0) {
+    return 'MIDI payload must include at least one track';
+  }
+
+  if (
+    !midiData.gridArrangement ||
+    typeof midiData.gridArrangement !== 'object'
+  ) {
+    return 'Grid arrangement is required';
+  }
+
+  const positions = Object.values(midiData.gridArrangement);
+  if (positions.length === 0) {
+    return 'Grid arrangement is empty';
+  }
+
+  const invalidPosition = positions.find(
+    (pos) =>
+      !pos ||
+      !isFiniteNumber(pos.row) ||
+      !isFiniteNumber(pos.column) ||
+      Number(pos.row) < 0 ||
+      Number(pos.column) < 0,
+  );
+  if (invalidPosition) {
+    return 'Grid arrangement contains invalid row/column positions';
+  }
+
+  if (!Array.isArray(videoFiles) || videoFiles.length === 0) {
+    return 'At least one video file is required';
+  }
+
+  const hasNotes = midiData.tracks.some(
+    (track) => Array.isArray(track.notes) && track.notes.length > 0,
+  );
+  if (!hasNotes) {
+    return 'MIDI payload does not contain note events';
+  }
+
+  return null;
+};
+
 // Ensure uploads directory exists
 const uploadsDir = 'uploads';
 if (!fs.existsSync(uploadsDir)) {
@@ -108,7 +175,7 @@ router.post(
       console.log('Preview mode requested:', req.body.preview);
 
       if (!req.files || req.files.length === 0) {
-        throw new Error('No files were uploaded');
+        throw new ValidationError('No files were uploaded');
       }
 
       // Check if preview mode is requested
@@ -117,7 +184,7 @@ router.post(
 
       if (isPreviewMode) {
         console.log(
-          '🎬 PREVIEW MODE ENABLED - Using faster, lower quality settings'
+          '🎬 PREVIEW MODE ENABLED - Using faster, lower quality settings',
         );
       } else {
         console.log('🎬 PRODUCTION MODE - Using full quality settings');
@@ -126,24 +193,34 @@ router.post(
       // Find MIDI file
       const midiFile = req.files.find((f) => f.fieldname === 'midiData');
       if (!midiFile) {
-        throw new Error('MIDI data not found in upload');
+        throw new ValidationError('MIDI data not found in upload');
       }
 
       // Read and parse MIDI data
       const midiDataString = fs.readFileSync(midiFile.path, 'utf8');
-      const midiData = JSON.parse(midiDataString);
+      let midiData;
+      try {
+        midiData = JSON.parse(midiDataString);
+      } catch {
+        throw new ValidationError('Invalid midiData JSON payload');
+      }
 
       // Process video files
       const videos = {};
       const videoFiles = req.files.filter((f) => f.fieldname === 'videos');
 
+      const validationError = validateComposeInputs(midiData, videoFiles);
+      if (validationError) {
+        throw new ValidationError(validationError);
+      }
+
       // Get grid dimensions from MIDI data for sizing
       const gridArrangement = midiData.gridArrangement;
       const maxRow = Math.max(
-        ...Object.values(gridArrangement).map((pos) => pos.row)
+        ...Object.values(gridArrangement).map((pos) => pos.row),
       );
       const maxCol = Math.max(
-        ...Object.values(gridArrangement).map((pos) => pos.column)
+        ...Object.values(gridArrangement).map((pos) => pos.column),
       );
       // Use preview resolution (640x360) or production (1920x1080)
       const totalWidth = isPreviewMode ? 640 : 1920;
@@ -153,7 +230,7 @@ router.post(
       console.log(
         `Preprocessing target cell size: ${targetWidth}x${targetHeight} (${
           isPreviewMode ? 'PREVIEW' : 'PRODUCTION'
-        })`
+        })`,
       );
       // Process each video
       for (const file of videoFiles) {
@@ -167,20 +244,20 @@ router.post(
           .update(
             `${targetWidth}x${targetHeight}:${
               isPreviewMode ? 'preview' : 'prod'
-            }`
+            }`,
           )
           .digest('hex')
           .slice(0, 16);
         const processedPath = path.join(
           uploadsDir,
-          `processed_${cacheKey}-${instrumentName}.mp4`
+          `processed_${cacheKey}-${instrumentName}.mp4`,
         );
 
         try {
           // If cached preprocessed file exists, reuse it
           if (fs.existsSync(processedPath)) {
             console.log(
-              `Using cached preprocessed file for ${instrumentName}: ${processedPath}`
+              `Using cached preprocessed file for ${instrumentName}: ${processedPath}`,
             );
           } else {
             // Preprocess video with correct dimensions
@@ -192,7 +269,7 @@ router.post(
                 performanceMode: true,
                 quality: isPreviewMode ? 'low' : 'high',
                 memoryLimit: 4,
-              }
+              },
             );
           }
 
@@ -308,7 +385,7 @@ router.post(
         }
 
         console.log(
-          `Processing track ${trackIndex}: ${track.instrument?.name} (${track.notes.length} notes)`
+          `Processing track ${trackIndex}: ${track.instrument?.name} (${track.notes.length} notes)`,
         );
 
         if (isDrumTrack(track)) {
@@ -321,7 +398,7 @@ router.post(
 
             // Find video key that ends with the drum pattern
             const matchingVideoKey = Object.keys(videos).find(
-              (key) => key.includes(drumKey) || key.endsWith(drumKey)
+              (key) => key.includes(drumKey) || key.endsWith(drumKey),
             );
 
             if (matchingVideoKey) {
@@ -329,10 +406,10 @@ router.post(
                 midi: note.midi,
                 time: note.time,
                 duration: note.duration,
-                velocity: note.velocity || 0.8,
+                velocity: normalizeVelocity(note.velocity),
               });
               console.log(
-                `  Mapped drum note ${note.midi} (${drumName}) to ${matchingVideoKey}`
+                `  Mapped drum note ${note.midi} (${drumName}) to ${matchingVideoKey}`,
               );
             } else {
               console.log(`  No video found for drum: ${drumKey}`);
@@ -358,18 +435,18 @@ router.post(
                 midi: note.midi,
                 time: note.time,
                 duration: note.duration,
-                velocity: note.velocity || 0.8,
+                velocity: normalizeVelocity(note.velocity),
               });
             });
             console.log(
-              `  Mapped ${track.notes.length} notes to ${matchingVideoKey}`
+              `  Mapped ${track.notes.length} notes to ${matchingVideoKey}`,
             );
           } else {
             console.log(`  No video found for instrument: ${normalizedName}`);
             console.log(
               `  Available video keys: ${Object.keys(videos)
                 .slice(0, 3)
-                .join(', ')}...`
+                .join(', ')}...`,
             );
           }
         }
@@ -381,8 +458,19 @@ router.post(
         console.log(`${key}: ${video.notes.length} notes mapped`);
       });
 
+      const totalMappedNotes = Object.values(videos).reduce(
+        (count, video) =>
+          count + (Array.isArray(video.notes) ? video.notes.length : 0),
+        0,
+      );
+      if (totalMappedNotes === 0) {
+        throw new ValidationError(
+          'No MIDI notes were mapped to uploaded videos. Check instrument naming and drum mappings.',
+        );
+      }
+
       if (videoFiles.length === 0) {
-        throw new Error('No video files found in upload');
+        throw new ValidationError('No video files found in upload');
       }
 
       console.log('Final video mapping:', videos);
@@ -394,17 +482,17 @@ router.post(
       ) {
         console.error(
           'Grid arrangement is missing or empty:',
-          midiData.gridArrangement
+          midiData.gridArrangement,
         );
-        throw new Error(
-          'Grid arrangement is required for video composition. Please ensure the grid is properly configured.'
+        throw new ValidationError(
+          'Grid arrangement is required for video composition. Please ensure the grid is properly configured.',
         );
       }
 
       console.log(
         'Grid arrangement validation passed:',
         Object.keys(midiData.gridArrangement).length,
-        'positions'
+        'positions',
       );
 
       // Extract track volumes from midiData
@@ -424,7 +512,7 @@ router.post(
       console.log('Preview mode in config:', config.preview);
       const configPath = path.join(
         os.tmpdir(),
-        `video-config-${uuidv4()}.json`
+        `video-config-${uuidv4()}.json`,
       );
       fs.writeFileSync(configPath, JSON.stringify(config)); // Call Python processor with config file path
       const result = await runPythonProcessor(configPath);
@@ -433,7 +521,7 @@ router.post(
       const timestamp = Date.now();
       const permanentOutputPath = path.join(
         uploadsDir,
-        `final_output_${timestamp}.mp4`
+        `final_output_${timestamp}.mp4`,
       );
 
       if (result.outputPath && fs.existsSync(result.outputPath)) {
@@ -451,14 +539,43 @@ router.post(
       // Cleanup config file
       fs.unlinkSync(configPath);
 
-      res.json({
-        success: true,
-        result: result,
-        outputPath: permanentOutputPath,
-        message: `Video composition completed successfully! Output saved to: ${permanentOutputPath}`,
+      if (!fs.existsSync(permanentOutputPath)) {
+        throw new Error('Composed video file not found after processing');
+      }
+
+      const stats = fs.statSync(permanentOutputPath);
+      console.log(`Streaming video back to client: ${stats.size} bytes`);
+
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', stats.size);
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="composition.mp4"',
+      );
+
+      const readStream = fs.createReadStream(permanentOutputPath);
+      readStream.on('end', () => {
+        // Clean up the served file after streaming
+        try {
+          fs.unlinkSync(permanentOutputPath);
+        } catch (e) {
+          console.warn('Failed to cleanup output file after stream:', e.message);
+        }
       });
+      readStream.on('error', (streamErr) => {
+        console.error('Stream error:', streamErr);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to stream video file' });
+        }
+      });
+      readStream.pipe(res);
     } catch (error) {
-      console.error('Video processing error:', error);
+      const statusCode = error.statusCode || 500;
+      if (statusCode >= 500) {
+        console.error('Video processing error:', error);
+      } else {
+        console.warn('Video processing validation error:', error.message);
+      }
 
       // Cleanup temporary files on error
       if (req.files) {
@@ -473,12 +590,15 @@ router.post(
         });
       }
 
-      res.status(500).json({
-        error: 'Failed to process videos',
+      res.status(statusCode).json({
+        error:
+          statusCode >= 500
+            ? 'Failed to process videos'
+            : 'Invalid composition input',
         details: error.message,
       });
     }
-  }
+  },
 );
 
 export default router;

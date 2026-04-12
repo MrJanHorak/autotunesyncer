@@ -1,20 +1,13 @@
-import { useState } from 'react';
 import PropTypes from 'prop-types';
 import './Mixer.css';
 
-const Mixer = ({ instruments, volumes, onVolumeChange }) => {
-  const [muteStates, setMuteStates] = useState({});
-  const [soloTrack, setSoloTrack] = useState(null);
-
+const Mixer = ({ instruments, volumes, onVolumeChange, muteStates = {}, soloTrack = null, onMuteChange, onSoloChange }) => {
   const handleMute = (key) => {
-    setMuteStates((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
+    if (onMuteChange) onMuteChange(key, !muteStates[key]);
   };
 
   const handleSolo = (key) => {
-    setSoloTrack(soloTrack === key ? null : key);
+    if (onSoloChange) onSoloChange(key);
   };
 
   const getDisplayValue = (value) => {

@@ -30,7 +30,7 @@ async function handleApiResponse(response) {
     const errorData = await response.json().catch(() => ({}));
     throw new VideoProcessingError(
       'Request failed',
-      errorData.message || response.statusText
+      errorData.message || response.statusText,
     );
   }
   return response;
@@ -42,8 +42,11 @@ async function handleApiResponse(response) {
 export const videoService = {
   autotuneVideo: async (formData) => {
     try {
-      console.log('Sending video data to server, size:', formData.get('video').size);
-      
+      console.log(
+        'Sending video data to server, size:',
+        formData.get('video').size,
+      );
+
       const response = await fetch(`${API_BASE_URL}/autotune`, {
         method: 'POST',
         body: formData,
@@ -51,73 +54,114 @@ export const videoService = {
           // Remove Content-Type header to let browser set it with boundary
         },
       });
-      
+
       if (!response.ok) {
         const error = await response.text();
         console.error('Server response:', error);
         throw new Error(`Failed to autotune video: ${response.statusText}`);
       }
-      
+
       const blob = await response.blob();
       if (blob.size === 0) {
         throw new Error('Received empty response from server');
       }
-      
+
       return blob;
     } catch (error) {
       console.error('Autotune error:', error);
       throw error;
     }
   },
-}
-
-  // async composeVideos(videoFiles, midiData, onProgress) {
-  //   try {
-  //     const formData = new FormData();
-
-  //     // Add MIDI data
-  //     const midiBlob = new Blob([JSON.stringify(midiData)], {
-  //       type: 'application/json',
-  //     });
-  //     formData.append('midiData', midiBlob);
-
-  //     // Add video files
-  //     Object.entries(videoFiles).forEach(([instrument, blob]) => {
-  //       if (!(blob instanceof Blob || blob instanceof File)) {
-  //         throw new VideoProcessingError(
-  //           'Invalid video format',
-  //           `Invalid file for instrument: ${instrument}`
-  //         );
-  //       }
-  //       formData.append(`videos[${instrument}]`, blob);
-  //     });
-
-  //     const response = await fetch(`${API_BASE_URL}/compose`, {
-  //       method: 'POST',
-  //       body: formData,
-  //     });
-
-  //     const result = await handleApiResponse(response);
-  //     return await result.blob();
-  //   } catch (error) {
-  //     throw new VideoProcessingError('Composition failed', error.message);
-  //   }
-  // },
-
-  // Frontend API call
-export const composeVideos = async (formData, progressCallbacks = {}) => {
-  const response = await fetch(`${API_BASE_URL}/process-videos`, {
-    method: 'POST',
-    body: formData, // Send FormData directly
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.error || 'Failed to process videos');
-  }
-
-  return {
-    data: await response.blob()
-  };
 };
 
+// async composeVideos(videoFiles, midiData, onProgress) {
+//   try {
+//     const formData = new FormData();
+
+//     // Add MIDI data
+//     const midiBlob = new Blob([JSON.stringify(midiData)], {
+//       type: 'application/json',
+//     });
+//     formData.append('midiData', midiBlob);
+
+//     // Add video files
+//     Object.entries(videoFiles).forEach(([instrument, blob]) => {
+//       if (!(blob instanceof Blob || blob instanceof File)) {
+//         throw new VideoProcessingError(
+//           'Invalid video format',
+//           `Invalid file for instrument: ${instrument}`
+//         );
+//       }
+//       formData.append(`videos[${instrument}]`, blob);
+//     });
+
+//     const response = await fetch(`${API_BASE_URL}/compose`, {
+//       method: 'POST',
+//       body: formData,
+//     });
+
+//     const result = await handleApiResponse(response);
+//     return await result.blob();
+//   } catch (error) {
+//     throw new VideoProcessingError('Composition failed', error.message);
+//   }
+// },
+
+export const composeVideos = (formData, progressCallbacks = {}) => {
+  if (!(formData instanceof FormData)) {
+    return Promise.reject(new Error('Invalid compose request payload'));
+  }
+
+  const midiPart = formData.get('midiData');
+  const videoParts = formData.getAll('videos');
+
+  if (!midiPart) {
+    return Promise.reject(new Error('Missing midiData in compose request'));
+  }
+
+  if (!videoParts || videoParts.length === 0) {
+    return Promise.reject(new Error('Missing videos in compose request'));
+  }
+
+  const { onUploadProgress } = progressCallbacks;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE_URL}/process-videos`);
+    xhr.responseType = 'blob';
+
+    if (onUploadProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const pct = Math.round((event.loaded * 100) / event.total);
+          onUploadProgress(pct);
+        }
+      };
+      // Mark upload as complete once XHR fires the upload load event
+      xhr.upload.onload = () => onUploadProgress(100);
+    }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve({ data: xhr.response });
+      } else {
+        // Try to read error details from the blob response
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const errData = JSON.parse(reader.result);
+            reject(new Error(errData.details || errData.error || `Server error ${xhr.status}`));
+          } catch {
+            reject(new Error(`Server error ${xhr.status}`));
+          }
+        };
+        reader.readAsText(xhr.response);
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error during video composition'));
+    xhr.ontimeout = () => reject(new Error('Request timed out'));
+
+    xhr.send(formData);
+  });
+};
