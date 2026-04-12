@@ -24,9 +24,21 @@ app.use((req, res, next) => {
 });
 
 // Enable CORS with specific options
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:8080',
+  'http://localhost:4173',
+];
 app.use(
   cors({
-    origin: 'http://localhost:5173', // Your frontend URL
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g., curl, Postman) or from allowed origins
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS: origin ${origin} not allowed`));
+      }
+    },
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type', 'Content-Disposition'],
     maxAge: 600,

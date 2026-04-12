@@ -352,7 +352,17 @@ def autotune_frame(frame, current_pitch, target_pitch, sr):
     # Try methods in order of preference
     try:
         if check_rubberband() and PYRUBBERBAND_AVAILABLE:
+            # Prefer formant-preserving mode when rubberband is available.
+            rb_args = {
+                "--formant": "",
+            }
+            return pyrb.pitch_shift(frame, sr, shift, rbargs=rb_args)
+    except TypeError:
+        # Older pyrubberband versions may not support rbargs.
+        try:
             return pyrb.pitch_shift(frame, sr, shift)
+        except Exception as e:
+            print(f"Rubberband failed: {e}, trying librosa")
     except Exception as e:
         print(f"Rubberband failed: {e}, trying librosa")
         

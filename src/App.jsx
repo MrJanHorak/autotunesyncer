@@ -78,12 +78,22 @@ function App() {
   const [midiFile, setMidiFile] = useState(null);
   const [gridArrangement, setGridArrangement] = useState({});
   const [trackVolumes, setTrackVolumes] = useState({});
+  const [muteStates, setMuteStates] = useState({});
+  const [soloTrack, setSoloTrack] = useState(null);
 
   const handleVolumeChange = (trackKey, volume) => {
     setTrackVolumes((prev) => ({
       ...prev,
       [trackKey]: volume,
     }));
+  };
+
+  const handleMuteChange = (trackKey, isMuted) => {
+    setMuteStates((prev) => ({ ...prev, [trackKey]: isMuted }));
+  };
+
+  const handleSoloChange = (trackKey) => {
+    setSoloTrack((prev) => (prev === trackKey ? null : trackKey));
   };
 
   const handleMidiProcessed = (file) => {
@@ -189,6 +199,10 @@ function App() {
                 instruments={instruments}
                 volumes={trackVolumes}
                 onVolumeChange={handleVolumeChange}
+                muteStates={muteStates}
+                soloTrack={soloTrack}
+                onMuteChange={handleMuteChange}
+                onSoloChange={handleSoloChange}
               />
 
               <div style={{ marginTop: '15px' }}>
@@ -196,6 +210,8 @@ function App() {
                   midiData={parsedMidiData}
                   videoFiles={videoFiles}
                   volumes={trackVolumes}
+                  muteStates={muteStates}
+                  soloTrack={soloTrack}
                   instruments={instruments}
                 />
               </div>
@@ -232,6 +248,8 @@ function App() {
           instrumentTrackMap={instrumentTrackMap}
           gridArrangement={gridArrangement}
           trackVolumes={trackVolumes}
+          muteStates={muteStates}
+          soloTrack={soloTrack}
         />
       )}
     </div>

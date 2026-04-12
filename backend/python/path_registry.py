@@ -357,13 +357,12 @@ class PathRegistry:
         for video_file in uploads_path.glob("processed_*.mp4"):
             try:
                 # Extract instrument name from filename
-                # Pattern: processed_timestamp-random-instrument_name.mp4
+                # Pattern: processed_<hash>-<instrument_name>.mp4
                 filename = video_file.stem  # Remove .mp4 extension
-                parts = filename.split('-')
-                
-                if len(parts) >= 3:
-                    # Join all parts after the second dash to handle names with dashes
-                    instrument_name = '-'.join(parts[2:])
+                parts = filename.split('-', 1)  # Split only on first dash
+
+                if len(parts) == 2:
+                    instrument_name = parts[1]
                     
                     if instrument_name.startswith('drum_'):
                         # Register drum video

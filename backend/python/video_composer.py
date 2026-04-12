@@ -121,6 +121,7 @@ except ImportError:
 
 from video_utils import run_ffmpeg_command, encode_video, validate_video
 from path_registry import PathRegistry
+from optimized_autotune_cache import OptimizedAutotuneCache as _RealOptimizedAutotuneCache
 
 import mmap
 # from contextlib import ExitStack
@@ -169,37 +170,8 @@ def get_system_metrics():
     except ImportError:
         return {'cpu_percent': 0, 'memory_percent': 0, 'disk_percent': 0}
 
-class OptimizedAutotuneCache:
-    """
-    Optimized cache for autotune video processing
-    Provides fast lookup and management of autotuned video segments
-    """
-    
-    def __init__(self, max_workers=4):
-        self.max_workers = max_workers
-        self.cache = {}
-        self.lock = threading.Lock()
-        logging.info(f"OptimizedAutotuneCache initialized with {max_workers} workers")
-    
-    def get(self, key):
-        """Get cached item"""
-        with self.lock:
-            return self.cache.get(key)
-    
-    def set(self, key, value):
-        """Set cached item"""
-        with self.lock:
-            self.cache[key] = value
-    
-    def clear(self):
-        """Clear cache"""
-        with self.lock:
-            self.cache.clear()
-    
-    def size(self):
-        """Get cache size"""
-        with self.lock:
-            return len(self.cache)
+# Use the real OptimizedAutotuneCache from optimized_autotune_cache.py
+OptimizedAutotuneCache = _RealOptimizedAutotuneCache
 
 class GPUStreamManager:
     def __init__(self, num_streams=4):
@@ -562,6 +534,9 @@ class VideoComposer:
             self.trim_leading_silence = os.environ.get('ATS_TRIM_LEADING_SILENCE', '1') == '1'
             # Onset offset cache for non-destructive alignment
             self.onset_offset_cache = {}
+            self.max_concurrent_streams = int(os.environ.get('ATS_MAX_CONCURRENT_STREAMS', '4'))
+            self.ffmpeg_hwaccel = self._detect_ffmpeg_hwaccel()
+            logging.info(f"Selected FFmpeg hwaccel: {self.ffmpeg_hwaccel or 'none'}")
             # Initialize path registry - use singleton instance
             self.path_registry = PathRegistry.get_instance()
             
@@ -630,23 +605,19 @@ class VideoComposer:
     def _get_encoding_settings(self):
         """Get FFmpeg encoding arguments based on configuration and hardware"""
         config = self.render_config
-        
-        # Check for GPU
-        has_gpu = False
-        try:
-            import torch
-            has_gpu = torch.cuda.is_available()
-        except ImportError:
-            pass
 
-        if has_gpu:
-            # GPU Settings - h264_nvenc with preview/production differences
+        if self.ffmpeg_hwaccel == 'cuda':
             return [
                 '-c:v', 'h264_nvenc',
                 '-preset', 'fast' if not self.preview_mode else 'p1',  # p1 for preview (fastest), fast for production
                 '-rc', 'vbr',  # Variable bitrate mode
                 '-cq', config['crf'],  # Use config CRF
                 '-b:v', config['video_bitrate'],  # Use config bitrate
+            ]
+        if self.ffmpeg_hwaccel == 'videotoolbox':
+            return [
+                '-c:v', 'h264_videotoolbox',
+                '-b:v', config['video_bitrate'],
             ]
         else:
             # CPU Settings
@@ -655,6 +626,35 @@ class VideoComposer:
                 '-preset', config['preset'],
                 '-crf', config['crf'],
             ]
+
+    def _detect_ffmpeg_hwaccel(self):
+        """Probe ffmpeg hw acceleration methods with safe fallbacks."""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-hwaccels'],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = (result.stdout or '') + '\n' + (result.stderr or '')
+            lower = output.lower()
+
+            if 'cuda' in lower:
+                return 'cuda'
+            if 'videotoolbox' in lower:
+                return 'videotoolbox'
+            return None
+        except Exception as e:
+            logging.warning(f"Failed to detect FFmpeg hwaccels: {e}")
+            return None
+
+    def _get_ffmpeg_decode_args(self):
+        """Return decode args for ffmpeg -i based on selected hwaccel."""
+        if self.ffmpeg_hwaccel == 'cuda':
+            return ['-hwaccel', 'cuda']
+        if self.ffmpeg_hwaccel == 'videotoolbox':
+            return ['-hwaccel', 'videotoolbox']
+        return []
 
     def _resolve_segment_volume(self, segment):
         """
@@ -695,6 +695,21 @@ class VideoComposer:
             return 0.0
         except Exception as e:
             logging.warning(f"Volume resolve error: {e}; defaulting to 0 dB")
+            return 0.0
+
+    def _velocity_to_db(self, velocity, min_db=-40.0):
+        """
+        Convert MIDI velocity (1-127) to dB using an exponential mapping.
+        127 -> 0 dB, 1 -> approximately min_db.
+        """
+        try:
+            if velocity is None:
+                return 0.0
+            v = max(1.0, min(127.0, float(velocity)))
+            # Exponential domain mapping feels more natural than linear amplitude mapping.
+            norm = (v - 1.0) / 126.0
+            return float(min_db + (0.0 - min_db) * (norm ** 2.0))
+        except Exception:
             return 0.0
 
     def _detect_leading_silence(self, media_path, threshold_db=-35, min_duration=0.08):
@@ -1835,6 +1850,30 @@ class VideoComposer:
     #         logging.error(f"Note trigger exception {track_name}: {e}")
     #         return self._create_simple_loop(video_path, self.temp_dir / f"{track_name}_{unique_id}.mp4", chunk_duration)
 
+    @staticmethod
+    def _build_atempo_chain(rate: float) -> str:
+        """
+        Build an FFmpeg atempo filter chain for a given playback rate.
+
+        FFmpeg's atempo filter is restricted to [0.5, 100] per stage.
+        For values outside that range we chain multiple stages whose
+        product equals the target rate.
+
+        For best quality, each stage is kept inside [0.5, 2.0].
+        """
+        STAGE_MIN, STAGE_MAX = 0.5, 2.0
+        if rate <= 0:
+            rate = 1.0
+        filters = []
+        while rate < STAGE_MIN:
+            filters.append(f"atempo={STAGE_MIN:.6f}")
+            rate /= STAGE_MIN  # remaining factor
+        while rate > STAGE_MAX:
+            filters.append(f"atempo={STAGE_MAX:.6f}")
+            rate /= STAGE_MAX
+        filters.append(f"atempo={rate:.6f}")
+        return ",".join(filters)
+
     def _create_note_triggered_video_sequence_fixed(
         self,
         video_path,
@@ -1843,7 +1882,8 @@ class VideoComposer:
         track_name,
         unique_id,
         chunk_start_time=0.0,
-        onset_offset=0.0
+        onset_offset=0.0,
+        note_audio_map=None,
     ):
         """
         WORKING unified note-triggered clip builder.
@@ -1855,6 +1895,9 @@ class VideoComposer:
             track_name: for filename/logging
             unique_id: short id to avoid collisions
             chunk_start_time: absolute start of this chunk (so we can convert absolute note times)
+            note_audio_map: optional Dict[int, str] mapping midi_note → path of pre-tuned video.
+                When provided the pre-tuned file's audio stream is used for that note (higher
+                quality than the asetrate fallback).
 
         Returns:
             str path or None
@@ -1911,6 +1954,18 @@ class VideoComposer:
 
             valid.sort(key=lambda x: x[0])
 
+            # Build the mapping from midi_note → FFmpeg input index for pre-tuned audio.
+            # Inputs 0, 1, 2 are: source video, black frame, silent audio.
+            # Pre-tuned video files (audio only) start at index 3.
+            note_input_index: dict = {}  # midi_note -> ffmpeg input index
+            extra_audio_inputs: list = []  # paths appended as additional -i args
+            BASE_EXTRA_IDX = 3
+            if note_audio_map:
+                unique_cached = sorted({mn for (_, _, mn) in valid if mn in note_audio_map})
+                for mn in unique_cached:
+                    note_input_index[mn] = BASE_EXTRA_IDX + len(extra_audio_inputs)
+                    extra_audio_inputs.append(note_audio_map[mn])
+
             # Build filter parts
             filter_parts = [
                 # Base black video & silent audio come from inputs 1 & 2
@@ -1937,12 +1992,23 @@ class VideoComposer:
                 if safe_onset < 0.0:
                     safe_onset = 0.0
                 logging.info(f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, safe_onset={safe_onset:.3f}s, dur={dur:.3f}s")
-                # Video trim at safe onset
+
+                # Video always comes from the original source (input 0)
                 filter_parts.append(f"[0:v]trim=start={safe_onset}:duration={dur},setpts=PTS-STARTPTS,scale=640:360[v{i}]")
-                if abs(pitch_factor - 1.0) > 0.01:
+
+                # Audio: prefer pre-tuned file → fall back to asetrate+atempo
+                if midi_note in note_input_index:
+                    idx = note_input_index[midi_note]
+                    filter_parts.append(
+                        f"[{idx}:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]"
+                    )
+                elif abs(pitch_factor - 1.0) > 0.01:
+                    # asetrate shifts pitch but compresses/stretches duration by 1/pitch_factor.
+                    # atempo chain compensates to restore the original duration.
+                    atempo = self._build_atempo_chain(1.0 / pitch_factor)
                     filter_parts.append(
                         f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS,"
-                        f"asetrate=44100*{pitch_factor},aresample=44100[a{i}]"
+                        f"asetrate=44100*{pitch_factor},aresample=44100,{atempo}[a{i}]"
                     )
                 else:
                     filter_parts.append(f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]")
@@ -1974,6 +2040,11 @@ class VideoComposer:
                 "-i", str(video_path),
                 "-f", "lavfi", "-i", f"color=black:size=640x360:rate=30:duration={total_duration}",
                 "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}",
+            ]
+            # Add pre-tuned audio sources (one per unique cached midi_note)
+            for tuned_path in extra_audio_inputs:
+                cmd += ["-i", str(tuned_path)]
+            cmd += [
                 "-filter_complex", ";".join(filter_parts),
                 "-map", "[final_v]", "-map", "[final_a]",
                 "-t", f"{total_duration:.3f}",
@@ -1987,7 +2058,7 @@ class VideoComposer:
             ]
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode != 0:
-                logging.error(f"[NoteTrigger] ffmpeg failed for {track_name}: {r.stderr}")
+                logging.error(f"[NoteTrigger] ffmpeg failed for {track_name}: {r.stderr[-2000:]}")
                 return self._create_simple_loop(video_path, out_path, total_duration)
             return str(out_path)
         except Exception as e:
@@ -2301,10 +2372,15 @@ class VideoComposer:
             traceback.print_exc()
 
     def _analyze_composition_requirements(self):
-        """Analyze MIDI composition to find all required instrument/note combinations"""
+        """Analyze MIDI composition to find all required instrument/note combinations.
+        Drum tracks are excluded because they don't need pitch tuning."""
         requirements = {}
         
         for track in self.midi_data.get('tracks', []):
+            # Skip drum tracks — pitch tuning doesn't apply to percussion
+            if track.get('isDrum') or track.get('channel') == 9:
+                continue
+
             instrument_name = track.get('instrument', {}).get('name', 'unknown')
             normalized_name = normalize_instrument_name(instrument_name)
             
@@ -2555,6 +2631,12 @@ class VideoComposer:
                 raise Exception("Failed to parse loudnorm stats.")
 
             # Pass 2: Apply normalization with extracted stats
+            # Skip if audio is silent (input_i = -inf) — loudnorm can't handle it
+            if stats.get('input_i') in ('-inf', 'inf'):
+                logging.warning("⚠️  Audio is silent (-inf), skipping loudnorm pass 2.")
+                shutil.copy2(input_path, output_path)
+                return str(output_path)
+
             logging.info("   (Loudnorm Pass 2/2) Applying normalization...")
             pass2_cmd = [
                 'ffmpeg', '-y', '-i', str(input_path),
@@ -2760,7 +2842,11 @@ class VideoComposer:
         try:
             logging.info("🎬 Starting ENHANCED video composition with fixes...")
             start_time = time.time()
-            
+
+            # Pre-process all unique note/instrument combos so each chunk can
+            # retrieve pitch-shifted audio instantly from the cache.
+            self.preprocess_composition_optimized()
+
             # Decide between parallel and sequential processing
             total_duration = self._calculate_total_duration()
             total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
@@ -2852,16 +2938,16 @@ class VideoComposer:
                     if drum_segments:
                         track_video_segments.extend(drum_segments)
                 else:
-                    # Use enhanced note-triggered processing
-                    result = self._process_instrument_track_enhanced(track, start_time, chunk_duration, chunk_idx, track_id)
+                    # Use the same fixed instrument processing used by the simplified path
+                    result = self._process_instrument_track_for_chunk_fixed(track, start_time, chunk_duration, chunk_idx, track_id)
                     if result:
                         track_video_segments.append(result)
             
             if not track_video_segments:
                 return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
             
-            # Create final chunk with optimal encoding
-            return self._create_optimized_chunk_layout(track_video_segments, chunk_path, chunk_duration)
+            # Create final chunk with grid layout using the fixed FFmpeg xstack compositor
+            return self._create_grid_layout_chunk_fixed(track_video_segments, chunk_path, chunk_duration)
             
         except Exception as e:
             logging.error(f"Error creating enhanced chunk {chunk_idx}: {e}")
@@ -4008,6 +4094,20 @@ class VideoComposer:
             short_id = str(uuid.uuid4())[:8]
             # Compute onset offset (non-destructive)
             onset_offset = self._get_onset_offset(video_path)
+
+            # Build per-note pre-tuned audio map from the preprocessing cache.
+            # Each unique MIDI note needed in this chunk gets a cached tuned video
+            # whose audio stream replaces the raw asetrate-based pitch shift.
+            note_audio_map = {}
+            unique_midi_notes = {n.get('midi') for n in chunk_notes if n.get('midi') is not None}
+            for midi_note in unique_midi_notes:
+                tuned = self.get_optimized_tuned_video(track_name, midi_note)
+                if tuned and os.path.exists(tuned):
+                    note_audio_map[midi_note] = tuned
+                    logging.debug(f"[PitchShift] {track_name} MIDI {midi_note} → {os.path.basename(tuned)}")
+                else:
+                    logging.debug(f"[PitchShift] {track_name} MIDI {midi_note} → asetrate fallback")
+
             triggered_video = self._create_note_triggered_video_sequence_fixed(
                 video_path=video_path,
                 notes=chunk_notes,
@@ -4015,7 +4115,8 @@ class VideoComposer:
                 track_name=track_name,
                 unique_id=short_id,
                 chunk_start_time=chunk_start_time,
-                onset_offset=onset_offset
+                onset_offset=onset_offset,
+                note_audio_map=note_audio_map if note_audio_map else None,
             )
 
             if not triggered_video:
@@ -4953,8 +5054,9 @@ class VideoComposer:
 
             # Use render config resolution for cell calculations
             target_width, target_height = map(int, self.render_config['resolution'].split('x'))
-            cell_width = target_width // grid_cols
-            cell_height = target_height // grid_rows
+            # Ensure even dimensions — libx264 requires width/height divisible by 2
+            cell_width = (target_width // grid_cols) & ~1
+            cell_height = (target_height // grid_rows) & ~1
             
             logging.info(f"   Target resolution: {target_width}x{target_height} ({'PREVIEW' if self.preview_mode else 'PRODUCTION'})")
             logging.info(f"   Cell dimensions: {cell_width}x{cell_height} pixels")
@@ -5005,13 +5107,14 @@ class VideoComposer:
             # Process each cell in the grid
             cells_processed = 0
             cells_with_content = 0
+            decode_args = self._get_ffmpeg_decode_args()
             for r in range(grid_rows):
                 for c in range(grid_cols):
                     cells_processed += 1
                     cell_segment = grid_cells[r][c]
                     if cell_segment and os.path.exists(cell_segment['video_path']):
                         cells_with_content += 1
-                        cmd.extend(['-i', cell_segment['video_path']])
+                        cmd.extend([*decode_args, '-i', cell_segment['video_path']])
                         # Scale the video and prepare for stacking/mixing
                         filter_parts.append(f"[{input_idx}:v]scale={cell_width}:{cell_height}[v{r}_{c}]")
                         video_inputs_for_stack.append(f"[v{r}_{c}]")
@@ -5019,6 +5122,13 @@ class VideoComposer:
                         # --- VOLUME FIX START ---
                         # Get volume in dB for this segment (supports keys by track_id or normalized name)
                         vol_db = float(self._resolve_segment_volume(cell_segment))
+                        # Optional MIDI velocity shaping on top of user track volume.
+                        velocity_val = (
+                            cell_segment.get('velocity')
+                            or cell_segment.get('midi_velocity')
+                            or cell_segment.get('note_velocity')
+                        )
+                        vol_db += self._velocity_to_db(velocity_val)
                         # Convert dB to linear: 10 ^ (db / 20)
                         vol_linear = 10 ** (vol_db / 20.0)
                         
@@ -5036,6 +5146,13 @@ class VideoComposer:
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
 
+            force_cpu_encode = cells_with_content > self.max_concurrent_streams
+            if force_cpu_encode:
+                logging.warning(
+                    f"High stream pressure ({cells_with_content} active cells) exceeds ATS_MAX_CONCURRENT_STREAMS={self.max_concurrent_streams}. "
+                    "Falling back to CPU encode for stability."
+                )
+
             # Create the xstack and amix filters
             layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
             filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[video_out]")
@@ -5044,7 +5161,12 @@ class VideoComposer:
             if audio_input_count == 0:
                 audio_inputs_for_mix = [f"[{silent_audio_input_idx}:a]"]
                 audio_input_count = 1
-            filter_parts.append(f"{''.join(audio_inputs_for_mix)}amix=inputs={audio_input_count}:duration=longest:normalize=0[audio_out]")
+            filter_parts.append(
+                f"{''.join(audio_inputs_for_mix)}"
+                f"amix=inputs={audio_input_count}:duration=longest:normalize=0,"
+                f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"alimiter=limit=0.95:attack=5:release=50[audio_out]"
+            )
             
             logging.info(f"🎬 Final FFmpeg command construction:")
             logging.info(f"   Total inputs: {input_idx}")
@@ -5056,6 +5178,8 @@ class VideoComposer:
             
             # Get encoding settings based on preview mode and GPU availability
             encoding_args = self._get_encoding_settings()
+            if force_cpu_encode:
+                encoding_args = ['-c:v', 'libx264', '-preset', self.render_config['preset'], '-crf', self.render_config['crf']]
             
             cmd.extend([
                 '-map', '[video_out]', '-map', '[audio_out]',

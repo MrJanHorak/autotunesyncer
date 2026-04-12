@@ -332,7 +332,8 @@ videoProcessingQueue.on('stalled', (job) => {
 // Queue management functions
 export const addVideoCompositionJob = async (
   midiData,
-  videoFiles,
+  processedTracks,
+  processedDrums,
   outputPath,
   sessionId,
   priority = 0
@@ -341,7 +342,8 @@ export const addVideoCompositionJob = async (
     'compose',
     {
       midiData,
-      videoFiles,
+      processedTracks,
+      processedDrums,
       outputPath,
       sessionId,
     },
