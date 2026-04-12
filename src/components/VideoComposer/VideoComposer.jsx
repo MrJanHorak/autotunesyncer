@@ -48,7 +48,9 @@ const VideoComposer = ({
         ? instrumentTrackMap.size
         : Object.keys(instrumentTrackMap || {}).length;
     if (mapSize === 0) {
-      errors.push('Instrument-to-track mapping is missing. Re-parse the MIDI file.');
+      errors.push(
+        'Instrument-to-track mapping is missing. Re-parse the MIDI file.',
+      );
     }
 
     if (!gridArrangement || Object.keys(gridArrangement).length === 0) {
@@ -126,7 +128,9 @@ const VideoComposer = ({
         trackVolumes: effectiveVolumes,
       };
       console.log('Midi data being sent:', midiPayload);
-      const midiBlob = new Blob([JSON.stringify(midiPayload)], { type: 'application/json' });
+      const midiBlob = new Blob([JSON.stringify(midiPayload)], {
+        type: 'application/json',
+      });
       formData.append('midiData', midiBlob);
 
       if (isPreview) {
@@ -148,13 +152,18 @@ const VideoComposer = ({
               throw new Error(`Failed to fetch video for ${instrumentName}`);
             videoBlob = await fetchRes.blob();
           } catch (fetchErr) {
-            console.error(`Error processing video for ${instrumentName}:`, fetchErr);
+            console.error(
+              `Error processing video for ${instrumentName}:`,
+              fetchErr,
+            );
             continue;
           }
         }
 
         formData.append('videos', videoBlob, `${instrumentName}.mp4`);
-        console.log(`Added video for ${instrumentName}, size: ${videoBlob.size}`);
+        console.log(
+          `Added video for ${instrumentName}, size: ${videoBlob.size}`,
+        );
       }
 
       const response = await composeVideos(formData, {
@@ -165,7 +174,9 @@ const VideoComposer = ({
         if (response.data.type.includes('application/json')) {
           const text = await response.data.text();
           const errData = JSON.parse(text);
-          throw new Error(errData.error || errData.details || 'Failed to process video');
+          throw new Error(
+            errData.error || errData.details || 'Failed to process video',
+          );
         }
 
         const url = URL.createObjectURL(response.data);
@@ -223,7 +234,9 @@ const VideoComposer = ({
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded transition-all duration-300 ${
-                    processingMode === 'preview' ? 'bg-yellow-500' : 'bg-blue-500'
+                    processingMode === 'preview'
+                      ? 'bg-yellow-500'
+                      : 'bg-blue-500'
                   }`}
                   style={{ width: `${uploadProgress}%` }}
                 />
@@ -238,17 +251,20 @@ const VideoComposer = ({
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded ${
-                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
+                    processingMode === 'preview'
+                      ? 'bg-yellow-400'
+                      : 'bg-blue-500'
                   }`}
                   style={{
                     width: '40%',
-                    animation: 'indeterminate-progress 1.4s infinite ease-in-out',
+                    animation:
+                      'indeterminate-progress 1.4s infinite ease-in-out',
                   }}
                 />
               </div>
               <p className='text-sm text-gray-600 mt-1'>
-                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'} rendering…{' '}
-                {elapsedSeconds}s elapsed
+                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
+                rendering… {elapsedSeconds}s elapsed
               </p>
             </>
           )}
