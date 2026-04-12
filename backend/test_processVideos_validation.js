@@ -54,34 +54,62 @@ const postForm = async (baseUrl, form) => {
 
 const testInvalidMidiJson = async (baseUrl) => {
   const form = new FormData();
-  form.append('midiData', new Blob(['{not-json'], { type: 'application/json' }), 'midi.json');
+  form.append(
+    'midiData',
+    new Blob(['{not-json'], { type: 'application/json' }),
+    'midi.json',
+  );
 
   const { response, data } = await postForm(baseUrl, form);
-  assert.strictEqual(response.status, 400, 'Invalid midiData JSON should return 400');
+  assert.strictEqual(
+    response.status,
+    400,
+    'Invalid midiData JSON should return 400',
+  );
   assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(String(data.details || '').includes('Invalid midiData JSON payload'));
+  assert.ok(
+    String(data.details || '').includes('Invalid midiData JSON payload'),
+  );
 };
 
 const testMissingGridArrangement = async (baseUrl) => {
   const form = new FormData();
   const midiPayload = makeMidiPayload({ gridArrangement: {} });
-  form.append('midiData', new Blob([JSON.stringify(midiPayload)], { type: 'application/json' }), 'midi.json');
-  form.append('videos', new Blob(['fake-video'], { type: 'video/mp4' }), 'piano.mp4');
+  form.append(
+    'midiData',
+    new Blob([JSON.stringify(midiPayload)], { type: 'application/json' }),
+    'midi.json',
+  );
+  form.append(
+    'videos',
+    new Blob(['fake-video'], { type: 'video/mp4' }),
+    'piano.mp4',
+  );
 
   const { response, data } = await postForm(baseUrl, form);
-  assert.strictEqual(response.status, 400, 'Missing grid arrangement should return 400');
+  assert.strictEqual(
+    response.status,
+    400,
+    'Missing grid arrangement should return 400',
+  );
   assert.strictEqual(data.error, 'Invalid composition input');
   assert.ok(String(data.details || '').includes('Grid arrangement is empty'));
 };
 
 const testMissingVideos = async (baseUrl) => {
   const form = new FormData();
-  form.append('midiData', new Blob([JSON.stringify(makeMidiPayload())], { type: 'application/json' }), 'midi.json');
+  form.append(
+    'midiData',
+    new Blob([JSON.stringify(makeMidiPayload())], { type: 'application/json' }),
+    'midi.json',
+  );
 
   const { response, data } = await postForm(baseUrl, form);
   assert.strictEqual(response.status, 400, 'Missing videos should return 400');
   assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(String(data.details || '').includes('At least one video file is required'));
+  assert.ok(
+    String(data.details || '').includes('At least one video file is required'),
+  );
 };
 
 const testInvalidGridPosition = async (baseUrl) => {
@@ -92,13 +120,27 @@ const testInvalidGridPosition = async (baseUrl) => {
     },
   });
 
-  form.append('midiData', new Blob([JSON.stringify(midiPayload)], { type: 'application/json' }), 'midi.json');
-  form.append('videos', new Blob(['fake-video'], { type: 'video/mp4' }), 'piano.mp4');
+  form.append(
+    'midiData',
+    new Blob([JSON.stringify(midiPayload)], { type: 'application/json' }),
+    'midi.json',
+  );
+  form.append(
+    'videos',
+    new Blob(['fake-video'], { type: 'video/mp4' }),
+    'piano.mp4',
+  );
 
   const { response, data } = await postForm(baseUrl, form);
-  assert.strictEqual(response.status, 400, 'Invalid grid position should return 400');
+  assert.strictEqual(
+    response.status,
+    400,
+    'Invalid grid position should return 400',
+  );
   assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(String(data.details || '').includes('invalid row/column positions'));
+  assert.ok(
+    String(data.details || '').includes('invalid row/column positions'),
+  );
 };
 
 const run = async () => {

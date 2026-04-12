@@ -559,7 +559,10 @@ router.post(
         try {
           fs.unlinkSync(permanentOutputPath);
         } catch (e) {
-          console.warn('Failed to cleanup output file after stream:', e.message);
+          console.warn(
+            'Failed to cleanup output file after stream:',
+            e.message,
+          );
         }
       });
       readStream.on('error', (streamErr) => {

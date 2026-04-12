@@ -150,7 +150,13 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
         reader.onload = () => {
           try {
             const errData = JSON.parse(reader.result);
-            reject(new Error(errData.details || errData.error || `Server error ${xhr.status}`));
+            reject(
+              new Error(
+                errData.details ||
+                  errData.error ||
+                  `Server error ${xhr.status}`,
+              ),
+            );
           } catch {
             reject(new Error(`Server error ${xhr.status}`));
           }
@@ -159,7 +165,8 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
       }
     };
 
-    xhr.onerror = () => reject(new Error('Network error during video composition'));
+    xhr.onerror = () =>
+      reject(new Error('Network error during video composition'));
     xhr.ontimeout = () => reject(new Error('Request timed out'));
 
     xhr.send(formData);
