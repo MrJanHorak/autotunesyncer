@@ -81,26 +81,33 @@ class OptimizedAutotuneCache:
             self.cache_index = {}
 
     def _save_cache_index(self):
-        """Save cache index to disk"""
+        """Save cache index to disk using an atomic write to prevent corruption
+        if multiple processes write simultaneously."""
         index_file = os.path.join(self.cache_dir, 'cache_index.json')
+        tmp_file = index_file + '.tmp'
         try:
-            with open(index_file, 'w') as f:
+            with open(tmp_file, 'w') as f:
                 json.dump(self.cache_index, f, indent=2)
+            os.replace(tmp_file, index_file)  # atomic on POSIX and Windows
         except Exception as e:
             logging.error(f"Failed to save cache index: {e}")
 
     def _generate_video_hash(self, video_path: str) -> str:
-        """Generate hash for video file to use as cache key"""
+        """Generate a content-based hash for a video file.
+
+        Intentionally excludes mtime so that the same video content uploaded
+        to different paths (or at different times) produces the same key,
+        enabling pre-cache warm-ups to benefit subsequent composition uploads.
+        """
         try:
             with open(video_path, 'rb') as f:
-                # Read first and last 1KB to create fingerprint
                 start_data = f.read(1024)
-                f.seek(-1024, 2)
+                f.seek(-min(1024, os.path.getsize(video_path)), 2)
                 end_data = f.read(1024)
-                
-            file_stats = os.stat(video_path)
-            hash_input = f"{start_data}{end_data}{file_stats.st_size}{file_stats.st_mtime}"
-            return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+            file_size = os.path.getsize(video_path)
+            # Content fingerprint only — no mtime
+            hash_input = start_data + end_data + str(file_size).encode()
+            return hashlib.sha256(hash_input).hexdigest()[:16]
         except Exception as e:
             logging.warning(f"Failed to hash video {video_path}: {e}")
             return hashlib.md5(video_path.encode()).hexdigest()[:16]

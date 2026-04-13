@@ -451,6 +451,9 @@ class VideoComposer:
             self.track_volumes = midi_data.get('trackVolumes', {})
             logging.info(f"Initialized VideoComposer with track volumes: {self.track_volumes}")
 
+            # Explicit session-specific video paths (prevents stale uploads from past sessions)
+            self.explicit_video_files = midi_data.get('videoFiles', {})
+
             self.processed_videos_dir = Path(processed_videos_dir)
             
             # Check if we have an uploads directory provided or need to find it
@@ -968,34 +971,79 @@ class VideoComposer:
         return midi_data
     
     def _register_video_paths(self):
-        """Register paths for all videos in uploads directory"""
-        # Get singleton instance
+        """Register paths for all videos.
+
+        When the caller supplies explicit session-specific video paths (via
+        midi_data['videoFiles']), those are used exclusively — the shared
+        uploads directory is NOT scanned.  This prevents videos from past
+        sessions from contaminating the current composition.
+
+        Falls back to a directory scan only when no explicit paths are provided
+        (e.g. direct VideoComposer usage without the Node.js wrapper).
+        """
         registry = PathRegistry.get_instance()
-        
-        # Set registry file if needed
         registry_file = self.processed_videos_dir / "path_registry.json"
-        
-        # Register from uploads directory where videos are actually stored
-        logging.info(f"Scanning uploads directory for videos: {self.uploads_dir}")
-        
-        # Use the new specialized method for uploads directory
-        success = registry.register_from_uploads_directory(self.uploads_dir)
-        
-        if not success:
-            logging.warning("No videos found in uploads directory, trying processed videos directory as fallback")
-            # Also register from processed videos directory (fallback)
-            registry.register_from_directory(self.processed_videos_dir)
-        
-        # Save registry for debugging
+
+        if self.explicit_video_files:
+            logging.info(
+                f"Using {len(self.explicit_video_files)} explicit session video paths "
+                "(shared uploads scan skipped to prevent stale-video contamination)"
+            )
+            self._register_explicit_video_files(registry)
+        else:
+            logging.info(f"Scanning uploads directory for videos: {self.uploads_dir}")
+            success = registry.register_from_uploads_directory(self.uploads_dir)
+            if not success:
+                logging.warning(
+                    "No videos found in uploads directory, trying processed videos directory as fallback"
+                )
+                registry.register_from_directory(self.processed_videos_dir)
+
         registry.save_registry(str(registry_file))
-        
-        # Debug dump to help troubleshoot
         registry.debug_dump()
-        
-        # Log registration stats
         stats = registry.get_stats()
         logging.info(f"Path registry stats: {stats}")
         logging.info(f"Total videos registered: {stats['total_paths']}")
+
+    def _register_explicit_video_files(self, registry):
+        """Register session-specific video paths into PathRegistry.
+
+        Registers each instrument for every unique MIDI note present in the
+        composition so note-based lookups always resolve to the correct file.
+        Uses the isDrum flag from the payload rather than name heuristics.
+        """
+        count = 0
+        for instrument_name, video_info in self.explicit_video_files.items():
+            if isinstance(video_info, dict):
+                path = video_info.get('path', '')
+                is_drum = video_info.get('isDrum', False)
+                midi_notes = video_info.get('notes', [])
+            else:
+                path = str(video_info)
+                is_drum = instrument_name.lower().startswith('drum_')
+                midi_notes = []
+
+            if not path or not os.path.exists(path):
+                logging.warning(f"Explicit video not found, skipping: {instrument_name} → {path}")
+                continue
+
+            norm_name = instrument_name.lower().replace(' ', '_').replace('-', '_')
+
+            if is_drum:
+                # Strip leading 'drum_' prefix that the grid uses but PathRegistry doesn't store
+                drum_name = norm_name[5:] if norm_name.startswith('drum_') else norm_name
+                registry.register_drum(drum_name, path, validate=False)
+            else:
+                # Register note "60" as a guaranteed default fallback
+                registry.register_instrument(norm_name, "60", path, validate=False)
+                # Also register for every unique MIDI note actually used
+                for midi_note in set(int(n) for n in midi_notes if isinstance(n, (int, float))):
+                    registry.register_instrument(norm_name, str(midi_note), path, validate=False)
+
+            logging.info(f"✅ Pinned explicit video: {instrument_name} → {os.path.basename(path)}")
+            count += 1
+
+        logging.info(f"Registered {count} explicit session videos (stale uploads scan bypassed)")
 
     def encode_video(self, cmd):
         logging.info(f"Encoding video with command: {' '.join(cmd)}")
@@ -5146,6 +5194,62 @@ class VideoComposer:
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
 
+            # ── Solo-resolution optimisation ────────────────────────────────
+            # When only one cell has content in this chunk, skip xstack and
+            # render the single clip at the full canvas resolution so the active
+            # instrument fills the screen instead of appearing as a tiny cell.
+            if cells_with_content == 1:
+                solo_w = target_width & ~1
+                solo_h = target_height & ~1
+                # The single video is always at input index 2
+                # (index 0 = black placeholder, 1 = silent audio, 2 = first video)
+                filter_parts.clear()
+                solo_segment = next(
+                    (grid_cells[r][c] for r in range(grid_rows) for c in range(grid_cols)
+                     if grid_cells[r][c] and os.path.exists(grid_cells[r][c].get('video_path', ''))),
+                    None
+                )
+                filter_parts.append(f"[2:v]scale={solo_w}:{solo_h}[video_out]")
+                if solo_segment:
+                    vol_db = float(self._resolve_segment_volume(solo_segment))
+                    velocity_val = (
+                        solo_segment.get('velocity')
+                        or solo_segment.get('midi_velocity')
+                        or solo_segment.get('note_velocity')
+                    )
+                    vol_db += self._velocity_to_db(velocity_val)
+                    vol_linear = 10 ** (vol_db / 20.0)
+                    filter_parts.append(
+                        f"[2:a]volume={vol_linear:.2f},"
+                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_out]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[{silent_audio_input_idx}:a]"
+                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_out]"
+                    )
+                logging.info(f"🎯 Solo mode: rendering at {solo_w}x{solo_h} (full canvas, no xstack)")
+                encoding_args = self._get_encoding_settings()
+                cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+                cmd.extend([
+                    '-map', '[video_out]', '-map', '[audio_out]',
+                    *encoding_args,
+                    '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
+                    '-pix_fmt', 'yuv420p',
+                    '-t', str(duration), '-r', '30', str(output_path)
+                ])
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                    logging.info(f"✅ Solo chunk created: {output_size:,} bytes")
+                    return str(output_path)
+                else:
+                    # cmd is now partially built — cannot safely fall back to multi-cell.
+                    # Return None so the chunk is skipped; the rest of the composition continues.
+                    logging.warning(f"⚠️ Solo FFmpeg failed for chunk, skipping: {result.stderr[-300:]}")
+                    return None
+            # ── End solo-resolution optimisation ────────────────────────────
+
             force_cpu_encode = cells_with_content > self.max_concurrent_streams
             if force_cpu_encode:
                 logging.warning(
@@ -5165,7 +5269,10 @@ class VideoComposer:
                 f"{''.join(audio_inputs_for_mix)}"
                 f"amix=inputs={audio_input_count}:duration=longest:normalize=0,"
                 f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"alimiter=limit=0.95:attack=5:release=50[audio_out]"
+                # Soft limiter: 100ms attack / 500ms release keeps level invisible to ears
+                # while preventing hard clips before AAC encode. Final loudnorm pass handles
+                # overall level after chunk concatenation.
+                f"alimiter=limit=0.8:attack=80:release=500[audio_out]"
             )
             
             logging.info(f"🎬 Final FFmpeg command construction:")

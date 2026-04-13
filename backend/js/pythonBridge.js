@@ -6,7 +6,7 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const runPythonProcessor = async (configPath) => {
+export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
   return new Promise((resolve, reject) => {
     let midiJsonPath, videoJsonPath, outputPath;
 
@@ -93,6 +93,10 @@ export const runPythonProcessor = async (configPath) => {
         const message = data.toString();
         console.log(`Python output: ${message}`);
         output += message;
+        const progressMatch = message.match(/PROGRESS:(\d+)/);
+        if (progressMatch && onProgress) {
+          onProgress(parseInt(progressMatch[1], 10));
+        }
       });
 
       process.stderr.on('data', (data) => {

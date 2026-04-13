@@ -1,7 +1,7 @@
 /* eslint-disable no-unused-vars */
-import { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState, useRef } from 'react';
 
-import { isDrumTrack, DRUM_NOTES } from './js/drumUtils';
+import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 
 import { useMidiProcessing } from './hooks/useMidiProcessing';
@@ -80,6 +80,58 @@ function App() {
   const [trackVolumes, setTrackVolumes] = useState({});
   const [muteStates, setMuteStates] = useState({});
   const [soloTrack, setSoloTrack] = useState(null);
+
+  // Track which instrument keys have already been queued for pre-caching
+  // so we don't send duplicate requests on every re-render.
+  const precachedKeysRef = useRef(new Set());
+
+  // Fire-and-forget pre-cache request for one instrument's blob + MIDI notes.
+  const triggerPrecache = useCallback((instrumentKey, blob, midiData) => {
+    if (precachedKeysRef.current.has(instrumentKey)) return;
+    precachedKeysRef.current.add(instrumentKey);
+
+    // Collect unique MIDI notes for this instrument key
+    const notes = new Set();
+    midiData.tracks.forEach((track) => {
+      if (isDrumTrack(track)) {
+        // Match drum notes whose group maps to this key
+        const expectedKey = `drum_${getNoteGroup(track.notes[0]?.midi ?? 0).toLowerCase().replace(/\s+/g, '_')}`;
+        track.notes.forEach((note) => {
+          const noteKey = `drum_${getNoteGroup(note.midi).toLowerCase().replace(/\s+/g, '_')}`;
+          if (noteKey === instrumentKey) notes.add(note.midi);
+        });
+      } else {
+        const trackKey = track.instrument?.name?.toLowerCase().replace(/\s+/g, '_');
+        if (trackKey === instrumentKey) {
+          track.notes.forEach((note) => notes.add(note.midi));
+        }
+      }
+    });
+
+    if (notes.size === 0) return;
+
+    const formData = new FormData();
+    formData.append('video', blob, `${instrumentKey}.mp4`);
+    formData.append('midiNotes', JSON.stringify([...notes]));
+
+    fetch('http://localhost:3000/api/autotune/precache', { method: 'POST', body: formData })
+      .then((r) => {
+        if (!r.ok) throw new Error(`precache HTTP ${r.status}`);
+        console.log(`[precache] Queued ${instrumentKey} (${notes.size} notes)`);
+      })
+      .catch((err) => console.warn(`[precache] ${instrumentKey} failed:`, err));
+  }, []);
+
+  // Trigger precache whenever a new video is recorded AND MIDI is loaded,
+  // or when MIDI loads after videos are already recorded.
+  useEffect(() => {
+    if (!parsedMidiData || Object.keys(videoFiles).length === 0) return;
+    for (const [key, blob] of Object.entries(videoFiles)) {
+      if (blob instanceof Blob) {
+        triggerPrecache(key, blob, parsedMidiData);
+      }
+    }
+  }, [parsedMidiData, videoFiles, triggerPrecache]);
 
   const handleVolumeChange = (trackKey, volume) => {
     setTrackVolumes((prev) => ({

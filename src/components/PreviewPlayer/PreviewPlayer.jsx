@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Tone from 'tone';
 import PropTypes from 'prop-types';
+import { isDrumTrack, getNoteGroup } from '../../js/drumUtils';
 
 const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const samplersRef = useRef({});
   const channelsRef = useRef({});
+  // Track all scheduled event IDs so we can cancel cleanly
+  const scheduledIdsRef = useRef([]);
 
   // 1. Initialize Tone.js Instruments when videoFiles change
   useEffect(() => {
@@ -22,7 +25,6 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       const newSamplers = {};
       const newChannels = {};
 
-      // Create a channel and sampler for each instrument
       for (const inst of instruments) {
         const key = inst.isDrum
           ? `drum_${inst.group.toLowerCase().replace(/\s+/g, '_')}`
@@ -30,57 +32,39 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
 
         if (!videoFiles[key]) continue;
 
-        // Create a URL for the blob
         const fileUrl = URL.createObjectURL(videoFiles[key]);
-
-        // Create Channel (for volume control)
         const channel = new Tone.Channel(volumes[key] || 0, 0).toDestination();
         newChannels[key] = channel;
 
-        // Create Sampler
-        // We assume the recorded clip is C4 (middle C) for melodic instruments
-        // For drums, pitch mapping is handled differently, but Sampler works for now
         newSamplers[key] = new Tone.Sampler({
           urls: { C4: fileUrl },
           release: 1,
-          onload: () => {
-            console.log(`Loaded sample for ${key}`);
-          },
-          onerror: (err) => {
-            console.error(`Failed to load sample for ${key}:`, err);
-          },
+          onload: () => console.log(`Loaded sample for ${key}`),
+          onerror: (err) => console.error(`Failed to load sample for ${key}:`, err),
         }).connect(channel);
       }
 
       try {
         await Tone.loaded();
-        console.log('All samples loaded');
-        samplersRef.current = newSamplers;
-        channelsRef.current = newChannels;
-        setIsLoaded(true);
       } catch (e) {
-        console.error('Error loading samples:', e);
-        // Still set loaded to true so we can try to play what loaded?
-        // Or maybe just log it.
-        // If Tone.loaded() fails, it means at least one buffer failed.
-        // We should probably still allow playback of others.
-        samplersRef.current = newSamplers;
-        channelsRef.current = newChannels;
-        setIsLoaded(true);
+        console.error('Error loading some samples:', e);
       }
+
+      samplersRef.current = newSamplers;
+      channelsRef.current = newChannels;
+      setIsLoaded(true);
     };
 
     setupAudio();
 
     return () => {
-      // Cleanup
       Object.values(samplersRef.current).forEach((s) => s.dispose());
       Object.values(channelsRef.current).forEach((c) => c.dispose());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoFiles, instruments]); // Re-run if files change
+  }, [videoFiles, instruments]);
 
-  // 2. Update Volumes in real-time, applying mute/solo
+  // 2. Update volumes/mute/solo in real-time
   useEffect(() => {
     const hasSolo = soloTrack !== null;
     Object.entries(channelsRef.current).forEach(([key, channel]) => {
@@ -94,53 +78,72 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
     });
   }, [volumes, muteStates, soloTrack]);
 
-  // 3. Handle Playback
+  // 3. Handle playback
   const togglePlayback = async () => {
     if (isPlaying) {
       Tone.Transport.stop();
-      Tone.Transport.cancel(); // Clear scheduled events
+      Tone.Transport.cancel();
+      scheduledIdsRef.current = [];
       setIsPlaying(false);
-    } else {
-      await Tone.start();
-      if (Tone.context.state !== 'running') {
-        await Tone.context.resume();
-      }
+      return;
+    }
 
-      // Schedule MIDI events
-      midiData.tracks.forEach((track) => {
-        // Find which instrument this track belongs to
-        const inst = instruments.find(
-          (i) => i.number === track.instrument.number
-        );
-        if (!inst) return;
+    await Tone.start();
+    if (Tone.context.state !== 'running') {
+      await Tone.context.resume();
+    }
 
-        const key = inst.isDrum
-          ? `drum_${inst.group.toLowerCase().replace(/\s+/g, '_')}`
-          : inst.name.toLowerCase().replace(/\s+/g, '_');
+    Tone.Transport.cancel();
+    scheduledIdsRef.current = [];
 
-        const sampler = samplersRef.current[key];
-        if (!sampler) return;
+    // Use one shared base offset so all notes are scheduled from the same clock reference
+    midiData.tracks.forEach((track) => {
+      const drumTrack = isDrumTrack(track);
+
+      if (drumTrack) {
+        // Each note maps to a specific drum-group instrument key
+        track.notes.forEach((note) => {
+          const group = getNoteGroup(note.midi);
+          const key = `drum_${group.toLowerCase().replace(/\s+/g, '_')}`;
+          const sampler = samplersRef.current[key];
+          if (!sampler?.loaded) return;
+
+          const id = Tone.Transport.schedule((time) => {
+            sampler.triggerAttackRelease('C4', note.duration, time, note.velocity);
+          }, note.time);
+          scheduledIdsRef.current.push(id);
+        });
+      } else {
+        // Find matching melodic instrument by normalized name
+        const normalizedTrackName = track.instrument?.name?.toLowerCase().replace(/\s+/g, '_');
+        const sampler = samplersRef.current[normalizedTrackName];
+        if (!sampler?.loaded) return;
 
         track.notes.forEach((note) => {
-          Tone.Transport.schedule((time) => {
-            // Trigger the sample
-            // For drums, we might just trigger 'C4' regardless of note,
-            // or map specific drum notes if you have multiple samples per drum track
-            if (sampler.loaded) {
-              sampler.triggerAttackRelease(
-                inst.isDrum ? 'C4' : Tone.Frequency(note.midi, 'midi').toNote(),
-                note.duration,
-                time,
-                note.velocity
-              );
-            }
+          const id = Tone.Transport.schedule((time) => {
+            sampler.triggerAttackRelease(
+              Tone.Frequency(note.midi, 'midi').toNote(),
+              note.duration,
+              time,
+              note.velocity,
+            );
           }, note.time);
+          scheduledIdsRef.current.push(id);
         });
-      });
+      }
+    });
 
-      Tone.Transport.start();
-      setIsPlaying(true);
-    }
+    // Auto-stop when MIDI ends
+    const endTime = midiData.duration ?? 0;
+    Tone.Transport.schedule(() => {
+      Tone.Transport.stop();
+      Tone.Transport.cancel();
+      scheduledIdsRef.current = [];
+      setIsPlaying(false);
+    }, endTime + 0.1);
+
+    Tone.Transport.start();
+    setIsPlaying(true);
   };
 
   return (
@@ -148,30 +151,20 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       <button
         onClick={togglePlayback}
         disabled={!isLoaded}
-        className={`px-4 py-2 rounded ${
-          isLoaded ? 'bg-green-500 text-white' : 'bg-gray-300'
-        }`}
+        className={`px-4 py-2 rounded ${isLoaded ? 'bg-green-500 text-white' : 'bg-gray-300'}`}
         style={{
           padding: '10px 20px',
           fontSize: '16px',
           fontWeight: 'bold',
           cursor: isLoaded ? 'pointer' : 'not-allowed',
-          backgroundColor: isLoaded
-            ? isPlaying
-              ? '#e74c3c'
-              : '#2ecc71'
-            : '#95a5a6',
+          backgroundColor: isLoaded ? (isPlaying ? '#e74c3c' : '#2ecc71') : '#95a5a6',
           color: 'white',
           border: 'none',
           borderRadius: '4px',
           transition: 'background-color 0.3s',
         }}
       >
-        {!isLoaded
-          ? 'Loading Audio...'
-          : isPlaying
-          ? 'Stop Preview'
-          : '▶ Play Preview'}
+        {!isLoaded ? 'Loading Audio...' : isPlaying ? '⏹ Stop Preview' : '▶ Play Preview'}
       </button>
     </div>
   );

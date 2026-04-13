@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types */
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { composeVideos } from '../../../services/videoServices.js';
+import { startCompositionJob, pollCompositionJob } from '../../../services/videoServices.js';
 
 const VideoComposer = ({
   videoFiles,
@@ -14,6 +14,7 @@ const VideoComposer = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingMode, setProcessingMode] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [renderProgress, setRenderProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
   const [error, setError] = useState(null);
@@ -106,6 +107,7 @@ const VideoComposer = ({
     setIsProcessing(true);
     setProcessingMode(isPreview ? 'preview' : 'full');
     setUploadProgress(0);
+    setRenderProgress(0);
     setElapsedSeconds(0);
     setError(null);
     if (composedVideoUrl) {
@@ -166,24 +168,18 @@ const VideoComposer = ({
         );
       }
 
-      const response = await composeVideos(formData, {
+      // ── Async job: upload → get jobId → poll → download ──────────────────
+      const jobId = await startCompositionJob(formData, {
         onUploadProgress: (pct) => setUploadProgress(pct),
       });
+      console.log('Composition job started:', jobId);
 
-      if (response.data instanceof Blob) {
-        if (response.data.type.includes('application/json')) {
-          const text = await response.data.text();
-          const errData = JSON.parse(text);
-          throw new Error(
-            errData.error || errData.details || 'Failed to process video',
-          );
-        }
+      const blob = await pollCompositionJob(jobId, (pct) => {
+        setRenderProgress(pct);
+      });
 
-        const url = URL.createObjectURL(response.data);
-        setComposedVideoUrl(url);
-      } else {
-        throw new Error('Invalid response format from server');
-      }
+      const url = URL.createObjectURL(blob);
+      setComposedVideoUrl(url);
     } catch (err) {
       console.error('Composition failed:', err);
       setError(err.message || 'Failed to compose video');
@@ -228,15 +224,13 @@ const VideoComposer = ({
 
       {isProcessing && (
         <div className='mt-4'>
-          {/* Upload phase: real progress bar */}
+          {/* Upload phase */}
           {uploadProgress < 100 ? (
             <>
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded transition-all duration-300 ${
-                    processingMode === 'preview'
-                      ? 'bg-yellow-500'
-                      : 'bg-blue-500'
+                    processingMode === 'preview' ? 'bg-yellow-500' : 'bg-blue-500'
                   }`}
                   style={{ width: `${uploadProgress}%` }}
                 />
@@ -245,20 +239,33 @@ const VideoComposer = ({
                 Uploading videos… {uploadProgress}%
               </p>
             </>
+          ) : renderProgress > 0 ? (
+            /* Render phase: real progress from Python */
+            <>
+              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
+                <div
+                  className={`h-full rounded transition-all duration-500 ${
+                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
+                  }`}
+                  style={{ width: `${renderProgress}%` }}
+                />
+              </div>
+              <p className='text-sm text-gray-600 mt-1'>
+                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
+                rendering… {renderProgress}% — {elapsedSeconds}s elapsed
+              </p>
+            </>
           ) : (
-            /* Processing phase: indeterminate animated bar */
+            /* Queued / pre-processing phase: indeterminate */
             <>
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded ${
-                    processingMode === 'preview'
-                      ? 'bg-yellow-400'
-                      : 'bg-blue-500'
+                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
                   }`}
                   style={{
                     width: '40%',
-                    animation:
-                      'indeterminate-progress 1.4s infinite ease-in-out',
+                    animation: 'indeterminate-progress 1.4s infinite ease-in-out',
                   }}
                 />
               </div>
