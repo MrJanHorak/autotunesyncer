@@ -6,6 +6,7 @@ import compositionRoutes from './routes/composition.js';
 import autotuneRoutes from './routes/autotuneRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import processVideos from './routes/processVideos.js';
+import precacheRoutes from './routes/precache.js';
 
 const app = express();
 
@@ -53,6 +54,7 @@ app.use('/api/compose', compositionRoutes);
 app.use('/api/autotune', autotuneRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/process-videos', processVideos);
+app.use('/api/autotune/precache', precacheRoutes);
 
 // Add error handling for large payloads
 app.use((err, req, res, next) => {

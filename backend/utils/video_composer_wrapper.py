@@ -132,7 +132,30 @@ class VideoComposerWrapper:
             processed_dir = self.temp_dir / "a" / "b" / "processed"
             uploads_dir.mkdir(parents=True, exist_ok=True)
             processed_dir.mkdir(parents=True, exist_ok=True)
-              # Ensure grid arrangement is present before initializing VideoComposer
+
+            # Pin session-specific video paths into midi_data so VideoComposer
+            # can skip the shared uploads directory scan.  Only pass minimal
+            # metadata (path, isDrum, unique MIDI notes) — not the full notes
+            # array — to keep the payload lean.
+            if video_files:
+                midi_data['videoFiles'] = {
+                    name: {
+                        'path': info.get('path', ''),
+                        'isDrum': info.get('isDrum', False),
+                        'notes': list({
+                            int(n['midi'])
+                            for n in info.get('notes', [])
+                            if isinstance(n, dict) and 'midi' in n
+                        }),
+                    }
+                    for name, info in video_files.items()
+                    if isinstance(info, dict) and info.get('path') and os.path.exists(info.get('path', ''))
+                }
+                self.logger.info(
+                    f"Pinned {len(midi_data['videoFiles'])} session-specific video paths into VideoComposer"
+                )
+
+            # Ensure grid arrangement is present before initializing VideoComposer
             if 'gridArrangement' not in midi_data or not midi_data['gridArrangement']:
                 self.logger.error("No grid arrangement found in MIDI data")
                 raise ValueError("Grid arrangement is required for video composition")

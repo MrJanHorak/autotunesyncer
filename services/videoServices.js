@@ -172,3 +172,98 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
     xhr.send(formData);
   });
 };
+
+/**
+ * Start an async composition job. Returns a Promise that resolves with the
+ * jobId string once the server has accepted the upload (HTTP 202).
+ */
+export const startCompositionJob = (formData, progressCallbacks = {}) => {
+  if (!(formData instanceof FormData)) {
+    return Promise.reject(new Error('Invalid compose request payload'));
+  }
+
+  const { onUploadProgress } = progressCallbacks;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE_URL}/process-videos`);
+
+    if (onUploadProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onUploadProgress(Math.round((event.loaded * 100) / event.total));
+        }
+      };
+      xhr.upload.onload = () => onUploadProgress(100);
+    }
+
+    xhr.onload = () => {
+      if (xhr.status === 202) {
+        try {
+          const data = JSON.parse(xhr.responseText);
+          resolve(data.jobId);
+        } catch {
+          reject(new Error('Invalid server response: expected { jobId }'));
+        }
+      } else {
+        try {
+          const errData = JSON.parse(xhr.responseText);
+          reject(new Error(errData.details || errData.error || `Server error ${xhr.status}`));
+        } catch {
+          reject(new Error(`Server error ${xhr.status}`));
+        }
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error during video composition'));
+    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.send(formData);
+  });
+};
+
+const POLL_INTERVAL_MS = 3000;
+const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Poll a composition job until it completes, then download the result blob.
+ * @param {string} jobId
+ * @param {function} [onProgress] - called with progress 0-100
+ * @returns {Promise<Blob>}
+ */
+export const pollCompositionJob = (jobId, onProgress) => {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+
+    const poll = () => {
+      if (Date.now() - startTime > POLL_TIMEOUT_MS) {
+        reject(new Error('Composition timed out after 30 minutes'));
+        return;
+      }
+
+      fetch(`${API_BASE_URL}/process-videos/status/${jobId}`)
+        .then((r) => {
+          if (!r.ok) throw new Error(`Status check failed: ${r.statusText}`);
+          return r.json();
+        })
+        .then(({ status, progress, error }) => {
+          if (onProgress && typeof progress === 'number') onProgress(progress);
+
+          if (status === 'done') {
+            return fetch(`${API_BASE_URL}/process-videos/result/${jobId}`)
+              .then((r) => {
+                if (!r.ok) throw new Error('Failed to download composition result');
+                return r.blob();
+              })
+              .then(resolve);
+          } else if (status === 'failed') {
+            reject(new Error(error || 'Composition failed on the server'));
+          } else {
+            setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        })
+        .catch(reject);
+    };
+
+    setTimeout(poll, POLL_INTERVAL_MS);
+  });
+};
