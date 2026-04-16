@@ -1,7 +1,9 @@
 import PropTypes from 'prop-types';
 import './Mixer.css';
 
-const Mixer = ({ instruments, volumes, onVolumeChange, muteStates = {}, soloTrack = null, onMuteChange, onSoloChange }) => {
+const SIGNAL_THRESHOLD_DB = -60; // below this = silence
+
+const Mixer = ({ instruments, volumes, onVolumeChange, muteStates = {}, soloTrack = null, onMuteChange, onSoloChange, activeLevels = {} }) => {
   const handleMute = (key) => {
     if (onMuteChange) onMuteChange(key, !muteStates[key]);
   };
@@ -38,11 +40,22 @@ const Mixer = ({ instruments, volumes, onVolumeChange, muteStates = {}, soloTrac
             const isMuted = muteStates[key];
             const isSolo = soloTrack === key;
 
+            const rawLevel = activeLevels[key];
+            const levelDb = typeof rawLevel === 'number' && isFinite(rawLevel) ? rawLevel : -Infinity;
+            const isActive = !isMuted && levelDb > SIGNAL_THRESHOLD_DB;
+            // Map -60..0 dBFS → 0..100 %
+            const meterPct = isActive
+              ? Math.max(0, Math.min(100, ((levelDb + 60) / 60) * 100))
+              : 0;
+
             return (
               <div
                 key={`${key}-${index}`}
                 className={`channel-strip ${isMuted ? 'muted' : ''} ${isSolo ? 'solo' : ''}`}
               >
+                {/* Signal LED */}
+                <div className={`signal-led ${isActive ? 'active' : ''}`} title={isActive ? `${levelDb.toFixed(1)} dBFS` : 'No signal'} />
+
                 {/* Channel Label */}
                 <div className='channel-label'>
                   <span className='track-name'>
@@ -54,11 +67,14 @@ const Mixer = ({ instruments, volumes, onVolumeChange, muteStates = {}, soloTrac
                 <div className='fader-section'>
                   <div className='level-meter'>
                     <div
-                      className='meter-fill'
+                      className={`meter-fill ${isActive ? 'live' : ''}`}
                       style={{
-                        height: `${((volume + 60) / 70) * 100}%`,
+                        height: isActive
+                          ? `${meterPct}%`
+                          : `${((volume + 60) / 70) * 100}%`,
+                        opacity: isActive ? 1 : 0.35,
                       }}
-                    ></div>
+                    />
                   </div>
 
                   <input
@@ -107,6 +123,7 @@ Mixer.propTypes = {
   instruments: PropTypes.array.isRequired,
   volumes: PropTypes.object.isRequired,
   onVolumeChange: PropTypes.func.isRequired,
+  activeLevels: PropTypes.object,
 };
 
 export default Mixer;

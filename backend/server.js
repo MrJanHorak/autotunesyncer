@@ -1,5 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import { existsSync, readdirSync, statSync, unlinkSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import midiRoutes from './routes/midiRoutes.js';
 import videoRoutes from './routes/videoRoutes.js';
 import compositionRoutes from './routes/composition.js';
@@ -77,3 +80,31 @@ app.listen(3000, () => {
   console.log('Server running on port 3000');
   console.log('Server running on port 3000');
 });
+
+// Delete processed_* files in uploads/ that are older than 7 days
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const uploadsDir = join(__dirname, 'uploads');
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function cleanUploads() {
+  if (!existsSync(uploadsDir)) return;
+  const now = Date.now();
+  let removed = 0;
+  for (const name of readdirSync(uploadsDir)) {
+    if (!name.startsWith('processed_')) continue;
+    const fullPath = join(uploadsDir, name);
+    try {
+      const age = now - statSync(fullPath).mtimeMs;
+      if (age > TTL_MS) {
+        unlinkSync(fullPath);
+        removed++;
+      }
+    } catch {
+      // file already gone or stat failed — skip
+    }
+  }
+  if (removed > 0) console.log(`[TTL cleanup] Removed ${removed} stale processed_ file(s) from uploads/`);
+}
+
+cleanUploads();
+setInterval(cleanUploads, 24 * 60 * 60 * 1000);

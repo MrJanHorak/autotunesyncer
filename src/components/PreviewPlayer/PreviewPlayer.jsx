@@ -1,15 +1,53 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import * as Tone from 'tone';
 import PropTypes from 'prop-types';
 import { isDrumTrack, getNoteGroup } from '../../js/drumUtils';
 
-const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null }) => {
+const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null, onMeterUpdate }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const samplersRef = useRef({});
   const channelsRef = useRef({});
-  // Track all scheduled event IDs so we can cancel cleanly
+  const metersRef = useRef({});
   const scheduledIdsRef = useRef([]);
+  const rafRef = useRef(null);
+  const isPlayingRef = useRef(false);
+
+  // Throttle meter callback to ~15 Hz to avoid excessive re-renders
+  const lastMeterCallRef = useRef(0);
+  const emitMeterUpdate = useCallback(() => {
+    if (!onMeterUpdate) return;
+    const now = performance.now();
+    if (now - lastMeterCallRef.current < 66) return; // ~15 Hz
+    lastMeterCallRef.current = now;
+    const levels = {};
+    Object.entries(metersRef.current).forEach(([key, meter]) => {
+      levels[key] = meter.getValue();
+    });
+    onMeterUpdate(levels);
+  }, [onMeterUpdate]);
+
+  const startMeterLoop = useCallback(() => {
+    const tick = () => {
+      if (!isPlayingRef.current) return;
+      emitMeterUpdate();
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, [emitMeterUpdate]);
+
+  const stopMeterLoop = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    // Zero-out all meters on stop
+    if (onMeterUpdate) {
+      const zeroed = {};
+      Object.keys(metersRef.current).forEach((k) => { zeroed[k] = -Infinity; });
+      onMeterUpdate(zeroed);
+    }
+  }, [onMeterUpdate]);
 
   // 1. Initialize Tone.js Instruments when videoFiles change
   useEffect(() => {
@@ -21,9 +59,15 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       // Cleanup old nodes
       Object.values(samplersRef.current).forEach((s) => s.dispose());
       Object.values(channelsRef.current).forEach((c) => c.dispose());
+      Object.values(metersRef.current).forEach((m) => m.dispose());
+      // Revoke old blob URLs stored on samplers
+      Object.values(samplersRef.current).forEach((s) => {
+        if (s._blobUrl) URL.revokeObjectURL(s._blobUrl);
+      });
 
       const newSamplers = {};
       const newChannels = {};
+      const newMeters = {};
 
       for (const inst of instruments) {
         const key = inst.isDrum
@@ -34,14 +78,19 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
 
         const fileUrl = URL.createObjectURL(videoFiles[key]);
         const channel = new Tone.Channel(volumes[key] || 0, 0).toDestination();
+        const meter = new Tone.Meter({ smoothing: 0.8 });
+        channel.connect(meter);
         newChannels[key] = channel;
+        newMeters[key] = meter;
 
-        newSamplers[key] = new Tone.Sampler({
+        const sampler = new Tone.Sampler({
           urls: { C4: fileUrl },
           release: 1,
           onload: () => console.log(`Loaded sample for ${key}`),
           onerror: (err) => console.error(`Failed to load sample for ${key}:`, err),
         }).connect(channel);
+        sampler._blobUrl = fileUrl;
+        newSamplers[key] = sampler;
       }
 
       try {
@@ -52,14 +101,19 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
 
       samplersRef.current = newSamplers;
       channelsRef.current = newChannels;
+      metersRef.current = newMeters;
       setIsLoaded(true);
     };
 
     setupAudio();
 
     return () => {
-      Object.values(samplersRef.current).forEach((s) => s.dispose());
+      Object.values(samplersRef.current).forEach((s) => {
+        if (s._blobUrl) URL.revokeObjectURL(s._blobUrl);
+        s.dispose();
+      });
       Object.values(channelsRef.current).forEach((c) => c.dispose());
+      Object.values(metersRef.current).forEach((m) => m.dispose());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoFiles, instruments]);
@@ -84,6 +138,8 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       Tone.Transport.stop();
       Tone.Transport.cancel();
       scheduledIdsRef.current = [];
+      isPlayingRef.current = false;
+      stopMeterLoop();
       setIsPlaying(false);
       return;
     }
@@ -139,10 +195,14 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       Tone.Transport.stop();
       Tone.Transport.cancel();
       scheduledIdsRef.current = [];
+      isPlayingRef.current = false;
+      stopMeterLoop();
       setIsPlaying(false);
     }, endTime + 0.1);
 
+    isPlayingRef.current = true;
     Tone.Transport.start();
+    startMeterLoop();
     setIsPlaying(true);
   };
 
@@ -177,6 +237,7 @@ PreviewPlayer.propTypes = {
   instruments: PropTypes.array,
   muteStates: PropTypes.object,
   soloTrack: PropTypes.string,
+  onMeterUpdate: PropTypes.func,
 };
 
 export default PreviewPlayer;

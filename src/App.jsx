@@ -80,6 +80,8 @@ function App() {
   const [trackVolumes, setTrackVolumes] = useState({});
   const [muteStates, setMuteStates] = useState({});
   const [soloTrack, setSoloTrack] = useState(null);
+  const [activeLevels, setActiveLevels] = useState({});
+  const lastMeterStateRef = useRef(0);
 
   // Track which instrument keys have already been queued for pre-caching
   // so we don't send duplicate requests on every re-render.
@@ -139,6 +141,15 @@ function App() {
       [trackKey]: volume,
     }));
   };
+
+  // Throttled meter update — called up to ~15 Hz from PreviewPlayer's rAF loop.
+  // We gate state updates to ~10 Hz here to avoid excessive re-renders.
+  const handleMeterUpdate = useCallback((levels) => {
+    const now = Date.now();
+    if (now - lastMeterStateRef.current < 100) return;
+    lastMeterStateRef.current = now;
+    setActiveLevels(levels);
+  }, []);
 
   const handleMuteChange = (trackKey, isMuted) => {
     setMuteStates((prev) => ({ ...prev, [trackKey]: isMuted }));
@@ -255,6 +266,7 @@ function App() {
                 soloTrack={soloTrack}
                 onMuteChange={handleMuteChange}
                 onSoloChange={handleSoloChange}
+                activeLevels={activeLevels}
               />
 
               <div style={{ marginTop: '15px' }}>
@@ -265,6 +277,7 @@ function App() {
                   muteStates={muteStates}
                   soloTrack={soloTrack}
                   instruments={instruments}
+                  onMeterUpdate={handleMeterUpdate}
                 />
               </div>
             </div>
