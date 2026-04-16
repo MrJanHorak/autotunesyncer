@@ -44,7 +44,8 @@ class OptimizedAutotuneCache:
             cache_dir: Directory to store cached tuned videos
             max_workers: Number of parallel workers for autotune processing
         """
-        self.cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), 'autotunesyncer_cache')
+        default_cache = str(Path.home() / '.autotunesyncer' / 'cache_v2')
+        self.cache_dir = cache_dir or default_cache
         self.max_workers = max_workers
         self.cache_index = {}
         self.processing_stats = {
