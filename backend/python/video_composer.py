@@ -71,6 +71,7 @@ from moviepy import (
 )
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 
 import weakref
 
@@ -535,8 +536,18 @@ class VideoComposer:
             # Onset alignment cache and toggle
             self.onset_trim_cache = {}
             self.trim_leading_silence = os.environ.get('ATS_TRIM_LEADING_SILENCE', '1') == '1'
-            # Onset offset cache for non-destructive alignment
+            # Onset offset cache for non-destructive alignment — protected by per-path locks
             self.onset_offset_cache = {}
+            self._onset_path_locks: dict = defaultdict(threading.Lock)  # one Lock per clip path
+            # Media duration cache — avoids duplicate ffprobe calls from parallel stem threads
+            self._duration_cache: dict = {}
+            self._duration_cache_lock = threading.RLock()
+            # Global FFmpeg concurrency cap — shared by stem sub-batches AND video chunks.
+            # Caps simultaneous filter-complex FFmpeg processes to half the CPU count so
+            # nested parallelism (outer stem workers + inner sub-batch workers) never
+            # over-subscribes the machine.
+            _cpu = os.cpu_count() or 4
+            self._ffmpeg_semaphore = threading.Semaphore(max(4, _cpu // 2))
             self.max_concurrent_streams = int(os.environ.get('ATS_MAX_CONCURRENT_STREAMS', '16'))
             self.ffmpeg_hwaccel = self._detect_ffmpeg_hwaccel()
             logging.info(f"Selected FFmpeg hwaccel: {self.ffmpeg_hwaccel or 'none'}")
@@ -548,8 +559,9 @@ class VideoComposer:
             self.video_cache = LRUCache(maxsize=64)  # Increase cache size
             self.audio_cache = LRUCache(maxsize=64) 
             self.autotune_cache = LRUCache(maxsize=64) # Keep for backwards compatibility
-            # Initialize optimized autotune cache system
-            self.optimized_cache = OptimizedAutotuneCache(max_workers=self.max_workers)
+            # Initialize optimized autotune cache system — use more workers for cold-start runs
+            _preprocess_workers = min(os.cpu_count() or 4, 8)
+            self.optimized_cache = OptimizedAutotuneCache(max_workers=_preprocess_workers)
             self._tuned_videos_cache = {}  # Cache for preprocessed tuned videos
             # Log track information
             logging.info(f"Regular tracks: {len(self.tracks)}")
@@ -814,7 +826,11 @@ class VideoComposer:
             if not hasattr(self, 'temp_dir') or self.temp_dir is None:
                 import tempfile
                 self.temp_dir = Path(tempfile.mkdtemp(prefix='composer_tmp_'))
-            out_wav = Path(self.temp_dir) / f"onset_{Path(video_path).stem}.wav"
+            # Use MD5 of the full path so concurrent threads never share a temp file,
+            # even when two clips happen to have the same basename.
+            import hashlib
+            path_hash = hashlib.md5(str(video_path).encode()).hexdigest()[:12]
+            out_wav = Path(self.temp_dir) / f"onset_{path_hash}.wav"
             cmd = [
                 'ffmpeg', '-hide_banner', '-y',
                 '-i', str(video_path),
@@ -830,52 +846,60 @@ class VideoComposer:
     def _get_onset_offset(self, video_path):
         """
         Detect first audible onset time (seconds) using librosa; fallback to RMS.
-        Cached per video_path.
+        Cached per video_path with per-path locking so parallel stem threads never
+        race to compute the same clip's onset or write the same temp WAV.
         """
         try:
             if not video_path or not os.path.exists(video_path):
                 return 0.0
+            # Fast path: already cached (pure read, GIL-safe for dict lookup)
             if video_path in self.onset_offset_cache:
                 return self.onset_offset_cache[video_path]
 
-            wav_path = self._extract_temp_audio(video_path)
-            if not wav_path:
-                self.onset_offset_cache[video_path] = 0.0
-                return 0.0
+            # Per-path lock: only one thread runs onset detection per clip path.
+            # defaultdict(Lock) creation is GIL-protected under CPython.
+            with self._onset_path_locks[video_path]:
+                # Re-check: another thread may have populated while we waited.
+                if video_path in self.onset_offset_cache:
+                    return self.onset_offset_cache[video_path]
 
-            import librosa, numpy as np
-            y, sr = librosa.load(wav_path, sr=44100, mono=True)
+                wav_path = self._extract_temp_audio(video_path)
+                if not wav_path:
+                    self.onset_offset_cache[video_path] = 0.0
+                    return 0.0
 
-            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-            onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, units='time')
-            if onsets is not None and len(onsets) > 0:
-                offset = float(onsets[0])
-                if offset < 0.02 and len(onsets) > 1:
-                    offset = float(onsets[1])
-                offset = max(0.0, min(offset, 5.0))
-                self.onset_offset_cache[video_path] = offset
-                logging.info(f"Detected onset offset {offset:.3f}s for {Path(video_path).name}")
-                return offset
+                import librosa, numpy as np
+                y, sr = librosa.load(wav_path, sr=44100, mono=True)
 
-            rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
-            times = librosa.times_like(rms, sr=sr, hop_length=512)
-            thresh = max(0.01, float(np.median(rms) * 3.0))
-            sustain_frames = max(1, int((0.05 * sr) / 512))
-            for i in range(len(rms) - sustain_frames):
-                if np.all(rms[i:i + sustain_frames] > thresh):
-                    offset = float(times[i])
+                onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+                onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, units='time')
+                if onsets is not None and len(onsets) > 0:
+                    offset = float(onsets[0])
+                    if offset < 0.02 and len(onsets) > 1:
+                        offset = float(onsets[1])
                     offset = max(0.0, min(offset, 5.0))
                     self.onset_offset_cache[video_path] = offset
-                    logging.info(f"Fallback onset offset {offset:.3f}s for {Path(video_path).name}")
+                    logging.info(f"Detected onset offset {offset:.3f}s for {Path(video_path).name}")
                     return offset
 
-            self.onset_offset_cache[video_path] = 0.0
-            return 0.0
+                rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+                times = librosa.times_like(rms, sr=sr, hop_length=512)
+                thresh = max(0.01, float(np.median(rms) * 3.0))
+                sustain_frames = max(1, int((0.05 * sr) / 512))
+                for i in range(len(rms) - sustain_frames):
+                    if np.all(rms[i:i + sustain_frames] > thresh):
+                        offset = float(times[i])
+                        offset = max(0.0, min(offset, 5.0))
+                        self.onset_offset_cache[video_path] = offset
+                        logging.info(f"Fallback onset offset {offset:.3f}s for {Path(video_path).name}")
+                        return offset
+
+                self.onset_offset_cache[video_path] = 0.0
+                return 0.0
 
         except Exception as e:
             logging.debug(f"Onset offset detect error: {e}")
             try:
-                # cache fallback
                 if video_path:
                     self.onset_offset_cache[video_path] = 0.0
             except Exception:
@@ -883,10 +907,14 @@ class VideoComposer:
             return 0.0
 
     def _get_media_duration(self, media_path):
-        """Return media duration in seconds using ffprobe, or 0.0 on failure."""
+        """Return media duration in seconds using ffprobe, or 0.0 on failure.
+        Results are cached so parallel stem threads don't duplicate ffprobe calls."""
         try:
             if not media_path or not os.path.exists(media_path):
                 return 0.0
+            with self._duration_cache_lock:
+                if media_path in self._duration_cache:
+                    return self._duration_cache[media_path]
             cmd = [
                 'ffprobe',
                 '-v', 'quiet',
@@ -916,7 +944,10 @@ class VideoComposer:
                     duration = float(fmt.get('duration', 0.0))
                 except:
                     duration = 0.0
-            return max(0.0, duration)
+            result = max(0.0, duration)
+            with self._duration_cache_lock:
+                self._duration_cache[media_path] = result
+            return result
         except Exception:
             return 0.0
 
@@ -3030,6 +3061,10 @@ class VideoComposer:
         Run FFmpeg using -filter_complex_script to avoid Windows' 32,767-character
         command-line length limit when filter graphs are large.
 
+        Acquires self._ffmpeg_semaphore before launching so nested parallelism
+        (outer stem workers + inner sub-batch workers + video chunk workers) never
+        over-subscribes the machine.
+
         Writes the filter graph to a temp file inside self.temp_dir, then
         replaces the inline -filter_complex argument with -filter_complex_script.
         The temp file is always deleted in the finally block.
@@ -3041,10 +3076,11 @@ class VideoComposer:
             with os.fdopen(fd, 'w', encoding='utf-8') as fh:
                 fh.write(';'.join(filter_parts))
             full_cmd = cmd + ['-filter_complex_script', script_path] + tail_args
-            return subprocess.run(
-                full_cmd, capture_output=True, text=True,
-                encoding='utf-8', errors='replace'
-            )
+            with self._ffmpeg_semaphore:
+                return subprocess.run(
+                    full_cmd, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace'
+                )
         finally:
             if script_path and os.path.exists(script_path):
                 try:
@@ -3052,16 +3088,52 @@ class VideoComposer:
                 except Exception:
                     pass
 
+    # ── Sub-batch tuning constants ─────────────────────────────────────────
+    # These are data-driven: sparse MIDIs (<= threshold) build monolithically;
+    # dense MIDIs auto-split into parallel sub-batches.
+    _SUBBATCH_THRESHOLD = 400   # total note occurrences; below → monolithic
+    _SUBBATCH_TARGET    = 350   # target occurrences per sub-batch
+    _MAX_SUBBATCHES     = 4     # cap per stem (avoid spawning too many FFmpeg)
+
+    def _mix_stem_wavs(self, input_paths: list, output_path: str) -> 'str | None':
+        """Mix N per-stem WAV files into one via FFmpeg amix, then delete the inputs."""
+        cmd = ['ffmpeg', '-y']
+        for p in input_paths:
+            cmd.extend(['-i', p])
+        n = len(input_paths)
+        mix_filter = (
+            f"[0:a]anull[out]" if n == 1
+            else "".join(f"[{i}:a]" for i in range(n)) + f"amix=inputs={n}:normalize=0[out]"
+        )
+        cmd += ['-filter_complex', mix_filter, '-map', '[out]',
+                '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2', output_path]
+        with self._ffmpeg_semaphore:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace')
+        if r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+            for p in input_paths:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+            return output_path
+        logging.error(f"❌ _mix_stem_wavs failed: {r.stderr[-300:]}")
+        return None
+
     def _build_instrument_stem(self, track_name: str, notes: list,
                                 stem_path) -> 'str | None':
         """
-        Build a per-instrument WAV stem.
+        Build a per-instrument WAV stem — public entry point.
 
-        One FFmpeg input per unique MIDI note value; asplit fans it out to all
-        occurrences so the command stays short regardless of note count.
-        Each occurrence is trimmed to note duration (with onset alignment) and
-        positioned at its MIDI timeline timestamp via adelay.
-        Volume and velocity shaping match the per-chunk audio path.
+        For small tracks (≤ _SUBBATCH_THRESHOLD occurrences) the stem is built
+        in one FFmpeg call (monolithic).  For dense tracks the note occurrence
+        list is split into parallel sub-batches of _SUBBATCH_TARGET notes each,
+        each sub-batch runs as its own FFmpeg job, then the results are mixed.
+        Splitting is by occurrence count (not unique-MIDI-note count) so a
+        single high-density pitch is also split correctly.
+
+        The shared_onset is computed once from the full clip set and passed into
+        every sub-batch so all clips trim from the same attack position.
         """
         if not notes:
             return None
@@ -3071,7 +3143,7 @@ class VideoComposer:
             {'track_name': track_name, 'type': 'instrument'}
         ))
 
-        # Group note occurrences by midi_note → need a cached clip for each
+        # Group occurrences by MIDI note; resolve cached clip paths
         by_midi: dict = {}
         for note in notes:
             midi = note.get('midi')
@@ -3081,24 +3153,93 @@ class VideoComposer:
             if not cached_path or not os.path.exists(cached_path):
                 logging.debug(f"No cached clip for {track_name} MIDI {midi} — note skipped")
                 continue
-            if midi not in by_midi:
-                by_midi[midi] = {'path': cached_path, 'occurrences': []}
-            by_midi[midi]['occurrences'].append(note)
+            by_midi.setdefault(midi, {'path': cached_path, 'occurrences': []})['occurrences'].append(note)
 
         if not by_midi:
             logging.warning(f"No cached clips for {track_name} — stem skipped")
             return None
 
+        # Compute shared_onset ONCE from the full clip set so all sub-batches
+        # (and the monolithic path) trim from the same attack position.
+        first_path = next(iter(by_midi.values()))['path']
+        shared_onset = self._get_onset_offset(first_path)
+
+        # Flatten to (midi, path, note) triples for occurrence-count splitting
+        flat = [
+            (midi, info['path'], note)
+            for midi, info in by_midi.items()
+            for note in info['occurrences']
+        ]
+        total_occ = len(flat)
+
+        if total_occ <= self._SUBBATCH_THRESHOLD:
+            return self._build_instrument_stem_inner(
+                track_name, track_vol_db, by_midi, shared_onset, stem_path)
+
+        # ── Sub-batch path ────────────────────────────────────────────────
+        n_batches = min(self._MAX_SUBBATCHES, max(2, math.ceil(total_occ / self._SUBBATCH_TARGET)))
+        chunk_size = math.ceil(total_occ / n_batches)
+        chunks = [flat[i:i + chunk_size] for i in range(0, total_occ, chunk_size)]
+        chunks = [c for c in chunks if c]  # drop empty tail
+        stem_path = Path(stem_path)
+        temp_paths = [stem_path.with_suffix(f'.sub{i}.wav') for i in range(len(chunks))]
+
+        logging.info(
+            f"🔀 Sub-batching {track_name}: {total_occ} notes → "
+            f"{len(chunks)} batches of ~{chunk_size}"
+        )
+
+        def _build_sub(idx):
+            chunk = chunks[idx]
+            sub_by_midi: dict = {}
+            for midi, path, note in chunk:
+                sub_by_midi.setdefault(midi, {'path': path, 'occurrences': []})['occurrences'].append(note)
+            return self._build_instrument_stem_inner(
+                track_name, track_vol_db, sub_by_midi, shared_onset, temp_paths[idx])
+
+        sub_results = []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = {ex.submit(_build_sub, i): i for i in range(len(chunks))}
+            for future in as_completed(futures):
+                try:
+                    r = future.result()
+                    if r:
+                        sub_results.append(r)
+                except Exception as exc:
+                    logging.error(f"❌ Sub-batch error for {track_name}: {exc}")
+
+        if len(sub_results) < len(chunks):
+            # Partial failure — clean up and fall back to monolithic
+            logging.warning(
+                f"⚠️ {track_name}: {len(chunks) - len(sub_results)} sub-batch(es) failed "
+                f"— falling back to monolithic build"
+            )
+            for p in sub_results:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+            return self._build_instrument_stem_inner(
+                track_name, track_vol_db, by_midi, shared_onset, stem_path)
+
+        if len(sub_results) == 1:
+            os.replace(sub_results[0], str(stem_path))
+            return str(stem_path)
+        return self._mix_stem_wavs(sub_results, str(stem_path))
+
+    def _build_instrument_stem_inner(self, track_name: str, track_vol_db: float,
+                                      by_midi: dict, forced_onset: float,
+                                      stem_path) -> 'str | None':
+        """
+        Build one WAV stem from a by_midi dict using a single FFmpeg invocation.
+        Called both by the monolithic path and by each sub-batch worker.
+        Uses forced_onset for all trim positions so sub-batches stay in sync.
+        """
         cmd = ['ffmpeg', '-y']
         input_index: dict = {}
         for idx, (midi, info) in enumerate(by_midi.items()):
             cmd.extend(['-i', info['path']])
             input_index[midi] = idx
-
-        # Compute onset offset once from the first cached path — all tuned clips
-        # share the same source video, so the attack position is consistent.
-        first_path = next(iter(by_midi.values()))['path']
-        shared_onset = self._get_onset_offset(first_path)
 
         filter_parts: list = []
         final_labels: list = []
@@ -3106,7 +3247,6 @@ class VideoComposer:
         for midi, info in by_midi.items():
             i_idx = input_index[midi]
             occurrences = info['occurrences']
-            onset = shared_onset
             clip_dur = self._get_media_duration(info['path'])
             n = len(occurrences)
 
@@ -3127,7 +3267,7 @@ class VideoComposer:
                 vol_db = track_vol_db + self._velocity_to_db(velocity)
                 vol_linear = max(0.01, 10 ** (vol_db / 20.0))
 
-                trim_start = onset
+                trim_start = forced_onset
                 trim_end = trim_start + note_dur
                 if clip_dur and trim_end > clip_dur:
                     if trim_end - clip_dur > 0.05:
@@ -3180,14 +3320,20 @@ class VideoComposer:
 
     def _build_drum_stem(self, drum_track: dict, stem_path) -> 'str | None':
         """
-        Build a per-drum-track WAV stem. Each MIDI note maps to a drum sound
-        via DRUM_NOTES; hits are positioned at their timeline timestamps.
-        No pitch shifting — drum audio is used as-is from the source video.
+        Build a per-drum-track WAV stem — public entry point.
+
+        Maps MIDI notes to named drum sounds via DRUM_NOTES, then delegates to
+        _build_drum_stem_inner.  For dense drum tracks (> _SUBBATCH_THRESHOLD
+        total hits) the hit list is split into parallel sub-batches and the
+        results are mixed — identical to the instrument sub-batch strategy.
+        Each drum type computes its own onset independently (no shared_onset
+        coordination needed, unlike instruments).
         """
         notes = drum_track.get('notes', [])
         if not notes:
             return None
 
+        # Map all notes to drum names and resolve video paths
         by_drum: dict = {}
         for note in notes:
             midi_note = note.get('midi')
@@ -3207,6 +3353,67 @@ class VideoComposer:
         if not by_drum:
             return None
 
+        # Flatten for occurrence-count-based splitting
+        flat = [
+            (drum_name, info['path'], note)
+            for drum_name, info in by_drum.items()
+            for note in info['occurrences']
+        ]
+        total_hits = len(flat)
+
+        if total_hits <= self._SUBBATCH_THRESHOLD:
+            return self._build_drum_stem_inner(by_drum, stem_path)
+
+        # ── Sub-batch path ────────────────────────────────────────────────
+        n_batches = min(self._MAX_SUBBATCHES, max(2, math.ceil(total_hits / self._SUBBATCH_TARGET)))
+        chunk_size = math.ceil(total_hits / n_batches)
+        chunks = [flat[i:i + chunk_size] for i in range(0, total_hits, chunk_size)]
+        chunks = [c for c in chunks if c]
+        stem_path = Path(stem_path)
+        temp_paths = [stem_path.with_suffix(f'.dsub{i}.wav') for i in range(len(chunks))]
+
+        logging.info(
+            f"🥁 Sub-batching drums: {total_hits} hits → "
+            f"{len(chunks)} batches of ~{chunk_size}"
+        )
+
+        def _build_drum_sub(idx):
+            chunk = chunks[idx]
+            sub_by_drum: dict = {}
+            for drum_name, path, note in chunk:
+                sub_by_drum.setdefault(drum_name, {'path': path, 'occurrences': []})['occurrences'].append(note)
+            return self._build_drum_stem_inner(sub_by_drum, temp_paths[idx])
+
+        sub_results = []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = {ex.submit(_build_drum_sub, i): i for i in range(len(chunks))}
+            for future in as_completed(futures):
+                try:
+                    r = future.result()
+                    if r:
+                        sub_results.append(r)
+                except Exception as exc:
+                    logging.error(f"❌ Drum sub-batch error: {exc}")
+
+        if len(sub_results) < len(chunks):
+            logging.warning(
+                f"⚠️ Drums: {len(chunks) - len(sub_results)} sub-batch(es) failed "
+                f"— falling back to monolithic drum build"
+            )
+            for p in sub_results:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+            return self._build_drum_stem_inner(by_drum, stem_path)
+
+        if len(sub_results) == 1:
+            os.replace(sub_results[0], str(stem_path))
+            return str(stem_path)
+        return self._mix_stem_wavs(sub_results, str(stem_path))
+
+    def _build_drum_stem_inner(self, by_drum: dict, stem_path) -> 'str | None':
+        """Build one drum WAV stem from a by_drum group using a single FFmpeg call."""
         cmd = ['ffmpeg', '-y']
         drum_input_idx: dict = {}
         for idx, (drum_name, info) in enumerate(by_drum.items()):
@@ -3291,11 +3498,17 @@ class VideoComposer:
         Phase 1: Build one mastered audio file covering the entire song.
         All instruments and drums are mixed with a single loudnorm + alimiter
         pass — eliminating per-chunk boundary pumping/phasing.
+
+        Stems are built in parallel (one FFmpeg process per track).  Each stem
+        writes to its own unique file, so there are no write conflicts.
+        Thread-safety is guaranteed by per-path locks in _get_onset_offset and
+        _get_media_duration's cache lock.
         """
         audio_dir = self.temp_dir / "audio_first"
         audio_dir.mkdir(exist_ok=True)
-        stem_paths: list = []
 
+        # Collect all stem tasks (instruments + drums) before launching threads.
+        tasks: list = []
         for entry_id, track in self.tracks.items():
             instr = track.get('instrument', {})
             track_name = (instr.get('name', 'unknown') if isinstance(instr, dict)
@@ -3303,21 +3516,46 @@ class VideoComposer:
             notes = track.get('notes', [])
             if not notes:
                 continue
-            # Include track entry_id to avoid collisions when multiple tracks share a name
             stem_path = audio_dir / f"stem_{entry_id}_{normalize_instrument_name(track_name)}.wav"
-            result = self._build_instrument_stem(track_name, notes, stem_path)
-            if result:
-                stem_paths.append(result)
-            else:
-                logging.warning(f"⚠️ Stem skipped for {track_name} (id={entry_id})")
+            tasks.append(('instrument', entry_id, track_name, notes, stem_path))
 
         for drum_idx, drum_track in enumerate(self.drum_tracks):
             instr = drum_track.get('instrument', {})
             tag = instr.get('name', 'drums') if isinstance(instr, dict) else 'drums'
             stem_path = audio_dir / f"stem_drums_{drum_idx}_{normalize_instrument_name(tag)}.wav"
-            result = self._build_drum_stem(drum_track, stem_path)
-            if result:
-                stem_paths.append(result)
+            tasks.append(('drum', drum_idx, drum_track, None, stem_path))
+
+        if not tasks:
+            logging.error("❌ No tracks — audio-first cannot continue")
+            return None
+
+        # Use up to half the CPU cores for parallel stem building.
+        # Keep some headroom for the concurrent video phase (Phase 2).
+        cpu = os.cpu_count() or 4
+        stem_workers = min(len(tasks), max(4, cpu // 2))
+        logging.info(f"🎵 Building {len(tasks)} stems with {stem_workers} parallel workers…")
+
+        def _build_one(task):
+            kind, idx, arg, notes, stem_path = task
+            if kind == 'instrument':
+                result = self._build_instrument_stem(arg, notes, stem_path)
+                if not result:
+                    logging.warning(f"⚠️ Stem skipped for {arg} (id={idx})")
+                return result
+            else:  # drum
+                return self._build_drum_stem(arg, stem_path)
+
+        stem_paths: list = []
+        with ThreadPoolExecutor(max_workers=stem_workers) as executor:
+            futures = {executor.submit(_build_one, task): task for task in tasks}
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        stem_paths.append(result)
+                except Exception as exc:
+                    task = futures[future]
+                    logging.error(f"❌ Stem task {task[2]} raised: {exc}")
 
         if not stem_paths:
             logging.error("❌ No stems built — audio-first cannot continue")
@@ -3350,25 +3588,55 @@ class VideoComposer:
     def _build_silent_video(self, total_duration: float, total_chunks: int,
                              work_dir) -> 'str | None':
         """
-        Phase 2: Render the video grid (sequential chunks, no nested parallelism)
-        and strip audio so the mux step can attach the mastered audio track.
+        Phase 2: Render the video grid and strip audio so the mux step can
+        attach the mastered audio track.
+
+        Chunks are built in parallel — each writes to its own unique file and
+        only reads shared data (track lists, cached clip paths on disk) so
+        there are no write conflicts.  Results are sorted by index before
+        concatenation to preserve playback order.
         """
         try:
             chunks_dir = work_dir / "video_chunks"
             chunks_dir.mkdir(exist_ok=True)
 
-            chunk_paths = []
-            for chunk_idx in range(total_chunks):
-                chunk_start = chunk_idx * self.CHUNK_DURATION
-                chunk_end = min(chunk_start + self.CHUNK_DURATION, total_duration)
-                chunk_path = self._create_enhanced_chunk(chunk_idx, chunk_start, chunk_end, chunks_dir)
-                if chunk_path and os.path.exists(chunk_path):
-                    chunk_paths.append(chunk_path)
-                else:
-                    placeholder = self._create_placeholder_chunk_simple(
-                        chunk_idx, chunks_dir, chunk_end - chunk_start)
-                    if placeholder:
-                        chunk_paths.append(placeholder)
+            chunk_tasks = [
+                (idx, idx * self.CHUNK_DURATION,
+                 min((idx + 1) * self.CHUNK_DURATION, total_duration), chunks_dir)
+                for idx in range(total_chunks)
+            ]
+
+            # Audio finishes at ~t+136s; video runs until ~t+163s on this hardware.
+            # cpu//3 gives 5 workers on 16-core, reducing waves from 4 to 3 (~40s saved).
+            cpu = os.cpu_count() or 4
+            chunk_workers = min(total_chunks, max(2, cpu // 3))
+            logging.info(f"🎬 Building {total_chunks} video chunks with {chunk_workers} parallel workers…")
+
+            def _build_one_chunk(task):
+                idx, start, end, out_dir = task
+                path = self._create_enhanced_chunk(idx, start, end, out_dir)
+                return idx, path
+
+            chunk_map: dict = {}
+            with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
+                futures = {executor.submit(_build_one_chunk, task): task for task in chunk_tasks}
+                for future in as_completed(futures):
+                    try:
+                        idx, chunk_path = future.result()
+                        if chunk_path and os.path.exists(chunk_path):
+                            chunk_map[idx] = chunk_path
+                        else:
+                            task = futures[future]
+                            duration = task[2] - task[1]
+                            placeholder = self._create_placeholder_chunk_simple(
+                                idx, chunks_dir, duration)
+                            if placeholder:
+                                chunk_map[idx] = placeholder
+                    except Exception as exc:
+                        logging.error(f"❌ Video chunk error: {exc}")
+
+            # Reconstruct ordered list for concatenation
+            chunk_paths = [chunk_map[i] for i in range(total_chunks) if i in chunk_map]
 
             if not chunk_paths:
                 raise Exception("No video chunks were created")
