@@ -10,6 +10,8 @@ import autotuneRoutes from './routes/autotuneRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import processVideos from './routes/processVideos.js';
 import precacheRoutes from './routes/precache.js';
+import authRoutes from './routes/authRoutes.js';
+import projectRoutes from './routes/projectRoutes.js';
 
 const app = express();
 
@@ -43,14 +45,16 @@ app.use(
         callback(new Error(`CORS: origin ${origin} not allowed`));
       }
     },
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Content-Disposition'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Content-Disposition', 'Authorization'],
     maxAge: 600,
     exposedHeaders: ['Content-Length', 'Content-Type', 'Content-Disposition'],
   })
 );
 
 // Use routes
+app.use('/api/auth', authRoutes);
+app.use('/api/projects', projectRoutes);
 app.use('/api/midi', midiRoutes);
 app.use('/api/video', videoRoutes);
 app.use('/api/compose', compositionRoutes);
@@ -81,28 +85,37 @@ app.listen(3000, () => {
   console.log('Server running on port 3000');
 });
 
-// Delete processed_* files in uploads/ that are older than 7 days
+// Recursively clean up processed_* files in uploads/ (including user/project subdirs) older than 7 days
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const uploadsDir = join(__dirname, 'uploads');
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-function cleanUploads() {
-  if (!existsSync(uploadsDir)) return;
+function cleanUploadsDir(dir) {
+  if (!existsSync(dir)) return 0;
   const now = Date.now();
   let removed = 0;
-  for (const name of readdirSync(uploadsDir)) {
-    if (!name.startsWith('processed_')) continue;
-    const fullPath = join(uploadsDir, name);
+  for (const name of readdirSync(dir)) {
+    const fullPath = join(dir, name);
     try {
-      const age = now - statSync(fullPath).mtimeMs;
-      if (age > TTL_MS) {
-        unlinkSync(fullPath);
-        removed++;
+      const stat = statSync(fullPath);
+      if (stat.isDirectory()) {
+        removed += cleanUploadsDir(fullPath); // recurse into user/project dirs
+      } else if (name.startsWith('processed_')) {
+        const age = now - stat.mtimeMs;
+        if (age > TTL_MS) {
+          unlinkSync(fullPath);
+          removed++;
+        }
       }
     } catch {
       // file already gone or stat failed — skip
     }
   }
+  return removed;
+}
+
+function cleanUploads() {
+  const removed = cleanUploadsDir(uploadsDir);
   if (removed > 0) console.log(`[TTL cleanup] Removed ${removed} stale processed_ file(s) from uploads/`);
 }
 

@@ -6,14 +6,28 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import { authenticateToken } from '../middleware/auth.js';
+import { requireProjectOwnership } from '../middleware/projectOwnership.js';
 
 const router = express.Router();
 
-// ── Job store ──────────────────────────────────────────────────────────────
-// Keyed by jobId. Fields: status, progress, outputPath, error, createdAt, completedAt
-const jobs = new Map();
+// Dynamic multer storage: uses project-scoped dir when auth + project middleware run first
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = req.project?.uploadsDir || 'uploads';
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+    cb(null, `${uniqueSuffix}-${sanitizedName}`);
+  },
+});
 
-// Expire completed/failed jobs 15 minutes after they finish.
+// ── Job store ──────────────────────────────────────────────────────────────
+// Keyed by jobId. Fields: status, progress, outputPath, error, createdAt, completedAt, userId, projectId
+const jobs = new Map();
 // Never expire queued/processing jobs by age alone.
 const JOB_COMPLETED_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
@@ -91,23 +105,6 @@ const validateComposeInputs = (midiData, videoFiles) => {
   return null;
 };
 
-// Ensure uploads directory exists
-const uploadsDir = 'uploads';
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Enhanced multer configuration for better performance
-const storage = multer.diskStorage({
-  destination: uploadsDir,
-  filename: (req, file, cb) => {
-    // Keep original filename but make it unique and sanitized
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
-    cb(null, `${uniqueSuffix}-${sanitizedName}`);
-  },
-});
-
 // Optimized upload configuration for video processing
 const upload = multer({
   storage: storage,
@@ -145,7 +142,7 @@ const upload = multer({
 });
 
 // ── Background composition job ─────────────────────────────────────────────
-async function runCompositionJob(jobId, files, isPreview) {
+async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
   const updateJob = (patch) => jobs.set(jobId, { ...jobs.get(jobId), ...patch });
   const tempFiles = []; // paths to clean up on failure
 
@@ -205,7 +202,7 @@ async function runCompositionJob(jobId, files, isPreview) {
         .digest('hex')
         .slice(0, 16);
       const processedPath = path.join(
-        uploadsDir,
+        jobUploadsDir,
         `processed_${cacheKey}-${instrumentName}.mp4`,
       );
 
@@ -359,7 +356,7 @@ async function runCompositionJob(jobId, files, isPreview) {
 
     // ── 6. Move output to permanent location ─────────────────────────────
     const permanentOutputPath = path.join(
-      uploadsDir,
+      jobUploadsDir,
       `final_output_${jobId}.mp4`,
     );
     if (result.outputPath && fs.existsSync(result.outputPath)) {
@@ -390,6 +387,8 @@ async function runCompositionJob(jobId, files, isPreview) {
 
 router.post(
   '/',
+  authenticateToken,
+  requireProjectOwnership,
   (req, res, next) => {
     console.log('Video processing request received');
     upload.any()(req, res, (err) => {
@@ -406,7 +405,6 @@ router.post(
     });
   },
   (req, res) => {
-    // Synchronous pre-flight checks only — everything else runs in background
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files were uploaded' });
     }
@@ -421,6 +419,8 @@ router.post(
 
     const isPreview = req.body.preview === 'true' || req.body.preview === true;
     const jobId = uuidv4();
+    const jobUploadsDir = req.project.uploadsDir;
+
     jobs.set(jobId, {
       status: 'queued',
       progress: 0,
@@ -428,13 +428,13 @@ router.post(
       error: null,
       createdAt: Date.now(),
       completedAt: null,
+      userId: req.user.id,
+      projectId: req.project.id,
     });
 
-    // Respond immediately with the job ID
     res.status(202).json({ jobId });
 
-    // Run processing in the background — never let an uncaught rejection escape
-    void runCompositionJob(jobId, req.files, isPreview).catch((err) => {
+    void runCompositionJob(jobId, req.files, isPreview, jobUploadsDir).catch((err) => {
       console.error(`[Job ${jobId}] Unhandled error:`, err);
       const job = jobs.get(jobId);
       if (job && job.status !== 'failed') {
@@ -444,17 +444,23 @@ router.post(
   },
 );
 
-// GET /status/:jobId — poll for job progress
-router.get('/status/:jobId', (req, res) => {
+// GET /status/:jobId — poll for job progress (auth required)
+router.get('/status/:jobId', authenticateToken, (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.userId && job.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   res.json({ status: job.status, progress: job.progress, error: job.error || null });
 });
 
-// GET /result/:jobId — download the finished video
-router.get('/result/:jobId', (req, res) => {
+// GET /result/:jobId — download the finished video (auth required)
+router.get('/result/:jobId', authenticateToken, (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.userId && job.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
   if (job.status === 'failed') return res.status(422).json({ error: job.error || 'Composition failed' });
   if (job.status !== 'done') return res.status(409).json({ status: job.status, message: 'Job not finished yet' });
   if (!job.outputPath || !fs.existsSync(job.outputPath)) {
