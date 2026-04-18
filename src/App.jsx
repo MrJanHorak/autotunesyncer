@@ -6,8 +6,13 @@ import InstrumentList from './components/InstrumentList/InstrumentList';
 
 import { useMidiProcessing } from './hooks/useMidiProcessing';
 import { useVideoRecording } from './hooks/useVideoRecording';
+import { useAuth } from './context/AuthContext';
+import { useProject } from './context/ProjectContext';
+import { configureApiService } from './services/apiService';
 
 // Components
+import AuthPage from './components/Auth/AuthPage';
+import ProjectManager from './components/Projects/ProjectManager';
 import MidiUploader from './components/MidiUploader/';
 import MidiInfoDisplay from './components/MidiInfoDisplay/MidiInfoDisplay';
 import RecordingSection from './components/RecordingSection/RecordingSection';
@@ -52,6 +57,36 @@ const normalizeInstrumentName = (name) => {
 // };
 
 function App() {
+  const { isAuthenticated, loading: authLoading, token, logout } = useAuth();
+  const { currentProject, selectProject } = useProject();
+
+  // Wire API service so all fetch helpers include auth headers + projectId
+  useEffect(() => {
+    configureApiService({
+      getToken: () => token,
+      getProjectId: () => currentProject?.id ?? null,
+    });
+  }, [token, currentProject]);
+
+  // Show loading spinner while verifying stored token
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <p style={{ color: '#666', fontSize: '1.1rem' }}>Loading…</p>
+      </div>
+    );
+  }
+
+  // Gate 1: must be logged in
+  if (!isAuthenticated) return <AuthPage />;
+
+  // Gate 2: must have a project selected
+  if (!currentProject) return <ProjectManager />;
+
+  return <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />;
+}
+
+function MainApp({ onChangeProject, onLogout }) {
   const {
     // parsedMidiData,
     instruments,
@@ -116,7 +151,17 @@ function App() {
     formData.append('video', blob, `${instrumentKey}.mp4`);
     formData.append('midiNotes', JSON.stringify([...notes]));
 
-    fetch('http://localhost:3000/api/autotune/precache', { method: 'POST', body: formData })
+    // Include auth token and project scope
+    const token = localStorage.getItem('auth_token');
+    const projectId = (() => {
+      try { return JSON.parse(localStorage.getItem('current_project'))?.id; } catch { return null; }
+    })();
+    const url = projectId
+      ? `http://localhost:3000/api/autotune/precache?projectId=${projectId}`
+      : 'http://localhost:3000/api/autotune/precache';
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+    fetch(url, { method: 'POST', headers, body: formData })
       .then((r) => {
         if (!r.ok) throw new Error(`precache HTTP ${r.status}`);
         console.log(`[precache] Queued ${instrumentKey} (${notes.size} notes)`);
@@ -219,6 +264,8 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const { currentProject } = useProject();
+
   // Add click handler to initialize audio context
   useEffect(() => {
     const handleClick = () => {
@@ -233,6 +280,18 @@ function App() {
 
   return (
     <div className='app-container'>
+      {/* Project context bar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', background: '#0f3460', color: '#fff', fontSize: '0.875rem' }}>
+        <span>📁 Project: <strong>{currentProject?.name}</strong></span>
+        <div style={{ display: 'flex', gap: '0.75rem' }}>
+          <button onClick={onChangeProject} style={{ background: 'none', border: '1px solid rgba(255,255,255,0.5)', color: '#fff', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}>
+            Switch Project
+          </button>
+          <button onClick={onLogout} style={{ background: 'none', border: '1px solid rgba(255,255,255,0.5)', color: '#fff', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}>
+            Sign Out
+          </button>
+        </div>
+      </div>
       <AudioContextInitializer
         audioContextStarted={audioContextStarted}
         onInitialize={startAudioContext}

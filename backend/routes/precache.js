@@ -1,10 +1,11 @@
 import express from 'express';
 import multer from 'multer';
+import { authenticateToken } from '../middleware/auth.js';
+import { requireProjectOwnership } from '../middleware/projectOwnership.js';
 import { handlePrecache } from '../controllers/precacheController.js';
 
 const router = express.Router();
 
-// Store blob in memory — the controller writes it to disk
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1000 * 1024 * 1024 },
@@ -17,13 +18,17 @@ const upload = multer({
   },
 }).single('video');
 
-router.post('/', (req, res, next) => {
-  upload(req, res, (err) => {
-    if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, handlePrecache);
+router.post(
+  '/',
+  authenticateToken,
+  requireProjectOwnership,
+  (req, res, next) => {
+    upload(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message });
+      next();
+    });
+  },
+  handlePrecache
+);
 
 export default router;

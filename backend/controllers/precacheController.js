@@ -8,8 +8,8 @@ import { v4 as uuidv4 } from 'uuid';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const UPLOADS_DIR = resolve(__dirname, '../uploads');
-const PYTHON_DIR = resolve(__dirname, '../python');
+const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
+const PYTHON_DIR = resolve(join(__dirname, '../python'));
 
 // In-process queue for pre-cache jobs.
 // Concurrency is capped at 1 so only one Python process writes to
@@ -68,14 +68,15 @@ export const handlePrecache = (req, res) => {
       return res.status(400).json({ error: 'midiNotes must be a non-empty JSON array' });
     }
 
-    // Save the uploaded blob to a deterministic temp path in uploads dir.
-    if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
-    const filePath = join(UPLOADS_DIR, `precache_${uuidv4()}.mp4`);
+    // Save the uploaded blob to the project-scoped uploads dir (or base dir as fallback).
+    const uploadsDir = req.project?.uploadsDir ?? BASE_UPLOADS_DIR;
+    if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+    const filePath = join(uploadsDir, `precache_${uuidv4()}.mp4`);
     writeFileSync(filePath, req.file.buffer);
 
-    // Validate the saved path stays within uploads dir (security)
+    // Validate the saved path stays within uploads dir (prevent path traversal)
     const resolved = resolve(filePath);
-    if (!resolved.startsWith(UPLOADS_DIR)) {
+    if (!resolved.startsWith(BASE_UPLOADS_DIR)) {
       return res.status(400).json({ error: 'Invalid file path' });
     }
 

@@ -1,22 +1,22 @@
 import express from 'express';
 import multer from 'multer';
+import { authenticateToken } from '../middleware/auth.js';
+import { requireProjectOwnership } from '../middleware/projectOwnership.js';
 import { handleUpload } from '../controllers/uploadController.js';
 
 const router = express.Router();
 
 const storage = multer.memoryStorage();
 
-// Optimized multer configuration with larger limits and better error handling
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 1000 * 1024 * 1024, // 1GB limit for better user experience
+    fileSize: 1000 * 1024 * 1024,
     fieldSize: 1000 * 1024 * 1024,
     fields: 50,
     files: 20,
   },
   fileFilter: (req, file, cb) => {
-    // Accept video files and common formats
     if (
       file.mimetype.startsWith('video/') ||
       file.mimetype.startsWith('audio/') ||
@@ -31,6 +31,9 @@ const upload = multer({
 
 router.post(
   '/',
+  // Auth + project ownership run before multer so req.project is ready
+  authenticateToken,
+  requireProjectOwnership,
   (req, res, next) => {
     upload(req, res, (err) => {
       if (err instanceof multer.MulterError) {
@@ -42,22 +45,16 @@ router.post(
             code: err.code,
           });
         }
-        return res.status(400).json({
-          error: `Upload error: ${err.message}`,
-          code: err.code,
-        });
+        return res.status(400).json({ error: `Upload error: ${err.message}`, code: err.code });
       } else if (err) {
         console.error('Upload server error:', err);
-        return res.status(500).json({
-          error: `Server error: ${err.message}`,
-          suggestion: 'Please check file format and try again',
-        });
+        return res.status(500).json({ error: `Server error: ${err.message}` });
       }
-
       console.log('Upload successful:', {
         filename: req.file?.originalname,
         size: req.file?.size,
         mimetype: req.file?.mimetype,
+        project: req.project?.id,
       });
       next();
     });
@@ -66,3 +63,4 @@ router.post(
 );
 
 export default router;
+

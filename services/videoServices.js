@@ -2,6 +2,43 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
+/** Read the stored JWT from localStorage. */
+function getToken() {
+  return localStorage.getItem('auth_token');
+}
+
+/** Read the current project id from localStorage. */
+function getProjectId() {
+  try {
+    const p = localStorage.getItem('current_project');
+    return p ? JSON.parse(p).id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Append ?projectId=<id> to a URL when a project is active. */
+function withProjectId(url) {
+  const projectId = getProjectId();
+  if (!projectId) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}projectId=${projectId}`;
+}
+
+/** Return fetch-compatible headers with Authorization set. */
+function authFetchHeaders(extra = {}) {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}`, ...extra } : extra;
+}
+
+/** Set Authorization + projectId query param on an open XMLHttpRequest. */
+function prepareXhr(xhr, baseUrl) {
+  const token = getToken();
+  const url = withProjectId(baseUrl);
+  if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+  return url;
+}
+
 /**
  * Custom error class for video processing errors
  */
@@ -126,50 +163,44 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
   const { onUploadProgress } = progressCallbacks;
 
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE_URL}/process-videos`);
-    xhr.responseType = 'blob';
+    const xhrOld = new XMLHttpRequest();
+    const xhrOldUrl = withProjectId(`${API_BASE_URL}/process-videos`);
+    xhrOld.open('POST', xhrOldUrl);
+    const tokenOld = getToken();
+    if (tokenOld) xhrOld.setRequestHeader('Authorization', `Bearer ${tokenOld}`);
+    xhrOld.responseType = 'blob';
 
     if (onUploadProgress) {
-      xhr.upload.onprogress = (event) => {
+      xhrOld.upload.onprogress = (event) => {
         if (event.lengthComputable) {
           const pct = Math.round((event.loaded * 100) / event.total);
           onUploadProgress(pct);
         }
       };
-      // Mark upload as complete once XHR fires the upload load event
-      xhr.upload.onload = () => onUploadProgress(100);
+      xhrOld.upload.onload = () => onUploadProgress(100);
     }
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve({ data: xhr.response });
+    xhrOld.onload = () => {
+      if (xhrOld.status >= 200 && xhrOld.status < 300) {
+        resolve({ data: xhrOld.response });
       } else {
-        // Try to read error details from the blob response
         const reader = new FileReader();
         reader.onload = () => {
           try {
             const errData = JSON.parse(reader.result);
-            reject(
-              new Error(
-                errData.details ||
-                  errData.error ||
-                  `Server error ${xhr.status}`,
-              ),
-            );
+            reject(new Error(errData.details || errData.error || `Server error ${xhrOld.status}`));
           } catch {
-            reject(new Error(`Server error ${xhr.status}`));
+            reject(new Error(`Server error ${xhrOld.status}`));
           }
         };
-        reader.readAsText(xhr.response);
+        reader.readAsText(xhrOld.response);
       }
     };
 
-    xhr.onerror = () =>
-      reject(new Error('Network error during video composition'));
-    xhr.ontimeout = () => reject(new Error('Request timed out'));
+    xhrOld.onerror = () => reject(new Error('Network error during video composition'));
+    xhrOld.ontimeout = () => reject(new Error('Request timed out'));
 
-    xhr.send(formData);
+    xhrOld.send(formData);
   });
 };
 
@@ -186,7 +217,10 @@ export const startCompositionJob = (formData, progressCallbacks = {}) => {
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE_URL}/process-videos`);
+    const xhrUrl = withProjectId(`${API_BASE_URL}/process-videos`);
+    xhr.open('POST', xhrUrl);
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
     if (onUploadProgress) {
       xhr.upload.onprogress = (event) => {
@@ -240,7 +274,9 @@ export const pollCompositionJob = (jobId, onProgress) => {
         return;
       }
 
-      fetch(`${API_BASE_URL}/process-videos/status/${jobId}`)
+      fetch(withProjectId(`${API_BASE_URL}/process-videos/status/${jobId}`), {
+          headers: authFetchHeaders(),
+        })
         .then((r) => {
           if (!r.ok) throw new Error(`Status check failed: ${r.statusText}`);
           return r.json();
@@ -249,7 +285,9 @@ export const pollCompositionJob = (jobId, onProgress) => {
           if (onProgress && typeof progress === 'number') onProgress(progress);
 
           if (status === 'done') {
-            return fetch(`${API_BASE_URL}/process-videos/result/${jobId}`)
+            return fetch(withProjectId(`${API_BASE_URL}/process-videos/result/${jobId}`), {
+                headers: authFetchHeaders(),
+              })
               .then((r) => {
                 if (!r.ok) throw new Error('Failed to download composition result');
                 return r.blob();
