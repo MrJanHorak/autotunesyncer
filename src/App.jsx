@@ -1,6 +1,7 @@
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState, useRef } from 'react';
 import PropTypes from 'prop-types';
+import { Film, Music, Grid3x3, FolderOpen, LogOut } from 'lucide-react';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
@@ -9,10 +10,15 @@ import { useMidiProcessing } from './hooks/useMidiProcessing';
 import { useVideoRecording } from './hooks/useVideoRecording';
 import { useAuth } from './context/AuthContext';
 import { useProject } from './context/ProjectContext';
-import { configureApiService, apiFetch, uploadClip } from './services/apiService';
+import {
+  configureApiService,
+  apiFetch,
+  uploadClip,
+} from './services/apiService';
 
 // Components
 import AuthPage from './components/Auth/AuthPage';
+import LandingPage from './components/LandingPage';
 import ProjectManager from './components/Projects/ProjectManager';
 import MidiUploader from './components/MidiUploader/';
 import MidiInfoDisplay from './components/MidiInfoDisplay/MidiInfoDisplay';
@@ -33,12 +39,8 @@ import './components/Social/Social.css';
 
 import './App.css';
 
-// Add this helper function at the top
-const normalizeInstrumentName = (name) => {
-  return name.toLowerCase().replace(/\s+/g, '_');
-};
+const normalizeInstrumentName = (name) => name.toLowerCase().replace(/\s+/g, '_');
 
-/** Canonical instrument key used everywhere (recording, storage, restore). */
 const toInstrumentKey = (instrument) => {
   if (instrument.isDrum) {
     const name = (instrument.group || instrument.name || '').toLowerCase().replace(/\s+/g, '_');
@@ -47,7 +49,6 @@ const toInstrumentKey = (instrument) => {
   return normalizeInstrumentName(instrument.name || '');
 };
 
-/** Convert a base64 data-URL back to a File object. */
 function base64ToFile(dataUrl, filename) {
   const [header, data] = dataUrl.split(',');
   const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
@@ -57,33 +58,15 @@ function base64ToFile(dataUrl, filename) {
   return new File([arr], filename, { type: mime });
 }
 
-// // Add this helper function to extract drum instruments
-// const extractDrumInstruments = (track) => {
-//   if (!isDrumTrack(track)) return [];
-
-//   // Get unique MIDI notes from the track
-//   const uniqueNotes = new Set(track.notes.map((note) => note.midi));
-
-//   // Map notes to their drum groups
-//   const drumNames = new Set();
-//   uniqueNotes.forEach((note) => {
-//     const drumName = DRUM_NOTES[note];
-//     if (drumName) {
-//       drumNames.add(drumName);
-//     }
-//   });
-
-//   // Create instrument objects for each drum group
-//   return Array.from(drumNames).map((name) => ({
-//     name: name.toLowerCase().replace(/\s+/g, '_'), // Normalize the name
-//     family: 'drums',
-//     number: -1,
-//     isDrum: true,
-//   }));
-// };
-
 function App() {
-  const { user, isAuthenticated, loading: authLoading, token, logout } = useAuth();
+  // All hooks must be at the top level, outside any conditionals
+  const {
+    user,
+    isAuthenticated,
+    loading: authLoading,
+    token,
+    logout,
+  } = useAuth();
   const { currentProject, selectProject } = useProject();
 
   // Top-level view: 'compose' (requires project) | 'feed' (social)
@@ -91,6 +74,34 @@ function App() {
 
   // Social navigation: { page: 'feed' | 'detail' | 'profile', id: null | string }
   const [socialNav, setSocialNav] = useState({ page: 'feed', id: null });
+
+  // Handle deep-link: ?composition=ID — open the feed and navigate to that composition
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const compositionId = params.get('composition');
+    if (compositionId) {
+      setAppView('feed');
+      setSocialNav({ page: 'detail', id: compositionId });
+      // Clean the URL so refreshing doesn't re-trigger
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  // Auth modal state for guests
+  const [showAuth, setShowAuth] = useState(false);
+
+  // Auth modal wrapper
+  function AuthPageModal({ onClose }) {
+    return (
+      <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ position: 'relative', background: '#181828', borderRadius: 12, padding: 32, minWidth: 340 }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: '#fff', fontSize: 22, cursor: 'pointer' }}>×</button>
+          <AuthPage />
+        </div>
+      </div>
+    );
+  }
+  AuthPageModal.propTypes = { onClose: PropTypes.func.isRequired };
 
   // Wire API service so all fetch helpers include auth headers + projectId.
   // Called synchronously (not in useEffect) so child effects can use apiFetch immediately.
@@ -105,52 +116,110 @@ function App() {
   // Show loading spinner while verifying stored token
   if (authLoading) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
         <p style={{ color: '#666', fontSize: '1.1rem' }}>Loading…</p>
       </div>
     );
   }
 
-  // Gate: must be logged in
-  if (!isAuthenticated) return <AuthPage />;
+  // Show landing/about page for guests
+  if (!isAuthenticated) {
+    return (
+      <>
+        <nav className='app-nav'>
+          <button className='app-nav__brand' onClick={() => setShowAuth(true)}>
+            <span className='app-nav__brand-icon'><Film size={28} /></span>
+            Symphovie
+          </button>
+          <div className='app-nav__tabs'>
+            <button className='app-nav__tab app-nav__tab--active'>
+              <Grid3x3 className='app-nav__tab-icon' /> Feed
+            </button>
+          </div>
+          <div className='app-nav__right'>
+            <button className='app-nav__btn' onClick={() => setShowAuth(true)}>
+              Login / Sign Up
+            </button>
+          </div>
+        </nav>
+        <LandingPage onLogin={() => setShowAuth(true)} />
+        {showAuth && <AuthPageModal onClose={() => setShowAuth(false)} />}
+      </>
+    );
+  }
 
   const navBar = (
     <nav className='app-nav'>
-      <span className='app-nav__brand'>🎵 AutoTuneSyncer</span>
+      {/* Logo = Home: clicking goes back to compose root */}
+      <button
+        className='app-nav__brand'
+        onClick={() => { setAppView('compose'); setSocialNav({ page: 'feed', id: null }); }}
+      >
+        <span className='app-nav__brand-icon'><Film size={28} /></span>
+        Symphovie
+      </button>
+
       <div className='app-nav__tabs'>
         <button
           className={`app-nav__tab${appView === 'compose' ? ' app-nav__tab--active' : ''}`}
           onClick={() => setAppView('compose')}
         >
-          🎛 Compose
+          <Music className='app-nav__tab-icon' /> Editor
         </button>
         <button
           className={`app-nav__tab${appView === 'feed' ? ' app-nav__tab--active' : ''}`}
           onClick={() => { setAppView('feed'); setSocialNav({ page: 'feed', id: null }); }}
         >
-          🌍 Feed
+          <Grid3x3 className='app-nav__tab-icon' /> Feed
+        </button>
+        <button
+          className={`app-nav__tab${appView === 'projects' ? ' app-nav__tab--active' : ''}`}
+          onClick={() => setAppView('projects')}
+        >
+          <FolderOpen className='app-nav__tab-icon' /> Projects
         </button>
       </div>
+
       <div className='app-nav__right'>
-        {user && <span className='app-nav__user'>@{user.username}</span>}
+        {user && (
+          <span className='app-nav__user'>
+            <span className='app-nav__avatar'>
+              {user.profileImageUrl
+                ? <img src={user.profileImageUrl} alt='profile' />
+                : user.username?.[0]?.toUpperCase() || 'U'
+              }
+            </span>
+            @{user.username}
+          </span>
+        )}
         {appView === 'compose' && currentProject && (
           <button className='app-nav__btn' onClick={() => selectProject(null)}>
-            📁 {currentProject.name}
+            <FolderOpen size={15} /> {currentProject.name}
           </button>
         )}
-        <button className='app-nav__btn' onClick={logout}>Sign Out</button>
+        <button className='app-nav__btn' onClick={logout}>
+          <LogOut size={15} /> Sign Out
+        </button>
       </div>
     </nav>
   );
 
   if (appView === 'feed') {
     return (
-      <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+      <div style={{ minHeight: '100vh', background: 'var(--social-bg)' }}>
         {navBar}
         {socialNav.page === 'feed' && (
           <SocialFeed
             onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
             onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
+            disableInteractions={!isAuthenticated}
           />
         )}
         {socialNav.page === 'detail' && (
@@ -160,6 +229,7 @@ function App() {
               onBack={() => setSocialNav({ page: 'feed', id: null })}
               onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
               onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
+              disableInteractions={!isAuthenticated}
             />
           </div>
         )}
@@ -180,7 +250,12 @@ function App() {
   // Compose view — requires project selection
   if (!currentProject) {
     return (
-      <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+      <div
+        style={{
+          minHeight: '100vh',
+          background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)',
+        }}
+      >
         {navBar}
         <ProjectManager />
       </div>
@@ -188,7 +263,12 @@ function App() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+    <div
+      style={{
+        minHeight: '100vh',
+        background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)',
+      }}
+    >
       {navBar}
       <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />
     </div>
@@ -263,12 +343,17 @@ function MainApp({ onChangeProject, onLogout }) {
       .then((state) => {
         if (clipsLoadingVersion.current !== version) return;
         if (state?.midiFileBase64) {
-          const file = base64ToFile(state.midiFileBase64, state.midiFileName || 'project.mid');
+          const file = base64ToFile(
+            state.midiFileBase64,
+            state.midiFileName || 'project.mid',
+          );
           setMidiFile(file);
         }
       })
-      .catch((err) => console.warn('[clips] Failed to load project state:', err));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+      .catch((err) =>
+        console.warn('[clips] Failed to load project state:', err),
+      );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
 
   // When instruments load or savedClipKeys changes: lazily fetch blobs for matching clips.
@@ -282,9 +367,16 @@ function MainApp({ onChangeProject, onLogout }) {
       if (!savedClipKeys.has(key)) continue;
 
       if (clipBlobCache.current[key]) {
-        setVideoFiles((prev) => (prev[key] ? prev : { ...prev, [key]: clipBlobCache.current[key] }));
+        setVideoFiles((prev) =>
+          prev[key] ? prev : { ...prev, [key]: clipBlobCache.current[key] },
+        );
         setInstrumentVideos((prev) =>
-          prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(clipBlobCache.current[key]) }
+          prev[key]
+            ? prev
+            : {
+                ...prev,
+                [key]: URL.createObjectURL(clipBlobCache.current[key]),
+              },
         );
         continue;
       }
@@ -297,14 +389,18 @@ function MainApp({ onChangeProject, onLogout }) {
         .then((blob) => {
           if (!blob || clipsLoadingVersion.current !== version) return;
           clipBlobCache.current[key] = blob;
-          setVideoFiles((prev) => (prev[key] ? prev : { ...prev, [key]: blob }));
+          setVideoFiles((prev) =>
+            prev[key] ? prev : { ...prev, [key]: blob },
+          );
           setInstrumentVideos((prev) =>
-            prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(blob) }
+            prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(blob) },
           );
         })
-        .catch((err) => console.warn(`[clips] Failed to fetch clip for ${key}:`, err));
+        .catch((err) =>
+          console.warn(`[clips] Failed to fetch clip for ${key}:`, err),
+        );
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instruments, savedClipKeys, currentProject?.id]);
 
   // When MIDI file changes: persist it to project state for restore on refresh.
@@ -314,14 +410,20 @@ function MainApp({ onChangeProject, onLogout }) {
     const reader = new FileReader();
     reader.onload = async () => {
       try {
-        const currentState = await loadProjectState(projectId).catch(() => null);
-        await saveProjectState({ ...(currentState || {}), midiFileBase64: reader.result, midiFileName: midiFile.name });
+        const currentState = await loadProjectState(projectId).catch(
+          () => null,
+        );
+        await saveProjectState({
+          ...(currentState || {}),
+          midiFileBase64: reader.result,
+          midiFileName: midiFile.name,
+        });
       } catch (err) {
         console.warn('[clips] Failed to save MIDI to project state:', err);
       }
     };
     reader.readAsDataURL(midiFile);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [midiFile, currentProject?.id]);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -336,13 +438,17 @@ function MainApp({ onChangeProject, onLogout }) {
     midiData.tracks.forEach((track) => {
       if (isDrumTrack(track)) {
         // Match drum notes whose group maps to this key
-        const expectedKey = `drum_${getNoteGroup(track.notes[0]?.midi ?? 0).toLowerCase().replace(/\s+/g, '_')}`;
+        const expectedKey = `drum_${getNoteGroup(track.notes[0]?.midi ?? 0)
+          .toLowerCase()
+          .replace(/\s+/g, '_')}`;
         track.notes.forEach((note) => {
           const noteKey = `drum_${getNoteGroup(note.midi).toLowerCase().replace(/\s+/g, '_')}`;
           if (noteKey === instrumentKey) notes.add(note.midi);
         });
       } else {
-        const trackKey = track.instrument?.name?.toLowerCase().replace(/\s+/g, '_');
+        const trackKey = track.instrument?.name
+          ?.toLowerCase()
+          .replace(/\s+/g, '_');
         if (trackKey === instrumentKey) {
           track.notes.forEach((note) => notes.add(note.midi));
         }
@@ -358,7 +464,11 @@ function MainApp({ onChangeProject, onLogout }) {
     // Include auth token and project scope
     const token = localStorage.getItem('auth_token');
     const projectId = (() => {
-      try { return JSON.parse(localStorage.getItem('current_project'))?.id; } catch { return null; }
+      try {
+        return JSON.parse(localStorage.getItem('current_project'))?.id;
+      } catch {
+        return null;
+      }
     })();
     const url = projectId
       ? `http://localhost:3000/api/autotune/precache?projectId=${projectId}`
@@ -419,7 +529,13 @@ function MainApp({ onChangeProject, onLogout }) {
       // Clear all in-memory clips so stale clips from a previous MIDI don't bleed through.
       // The instruments effect will re-populate from clipBlobCache for matching instruments.
       setInstrumentVideos((prev) => {
-        Object.values(prev).forEach((url) => { try { URL.revokeObjectURL(url); } catch { /* ignore */ } });
+        Object.values(prev).forEach((url) => {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            /* ignore */
+          }
+        });
         return {};
       });
       setVideoFiles({});
@@ -432,29 +548,39 @@ function MainApp({ onChangeProject, onLogout }) {
   );
 
   // Add handleRecordingComplete function
-  const handleRecordingComplete = useCallback((blob, instrument) => {
-    if (!(blob instanceof Blob)) {
-      console.error('Invalid blob:', blob);
-      return;
-    }
-    if (instrument.isDrum) {
-      instrument.name = instrument.group;
-    }
-    const key = toInstrumentKey(instrument);
+  const handleRecordingComplete = useCallback(
+    (blob, instrument) => {
+      if (!(blob instanceof Blob)) {
+        console.error('Invalid blob:', blob);
+        return;
+      }
+      if (instrument.isDrum) {
+        instrument.name = instrument.group;
+      }
+      const key = toInstrumentKey(instrument);
 
-    console.log('Recording complete for instrument:', key, 'blob size:', blob.size);
+      console.log(
+        'Recording complete for instrument:',
+        key,
+        'blob size:',
+        blob.size,
+      );
 
-    setVideoFiles((prev) => ({ ...prev, [key]: blob }));
-    clipBlobCache.current[key] = blob;
+      setVideoFiles((prev) => ({ ...prev, [key]: blob }));
+      clipBlobCache.current[key] = blob;
 
-    // Persist clip to server for restore on next project open
-    if (currentProject) {
-      uploadClip(currentProject.id, key, blob)
-        .then(() => setSavedClipKeys((prev) => new Set([...prev, key])))
-        .catch((err) => console.warn(`[clips] Failed to upload clip for ${key}:`, err));
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentProject?.id]);
+      // Persist clip to server for restore on next project open
+      if (currentProject) {
+        uploadClip(currentProject.id, key, blob)
+          .then(() => setSavedClipKeys((prev) => new Set([...prev, key])))
+          .catch((err) =>
+            console.warn(`[clips] Failed to upload clip for ${key}:`, err),
+          );
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [currentProject?.id],
+  );
 
   // Add handleVideoReady function
   const handleVideoReady = useCallback((videoUrl, instrument) => {

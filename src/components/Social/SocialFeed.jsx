@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
+import { Globe, Users } from 'lucide-react';
 import CompositionCard from './CompositionCard.jsx';
 import './Social.css';
 
@@ -26,8 +27,8 @@ async function apiFetch(path, options = {}) {
   return res.json();
 }
 
-const SocialFeed = ({ onSelectComposition, onSelectUser }) => {
-  const [tab, setTab] = useState('all'); // 'all' | 'following'
+const SocialFeed = ({ onSelectComposition, onSelectUser, disableInteractions }) => {
+  const [tab, setTab] = useState('all');
   const [compositions, setCompositions] = useState([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -53,31 +54,30 @@ const SocialFeed = ({ onSelectComposition, onSelectUser }) => {
     }
   }, []);
 
-  useEffect(() => {
-    fetchFeed(tab, page);
-  }, [tab, page, fetchFeed]);
+  useEffect(() => { fetchFeed(tab, page); }, [tab, page, fetchFeed]);
 
-  const handleTabChange = (newTab) => {
-    setTab(newTab);
-    setPage(1);
-  };
-
+  const handleTabChange = (newTab) => { setTab(newTab); setPage(1); };
   const totalPages = Math.ceil(total / pageSize);
 
   return (
     <div className='social-feed'>
+      <h1 className='social-feed__heading'>Community Feed</h1>
+
       <div className='social-feed__tabs'>
         <button
           className={`social-feed__tab${tab === 'all' ? ' social-feed__tab--active' : ''}`}
           onClick={() => handleTabChange('all')}
         >
-          🌍 All Compositions
+          <Globe size={16} />
+          Discover
         </button>
         <button
           className={`social-feed__tab${tab === 'following' ? ' social-feed__tab--active' : ''}`}
           onClick={() => handleTabChange('following')}
+          disabled={disableInteractions}
         >
-          👥 Following
+          <Users size={16} />
+          Following
         </button>
       </div>
 
@@ -89,16 +89,25 @@ const SocialFeed = ({ onSelectComposition, onSelectUser }) => {
           <div className='social-feed__grid'>
             {compositions.length === 0 ? (
               <div className='social-feed__empty'>
+                <Users className='social-feed__empty-icon' />
                 <h3>
                   {tab === 'following'
-                    ? 'No compositions from people you follow yet'
+                    ? 'No posts from people you follow'
                     : 'No compositions shared yet'}
                 </h3>
                 <p>
                   {tab === 'following'
-                    ? 'Follow some creators to see their work here.'
+                    ? 'Follow creators to see their work here.'
                     : 'Be the first to share a composition!'}
                 </p>
+                {tab === 'following' && (
+                  <button
+                    className='social-feed__discover-btn'
+                    onClick={() => handleTabChange('all')}
+                  >
+                    Discover Creators
+                  </button>
+                )}
               </div>
             ) : (
               compositions.map((c) => (
@@ -114,15 +123,9 @@ const SocialFeed = ({ onSelectComposition, onSelectUser }) => {
 
           {totalPages > 1 && (
             <div className='social-feed__pagination'>
-              <button onClick={() => setPage((p) => p - 1)} disabled={page <= 1}>
-                ← Prev
-              </button>
-              <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>
-                Page {page} of {totalPages}
-              </span>
-              <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>
-                Next →
-              </button>
+              <button onClick={() => setPage((p) => p - 1)} disabled={page <= 1}>← Prev</button>
+              <span>Page {page} of {totalPages}</span>
+              <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>Next →</button>
             </div>
           )}
         </>
@@ -134,6 +137,7 @@ const SocialFeed = ({ onSelectComposition, onSelectUser }) => {
 SocialFeed.propTypes = {
   onSelectComposition: PropTypes.func.isRequired,
   onSelectUser: PropTypes.func.isRequired,
+  disableInteractions: PropTypes.bool,
 };
 
 export default SocialFeed;

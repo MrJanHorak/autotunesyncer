@@ -1,10 +1,163 @@
+:root {
+  --color-bg-dark: #181929;
+  --color-bg-card: #23243a;
+  --color-bg-nav: #1a1b2e;
+  --color-accent: #c084fc;
+  --color-accent-strong: #a21caf;
+  --color-accent-pink: #f472b6;
+  --color-text-main: #fff;
+  --color-text-muted: #bdbdd7;
+  --color-card-shadow: 0 2px 16px rgba(64, 0, 128, 0.08);
+}
+
 .app-container {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
   min-height: 100vh;
-  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  background: var(--color-bg-dark);
   padding: 2rem 1rem;
   gap: 1.5rem;
+}
+
+/* Navigation Bar — Figma pattern */
+.app-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+  padding: 0 2rem;
+  background: var(--color-bg-nav);
+  border-bottom: 1px solid rgba(192, 132, 252, 0.14);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+/* Logo / Brand — clickable, acts as Home */
+.app-nav__brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1.5rem;
+  background: linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent-pink) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+  background-color: transparent; /* don't override the gradient */
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+.app-nav__brand:hover { opacity: 0.85; }
+
+.app-nav__brand-icon {
+  /* lucide Film icon — keep its purple color outside the gradient clip */
+  display: flex;
+  align-items: center;
+  -webkit-text-fill-color: initial;
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+/* Nav link group */
+.app-nav__tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+/* Each nav item is an individually-rounded pill (Figma style) */
+.app-nav__tab {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.875rem;
+  border-radius: 0.5rem;
+  border: none;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: #d1d5db;              /* gray-300 */
+  background: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.app-nav__tab--active {
+  background: rgba(192, 132, 252, 0.18);  /* purple-500/20 equivalent */
+  color: var(--color-accent);
+  box-shadow: none;
+}
+
+.app-nav__tab:hover:not(.app-nav__tab--active) {
+  background: rgba(255, 255, 255, 0.06);   /* gray-800 equivalent */
+  color: #fff;
+}
+
+.app-nav__tab-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+/* Right-side controls */
+.app-nav__right {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.app-nav__user {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+.app-nav__avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-pink) 100%);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.875rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.app-nav__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.app-nav__btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: 1px solid rgba(192, 132, 252, 0.35);
+  color: var(--color-text-muted);
+  padding: 0.375rem 0.875rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.app-nav__btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  border-color: var(--color-accent);
 }
