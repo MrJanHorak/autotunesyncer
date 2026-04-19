@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
+import { ArrowLeft, Heart, Share2, Send, Copy, Twitter, Facebook, MessageCircle } from 'lucide-react';
 import './Social.css';
 
 const API_BASE = 'http://localhost:3000/api';
@@ -37,8 +38,7 @@ async function apiFetch(path, options = {}) {
 }
 
 function formatDate(dateStr) {
-  const d = new Date(dateStr);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function SidebarThumb({ item, onClick }) {
@@ -73,19 +73,16 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-
-  // Comments state
   const [comments, setComments] = useState([]);
   const [commentPage, setCommentPage] = useState(1);
   const [commentTotal, setCommentTotal] = useState(0);
   const [commentPageSize, setCommentPageSize] = useState(12);
   const [commentText, setCommentText] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
-
-  // Like state
   const [likeCount, setLikeCount] = useState(0);
   const [likedByMe, setLikedByMe] = useState(false);
   const [likePending, setLikePending] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const currentUserId = getCurrentUserId();
 
@@ -129,10 +126,13 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
     }
   };
 
-  const handleShare = () => {
-    const url = `${MEDIA_BASE}/published/${data.composition.video_path}`;
+  const handleCopyLink = () => {
+    const url = `${window.location.origin}?composition=${compositionId}`;
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(url).then(() => alert('Video URL copied to clipboard!')).catch(() => {});
+      navigator.clipboard.writeText(url).then(() => {
+        setShareOpen(false);
+        alert('Link copied!');
+      }).catch(() => {});
     }
   };
 
@@ -168,29 +168,35 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
   const { composition, more_from_user, recent } = data;
   const videoUrl = `${MEDIA_BASE}/published/${composition.video_path}`;
   const commentPages = Math.ceil(commentTotal / commentPageSize);
+  const authorInitial = composition.username[0].toUpperCase();
+  // Use a site page URL for sharing — keeps users on the site and prevents direct video downloads
+  const siteShareUrl = `${window.location.origin}?composition=${compositionId}`;
+  const shareText = `Check out "${composition.title}" by @${composition.username} on Symphovie!`;
 
   return (
     <div className='comp-detail'>
-      <button className='comp-detail__back' onClick={onBack}>← Back to Feed</button>
+      <button className='comp-detail__back' onClick={onBack}>
+        <ArrowLeft size={16} /> Back to Feed
+      </button>
 
       <div className='comp-detail__layout'>
         {/* ── Main column ── */}
         <div className='comp-detail__main'>
-          <video
-            className='comp-detail__video'
-            src={videoUrl}
-            controls
-            autoPlay={false}
-          />
+          <video className='comp-detail__video' src={videoUrl} controls autoPlay={false} />
 
-          <div className='comp-detail__info'>
+          <div className='comp-detail__info-card'>
             <h1 className='comp-detail__title'>{composition.title}</h1>
-            <div className='comp-detail__author-row'>
-              <button className='comp-detail__author-link' onClick={() => onSelectUser(composition.user_id)}>
-                @{composition.username}
-              </button>
-              <span className='comp-detail__date'>{formatDate(composition.created_at)}</span>
+
+            <div className='comp-detail__author-left'>
+              <div className='comp-detail__author-avatar'>{authorInitial}</div>
+              <div>
+                <button className='comp-detail__author-link' onClick={() => onSelectUser(composition.user_id)}>
+                  @{composition.username}
+                </button>
+                <div className='comp-detail__date'>{formatDate(composition.created_at)}</div>
+              </div>
             </div>
+
             {composition.description && (
               <p className='comp-detail__description'>{composition.description}</p>
             )}
@@ -201,33 +207,72 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
                 onClick={handleLike}
                 disabled={likePending}
               >
-                {likedByMe ? '❤️' : '🤍'} {likeCount} {likeCount === 1 ? 'Like' : 'Likes'}
+                <Heart
+                  size={16}
+                  className='action-btn-icon'
+                  fill={likedByMe ? 'currentColor' : 'none'}
+                />
+                {likeCount} {likeCount === 1 ? 'Like' : 'Likes'}
               </button>
-              <button className='action-btn action-btn--share' onClick={handleShare}>
-                🔗 Copy Link
-              </button>
+
+              <div className='share-dropdown-wrap'>
+                <button className='action-btn action-btn--share' onClick={() => setShareOpen((v) => !v)}>
+                  <Share2 size={16} className='action-btn-icon' /> Share
+                </button>
+                {shareOpen && (
+                  <div className='share-dropdown'>
+                    <a
+                      href={`https://twitter.com/intent/tweet?url=${encodeURIComponent(siteShareUrl)}&text=${encodeURIComponent(shareText)}`}
+                      target='_blank' rel='noopener noreferrer'
+                      className='share-dropdown__item'
+                      onClick={() => setShareOpen(false)}
+                    >
+                      <Twitter size={14} /> Twitter
+                    </a>
+                    <a
+                      href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(siteShareUrl)}`}
+                      target='_blank' rel='noopener noreferrer'
+                      className='share-dropdown__item'
+                      onClick={() => setShareOpen(false)}
+                    >
+                      <Facebook size={14} /> Facebook
+                    </a>
+                    <button className='share-dropdown__item' onClick={handleCopyLink}>
+                      <Copy size={14} /> Copy Link
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Comments */}
-          <div className='comp-detail__comments'>
-            <h3>💬 Comments ({commentTotal})</h3>
-            <form className='comment-form' onSubmit={handleAddComment}>
-              <textarea
-                value={commentText}
-                onChange={(e) => setCommentText(e.target.value)}
-                placeholder='Add a comment…'
-                maxLength={500}
-              />
-              <button type='submit' disabled={submittingComment || !commentText.trim()}>
-                {submittingComment ? '…' : 'Post'}
-              </button>
-            </form>
+          <div className='comp-detail__comments-card'>
+            <h3 className='comp-detail__comments-heading'>
+              <MessageCircle size={18} style={{ color: 'var(--social-accent)' }} />
+              Comments ({commentTotal})
+            </h3>
+
+            {currentUserId && (
+              <form className='comment-form' onSubmit={handleAddComment}>
+                <div className='comment-form__avatar'>{currentUserId[0]?.toUpperCase() ?? '?'}</div>
+                <input
+                  className='comment-form__input'
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  placeholder='Add a comment…'
+                  maxLength={500}
+                />
+                <button className='comment-form__submit' type='submit' disabled={submittingComment || !commentText.trim()}>
+                  <Send size={16} />
+                </button>
+              </form>
+            )}
 
             {comments.map((c) => (
               <div key={c.id} className='comment'>
                 <div className='comment__avatar'>{c.username[0].toUpperCase()}</div>
-                <div className='comment__content' style={{ flex: 1 }}>
+                <div className='comment__body-wrap'>
                   <div className='comment__header'>
                     <button className='comment__username' onClick={() => onSelectUser(c.user_id)}>
                       @{c.username}
@@ -245,7 +290,7 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
             {commentPages > 1 && (
               <div className='social-feed__pagination' style={{ justifyContent: 'flex-start', marginTop: '1rem' }}>
                 <button onClick={() => setCommentPage((p) => p - 1)} disabled={commentPage <= 1}>← Prev</button>
-                <span style={{ fontSize: '0.8rem', color: '#6b7280' }}>{commentPage}/{commentPages}</span>
+                <span>{commentPage}/{commentPages}</span>
                 <button onClick={() => setCommentPage((p) => p + 1)} disabled={commentPage >= commentPages}>Next →</button>
               </div>
             )}
@@ -256,7 +301,20 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
         <div className='comp-detail__sidebar'>
           {more_from_user.length > 0 && (
             <div className='sidebar-section'>
-              <h4>More from @{composition.username}</h4>
+              <div className='creator-info'>
+                <div className='creator-info__avatar'>{authorInitial}</div>
+                <div>
+                  <button className='comp-detail__author-link' onClick={() => onSelectUser(composition.user_id)}>
+                    @{composition.username}
+                  </button>
+                  <div className='sidebar-section__follow-btn'>
+                    <button className='follow-btn follow-btn--follow' onClick={() => onSelectUser(composition.user_id)}>
+                      View Profile
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <h4 className='sidebar-section__title'>More from @{composition.username}</h4>
               {more_from_user.map((item) => (
                 <SidebarThumb key={item.id} item={item} onClick={() => onSelectComposition(item.id)} />
               ))}
@@ -264,9 +322,9 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
           )}
           {recent.length > 0 && (
             <div className='sidebar-section'>
-              <h4>Recently Shared</h4>
+              <h4 className='sidebar-section__title'>Recently Shared</h4>
               {recent.map((item) => (
-                <SidebarThumb key={item.id} item={{ ...item }} onClick={() => onSelectComposition(item.id)} />
+                <SidebarThumb key={item.id} item={item} onClick={() => onSelectComposition(item.id)} />
               ))}
             </div>
           )}

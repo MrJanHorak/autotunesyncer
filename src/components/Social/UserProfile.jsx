@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
+import { ArrowLeft, UserPlus, UserCheck, Calendar, Music } from 'lucide-react';
 import CompositionCard from './CompositionCard.jsx';
 import './Social.css';
 
@@ -78,10 +79,7 @@ const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
   }, [userId]);
 
   useEffect(() => { fetchProfile(); }, [fetchProfile]);
-
-  useEffect(() => {
-    if (page > 1) fetchCompositions(page);
-  }, [page, fetchCompositions]);
+  useEffect(() => { if (page > 1) fetchCompositions(page); }, [page, fetchCompositions]);
 
   const handleFollow = async () => {
     if (followPending || !profile) return;
@@ -100,44 +98,77 @@ const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
   if (!profile) return null;
 
   const totalPages = Math.ceil(total / pageSize);
+  const initial = profile.username[0].toUpperCase();
 
   return (
     <div className='user-profile'>
-      <button className='user-profile__back' onClick={onBack}>← Back to Feed</button>
+      <button className='user-profile__back' onClick={onBack}>
+        <ArrowLeft size={16} />
+        Back to Feed
+      </button>
 
-      <div className='user-profile__header'>
-        <div className='user-profile__avatar'>{profile.username[0].toUpperCase()}</div>
-        <div className='user-profile__info'>
-          <div className='user-profile__username'>@{profile.username}</div>
-          {profile.bio && <p className='user-profile__bio'>{profile.bio}</p>}
+      <div className='user-profile__card'>
+        <div className='user-profile__banner' />
+        <div className='user-profile__body'>
+          <div className='user-profile__header-row'>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <div className='user-profile__avatar'>{initial}</div>
+              <div>
+                <div className='user-profile__username'>@{profile.username}</div>
+                {profile.bio && <p className='user-profile__bio'>{profile.bio}</p>}
+                <div className='user-profile__info-row'>
+                  {profile.joined_at && (
+                    <span className='user-profile__info-item'>
+                      <Calendar className='user-profile__info-icon' />
+                      Joined {new Date(profile.joined_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                    </span>
+                  )}
+                  <span className='user-profile__info-item'>
+                    <Music className='user-profile__info-icon' />
+                    {profile.compositions} compositions
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {!isOwnProfile && (
+              <button
+                className={`follow-btn ${profile.is_following ? 'follow-btn--unfollow' : 'follow-btn--follow'}`}
+                onClick={handleFollow}
+                disabled={followPending}
+              >
+                {profile.is_following
+                  ? <><UserCheck className='follow-btn-icon' /> Following</>
+                  : <><UserPlus className='follow-btn-icon' /> Follow</>
+                }
+              </button>
+            )}
+          </div>
+
           <div className='user-profile__stats'>
-            <span><span className='user-profile__stat-value'>{profile.compositions}</span> compositions</span>
-            <span><span className='user-profile__stat-value'>{profile.followers}</span> followers</span>
-            <span><span className='user-profile__stat-value'>{profile.following}</span> following</span>
+            <div className='user-profile__stat'>
+              <span className='user-profile__stat-value'>{profile.followers?.toLocaleString()}</span>
+              <span className='user-profile__stat-label'>Followers</span>
+            </div>
+            <div className='user-profile__stat'>
+              <span className='user-profile__stat-value'>{profile.following?.toLocaleString()}</span>
+              <span className='user-profile__stat-label'>Following</span>
+            </div>
+            <div className='user-profile__stat'>
+              <span className='user-profile__stat-value'>{profile.compositions?.toLocaleString()}</span>
+              <span className='user-profile__stat-label'>Compositions</span>
+            </div>
           </div>
         </div>
-        {!isOwnProfile && (
-          <div className='user-profile__actions'>
-            <button
-              className={`follow-btn ${profile.is_following ? 'follow-btn--unfollow' : 'follow-btn--follow'}`}
-              onClick={handleFollow}
-              disabled={followPending}
-            >
-              {profile.is_following ? 'Unfollow' : 'Follow'}
-            </button>
-          </div>
-        )}
       </div>
 
-      <h2 className='user-profile__compositions-title'>
-        Compositions ({total})
-      </h2>
+      <h2 className='user-profile__compositions-title'>Compositions ({total})</h2>
 
       <div className='social-feed__grid'>
         {compositions.length === 0 ? (
           <div className='social-feed__empty'>
             <h3>No compositions yet</h3>
-            <p>{isOwnProfile ? 'Share your first composition from the Compose tab!' : 'This user hasn\'t shared anything yet.'}</p>
+            <p>{isOwnProfile ? 'Share your first composition from the Editor tab!' : "This user hasn't shared anything yet."}</p>
           </div>
         ) : (
           compositions.map((c) => (
@@ -154,7 +185,7 @@ const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
       {totalPages > 1 && (
         <div className='social-feed__pagination'>
           <button onClick={() => setPage((p) => p - 1)} disabled={page <= 1}>← Prev</button>
-          <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>Page {page} of {totalPages}</span>
+          <span>Page {page} of {totalPages}</span>
           <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>Next →</button>
         </div>
       )}
