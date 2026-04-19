@@ -2,6 +2,13 @@
 import VideoRecorder from '../VideoRecorder/VideoRecorder';
 import './RecordingSection.css';
 
+const toClipKey = (instrument) => {
+  if (instrument.isDrum) {
+    return `drum_${(instrument.group || '').toLowerCase().replace(/\s+/g, '_')}`;
+  }
+  return (instrument.name || '').toLowerCase().replace(/\s+/g, '_');
+};
+
 const RecordingSection = ({
   instruments,
   longestNotes,
@@ -13,9 +20,12 @@ const RecordingSection = ({
   return (
     <div className={'recording-section'}>
       {instruments.map((instrument, index) => {
+        // Raw key used by longestNotes (matches useMidiProcessing storage format)
         const instrumentName = instrument.isDrum
           ? `drum_${instrument.group}`
           : instrument.name;
+        // Normalized key used by instrumentVideos and clip persistence
+        const clipKey = toClipKey(instrument);
         const minDuration = longestNotes[instrumentName] || 0;
         const recommendedDuration = Math.ceil(minDuration + 1);
 
@@ -44,7 +54,7 @@ const RecordingSection = ({
               instrument={instrument}
               onVideoReady={onVideoReady}
               minDuration={recommendedDuration}
-              currentVideo={instrumentVideos[instrumentName]}
+              currentVideo={instrumentVideos[clipKey]}
               midiData={midiData}
             />
           </div>

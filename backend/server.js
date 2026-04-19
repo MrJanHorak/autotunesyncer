@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { existsSync, readdirSync, statSync, unlinkSync } from 'fs';
+import { existsSync, readdirSync, statSync, unlinkSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import midiRoutes from './routes/midiRoutes.js';
@@ -12,6 +12,7 @@ import processVideos from './routes/processVideos.js';
 import precacheRoutes from './routes/precache.js';
 import authRoutes from './routes/authRoutes.js';
 import projectRoutes from './routes/projectRoutes.js';
+import socialRoutes from './routes/socialRoutes.js';
 
 const app = express();
 
@@ -52,9 +53,16 @@ app.use(
   })
 );
 
+// Serve published compositions as static files (public, intentionally shareable)
+const __dirnameServer = dirname(fileURLToPath(import.meta.url));
+const publishedDir = join(__dirnameServer, 'published');
+mkdirSync(publishedDir, { recursive: true });
+app.use('/published', express.static(publishedDir));
+
 // Use routes
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
+app.use('/api/social', socialRoutes);
 app.use('/api/midi', midiRoutes);
 app.use('/api/video', videoRoutes);
 app.use('/api/compose', compositionRoutes);

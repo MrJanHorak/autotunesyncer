@@ -1,5 +1,6 @@
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState, useRef } from 'react';
+import PropTypes from 'prop-types';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
@@ -8,7 +9,7 @@ import { useMidiProcessing } from './hooks/useMidiProcessing';
 import { useVideoRecording } from './hooks/useVideoRecording';
 import { useAuth } from './context/AuthContext';
 import { useProject } from './context/ProjectContext';
-import { configureApiService } from './services/apiService';
+import { configureApiService, apiFetch, uploadClip } from './services/apiService';
 
 // Components
 import AuthPage from './components/Auth/AuthPage';
@@ -24,12 +25,37 @@ import Grid from './components/Grid/Grid';
 import Mixer from './components/Mixer/Mixer';
 import PreviewPlayer from './components/PreviewPlayer/PreviewPlayer';
 
+// Social components
+import SocialFeed from './components/Social/SocialFeed.jsx';
+import CompositionDetail from './components/Social/CompositionDetail.jsx';
+import UserProfile from './components/Social/UserProfile.jsx';
+import './components/Social/Social.css';
+
 import './App.css';
 
 // Add this helper function at the top
 const normalizeInstrumentName = (name) => {
   return name.toLowerCase().replace(/\s+/g, '_');
 };
+
+/** Canonical instrument key used everywhere (recording, storage, restore). */
+const toInstrumentKey = (instrument) => {
+  if (instrument.isDrum) {
+    const name = (instrument.group || instrument.name || '').toLowerCase().replace(/\s+/g, '_');
+    return `drum_${name}`;
+  }
+  return normalizeInstrumentName(instrument.name || '');
+};
+
+/** Convert a base64 data-URL back to a File object. */
+function base64ToFile(dataUrl, filename) {
+  const [header, data] = dataUrl.split(',');
+  const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
+  const bytes = atob(data);
+  const arr = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+  return new File([arr], filename, { type: mime });
+}
 
 // // Add this helper function to extract drum instruments
 // const extractDrumInstruments = (track) => {
@@ -57,16 +83,24 @@ const normalizeInstrumentName = (name) => {
 // };
 
 function App() {
-  const { isAuthenticated, loading: authLoading, token, logout } = useAuth();
+  const { user, isAuthenticated, loading: authLoading, token, logout } = useAuth();
   const { currentProject, selectProject } = useProject();
 
-  // Wire API service so all fetch helpers include auth headers + projectId
-  useEffect(() => {
-    configureApiService({
-      getToken: () => token,
-      getProjectId: () => currentProject?.id ?? null,
-    });
-  }, [token, currentProject]);
+  // Top-level view: 'compose' (requires project) | 'feed' (social)
+  const [appView, setAppView] = useState('compose');
+
+  // Social navigation: { page: 'feed' | 'detail' | 'profile', id: null | string }
+  const [socialNav, setSocialNav] = useState({ page: 'feed', id: null });
+
+  // Wire API service so all fetch helpers include auth headers + projectId.
+  // Called synchronously (not in useEffect) so child effects can use apiFetch immediately.
+  configureApiService({
+    getToken: () => token,
+    getProjectId: () => currentProject?.id ?? null,
+  });
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {}, [token, currentProject]);
 
   // Show loading spinner while verifying stored token
   if (authLoading) {
@@ -77,16 +111,92 @@ function App() {
     );
   }
 
-  // Gate 1: must be logged in
+  // Gate: must be logged in
   if (!isAuthenticated) return <AuthPage />;
 
-  // Gate 2: must have a project selected
-  if (!currentProject) return <ProjectManager />;
+  const navBar = (
+    <nav className='app-nav'>
+      <span className='app-nav__brand'>🎵 AutoTuneSyncer</span>
+      <div className='app-nav__tabs'>
+        <button
+          className={`app-nav__tab${appView === 'compose' ? ' app-nav__tab--active' : ''}`}
+          onClick={() => setAppView('compose')}
+        >
+          🎛 Compose
+        </button>
+        <button
+          className={`app-nav__tab${appView === 'feed' ? ' app-nav__tab--active' : ''}`}
+          onClick={() => { setAppView('feed'); setSocialNav({ page: 'feed', id: null }); }}
+        >
+          🌍 Feed
+        </button>
+      </div>
+      <div className='app-nav__right'>
+        {user && <span className='app-nav__user'>@{user.username}</span>}
+        {appView === 'compose' && currentProject && (
+          <button className='app-nav__btn' onClick={() => selectProject(null)}>
+            📁 {currentProject.name}
+          </button>
+        )}
+        <button className='app-nav__btn' onClick={logout}>Sign Out</button>
+      </div>
+    </nav>
+  );
 
-  return <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />;
+  if (appView === 'feed') {
+    return (
+      <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+        {navBar}
+        {socialNav.page === 'feed' && (
+          <SocialFeed
+            onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
+            onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
+          />
+        )}
+        {socialNav.page === 'detail' && (
+          <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 1rem' }}>
+            <CompositionDetail
+              compositionId={socialNav.id}
+              onBack={() => setSocialNav({ page: 'feed', id: null })}
+              onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
+              onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
+            />
+          </div>
+        )}
+        {socialNav.page === 'profile' && (
+          <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 1rem' }}>
+            <UserProfile
+              userId={socialNav.id}
+              onBack={() => setSocialNav({ page: 'feed', id: null })}
+              onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
+              onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
+            />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Compose view — requires project selection
+  if (!currentProject) {
+    return (
+      <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+        {navBar}
+        <ProjectManager />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+      {navBar}
+      <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />
+    </div>
+  );
 }
 
 function MainApp({ onChangeProject, onLogout }) {
+  const { currentProject, saveProjectState, loadProjectState } = useProject();
   const {
     // parsedMidiData,
     instruments,
@@ -118,9 +228,103 @@ function MainApp({ onChangeProject, onLogout }) {
   const [activeLevels, setActiveLevels] = useState({});
   const lastMeterStateRef = useRef(0);
 
+  // Persisted clip keys from server (instrument keys that have saved clips)
+  const [savedClipKeys, setSavedClipKeys] = useState(new Set());
+  // In-memory blob cache to avoid re-fetching on MIDI change within same project
+  const clipBlobCache = useRef({});
+  // Version counter — incremented on project switch to discard stale fetches
+  const clipsLoadingVersion = useRef(0);
+
   // Track which instrument keys have already been queued for pre-caching
   // so we don't send duplicate requests on every re-render.
   const precachedKeysRef = useRef(new Set());
+
+  // ── Project clip persistence ──────────────────────────────────────────────
+
+  // On project change: load saved clip list from server + restore MIDI from state.
+  useEffect(() => {
+    if (!currentProject) {
+      setSavedClipKeys(new Set());
+      clipBlobCache.current = {};
+      return;
+    }
+
+    const version = ++clipsLoadingVersion.current;
+
+    apiFetch(`/projects/${currentProject.id}/clips`)
+      .then((r) => r.json())
+      .then(({ clips }) => {
+        if (clipsLoadingVersion.current !== version) return;
+        setSavedClipKeys(new Set(clips.map((c) => c.instrument_key)));
+      })
+      .catch((err) => console.warn('[clips] Failed to load clip list:', err));
+
+    loadProjectState(currentProject.id)
+      .then((state) => {
+        if (clipsLoadingVersion.current !== version) return;
+        if (state?.midiFileBase64) {
+          const file = base64ToFile(state.midiFileBase64, state.midiFileName || 'project.mid');
+          setMidiFile(file);
+        }
+      })
+      .catch((err) => console.warn('[clips] Failed to load project state:', err));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject?.id]);
+
+  // When instruments load or savedClipKeys changes: lazily fetch blobs for matching clips.
+  useEffect(() => {
+    if (!instruments.length || !savedClipKeys.size || !currentProject) return;
+    const version = clipsLoadingVersion.current;
+    const projectId = currentProject.id;
+
+    for (const instrument of instruments) {
+      const key = toInstrumentKey(instrument);
+      if (!savedClipKeys.has(key)) continue;
+
+      if (clipBlobCache.current[key]) {
+        setVideoFiles((prev) => (prev[key] ? prev : { ...prev, [key]: clipBlobCache.current[key] }));
+        setInstrumentVideos((prev) =>
+          prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(clipBlobCache.current[key]) }
+        );
+        continue;
+      }
+
+      apiFetch(`/projects/${projectId}/clips/${encodeURIComponent(key)}/file`)
+        .then((r) => {
+          if (clipsLoadingVersion.current !== version) return null;
+          return r.blob();
+        })
+        .then((blob) => {
+          if (!blob || clipsLoadingVersion.current !== version) return;
+          clipBlobCache.current[key] = blob;
+          setVideoFiles((prev) => (prev[key] ? prev : { ...prev, [key]: blob }));
+          setInstrumentVideos((prev) =>
+            prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(blob) }
+          );
+        })
+        .catch((err) => console.warn(`[clips] Failed to fetch clip for ${key}:`, err));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instruments, savedClipKeys, currentProject?.id]);
+
+  // When MIDI file changes: persist it to project state for restore on refresh.
+  useEffect(() => {
+    if (!midiFile || !currentProject) return;
+    const projectId = currentProject.id;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const currentState = await loadProjectState(projectId).catch(() => null);
+        await saveProjectState({ ...(currentState || {}), midiFileBase64: reader.result, midiFileName: midiFile.name });
+      } catch (err) {
+        console.warn('[clips] Failed to save MIDI to project state:', err);
+      }
+    };
+    reader.readAsDataURL(midiFile);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [midiFile, currentProject?.id]);
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   // Fire-and-forget pre-cache request for one instrument's blob + MIDI notes.
   const triggerPrecache = useCallback((instrumentKey, blob, midiData) => {
@@ -211,8 +415,17 @@ function MainApp({ onChangeProject, onLogout }) {
   const handleParsedMidi = useCallback(
     (midiInfo) => {
       console.log('Parsed MIDI info:', midiInfo);
+
+      // Clear all in-memory clips so stale clips from a previous MIDI don't bleed through.
+      // The instruments effect will re-populate from clipBlobCache for matching instruments.
+      setInstrumentVideos((prev) => {
+        Object.values(prev).forEach((url) => { try { URL.revokeObjectURL(url); } catch { /* ignore */ } });
+        return {};
+      });
+      setVideoFiles({});
+      precachedKeysRef.current = new Set();
+
       setParsedMidiData(midiInfo);
-      // Call MIDI processing hook with parsed data
       processMidiData(midiInfo);
     },
     [processMidiData],
@@ -224,38 +437,29 @@ function MainApp({ onChangeProject, onLogout }) {
       console.error('Invalid blob:', blob);
       return;
     }
-    console.log('Instrument: ', instrument);
     if (instrument.isDrum) {
       instrument.name = instrument.group;
     }
-    console.log(
-      'Handle Recording is complete Instrument after adding drum name:',
-      instrument,
-    );
-    const key = instrument.isDrum
-      ? `drum_${instrument.name.toLowerCase().replace(/\s+/g, '_')}`
-      : normalizeInstrumentName(instrument.name);
+    const key = toInstrumentKey(instrument);
 
-    console.log(
-      'Recording complete for instrument:',
-      key,
-      'blob size:',
-      blob.size,
-    );
+    console.log('Recording complete for instrument:', key, 'blob size:', blob.size);
 
-    setVideoFiles((prev) => ({
-      ...prev,
-      [key]: blob,
-    }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setVideoFiles((prev) => ({ ...prev, [key]: blob }));
+    clipBlobCache.current[key] = blob;
+
+    // Persist clip to server for restore on next project open
+    if (currentProject) {
+      uploadClip(currentProject.id, key, blob)
+        .then(() => setSavedClipKeys((prev) => new Set([...prev, key])))
+        .catch((err) => console.warn(`[clips] Failed to upload clip for ${key}:`, err));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject?.id]);
 
   // Add handleVideoReady function
   const handleVideoReady = useCallback((videoUrl, instrument) => {
-    instrument.isDrum ? (instrument.name = instrument.group) : instrument.name;
-    const instrumentKey = instrument.isDrum
-      ? `drum_${instrument.name}`
-      : normalizeInstrumentName(instrument.name);
+    if (instrument.isDrum) instrument.name = instrument.group;
+    const instrumentKey = toInstrumentKey(instrument);
 
     setInstrumentVideos((prev) => ({
       ...prev,
@@ -263,8 +467,6 @@ function MainApp({ onChangeProject, onLogout }) {
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const { currentProject } = useProject();
 
   // Add click handler to initialize audio context
   useEffect(() => {
@@ -280,18 +482,6 @@ function MainApp({ onChangeProject, onLogout }) {
 
   return (
     <div className='app-container'>
-      {/* Project context bar */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', background: '#0f3460', color: '#fff', fontSize: '0.875rem' }}>
-        <span>📁 Project: <strong>{currentProject?.name}</strong></span>
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button onClick={onChangeProject} style={{ background: 'none', border: '1px solid rgba(255,255,255,0.5)', color: '#fff', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}>
-            Switch Project
-          </button>
-          <button onClick={onLogout} style={{ background: 'none', border: '1px solid rgba(255,255,255,0.5)', color: '#fff', padding: '3px 10px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}>
-            Sign Out
-          </button>
-        </div>
-      </div>
       <AudioContextInitializer
         audioContextStarted={audioContextStarted}
         onInitialize={startAudioContext}
@@ -379,5 +569,10 @@ function MainApp({ onChangeProject, onLogout }) {
     </div>
   );
 }
+
+MainApp.propTypes = {
+  onChangeProject: PropTypes.func.isRequired,
+  onLogout: PropTypes.func.isRequired,
+};
 
 export default App;
