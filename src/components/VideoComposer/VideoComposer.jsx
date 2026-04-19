@@ -1,6 +1,7 @@
 /* eslint-disable react/prop-types */
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { startCompositionJob, pollCompositionJob } from '../../../services/videoServices.js';
+import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 
 const VideoComposer = ({
   videoFiles,
@@ -17,6 +18,8 @@ const VideoComposer = ({
   const [renderProgress, setRenderProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
+  const [composedBlob, setComposedBlob] = useState(null);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [error, setError] = useState(null);
   const timerRef = useRef(null);
 
@@ -178,6 +181,7 @@ const VideoComposer = ({
         setRenderProgress(pct);
       });
 
+      setComposedBlob(blob);
       const url = URL.createObjectURL(blob);
       setComposedVideoUrl(url);
     } catch (err) {
@@ -201,6 +205,13 @@ const VideoComposer = ({
 
   return (
     <div className='video-composer'>
+      {showShareModal && composedBlob && (
+        <ShareCompositionModal
+          blob={composedBlob}
+          onClose={() => setShowShareModal(false)}
+          onShared={() => setShowShareModal(false)}
+        />
+      )}
       <div className='flex gap-4 mb-4'>
         <button
           onClick={() => startComposition(true)}
@@ -291,13 +302,21 @@ const VideoComposer = ({
       {composedVideoUrl && (
         <div className='mt-4'>
           <video src={composedVideoUrl} controls className='w-full max-w-4xl' />
-          <a
-            href={composedVideoUrl}
-            download='composition.mp4'
-            className='inline-block mt-2 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 font-medium'
-          >
-            ⬇ Download Composition
-          </a>
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+            <a
+              href={composedVideoUrl}
+              download='composition.mp4'
+              style={{ padding: '0.5rem 1.1rem', background: '#16a34a', color: '#fff', borderRadius: '8px', fontWeight: 600, fontSize: '0.875rem', textDecoration: 'none' }}
+            >
+              ⬇ Download
+            </a>
+            <button
+              onClick={() => setShowShareModal(true)}
+              style={{ padding: '0.5rem 1.1rem', background: '#0f3460', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 600, fontSize: '0.875rem', cursor: 'pointer' }}
+            >
+              📤 Share to Feed
+            </button>
+          </div>
         </div>
       )}
     </div>

@@ -65,6 +65,15 @@ const useRecordingState = (currentVideo) => {
     };
   }, [cleanupMediaStream]);
 
+  // Sync when the parent supplies a new currentVideo (e.g. clip restored from server).
+  useEffect(() => {
+    if (!currentVideo) return;
+    setRecordingState((prev) => {
+      if (prev.autotunedURL === currentVideo) return prev; // already set
+      return { ...prev, autotunedURL: currentVideo, hasVideo: true };
+    });
+  }, [currentVideo]);
+
   return {
     videoRef,
     mediaStreamRef,

@@ -102,4 +102,28 @@ export async function submitComposeJob(formData) {
   return res.json();
 }
 
+/**
+ * Upload a clip for a specific instrument in a project.
+ * Returns { ok, instrumentKey } or throws on error.
+ */
+export async function uploadClip(projectId, instrumentKey, blob) {
+  const token = _getToken();
+  const formData = new FormData();
+  formData.append('video', blob, `${instrumentKey}.mp4`);
+  formData.append('instrumentKey', instrumentKey);
+
+  const res = await fetch(`${API_BASE}/projects/${projectId}/clips`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+
+  if (!res.ok) {
+    let msg = `Clip upload error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
 export { API_BASE };
