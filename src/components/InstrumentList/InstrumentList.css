@@ -1,61 +1,146 @@
 .instrument-list-container {
-  width: 70vw;
-  padding: 0 1rem .4rem 1rem;
-  background-color: #1976d2;
-  border-radius: 0.5rem;
-  margin: 0.5rem 0;
+  width: 100%;
+  max-width: 1000px;
+  background: white;
+  border-radius: 16px;
+  margin: 0;
   overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+  transition: all 0.3s ease;
+}
+
+.instrument-list-container:hover {
+  box-shadow: 0 15px 50px rgba(0, 0, 0, 0.12);
 }
 
 .instrument-list-header {
-  padding: 15px;
+  padding: 1.25rem 1.5rem;
   cursor: pointer;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
   color: white;
+  transition: all 0.2s ease;
+}
+
+.instrument-list-header:hover {
+  background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
 }
 
 .instrument-list-header h3 {
   margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
 }
 
 .instrument-list-content {
   max-height: 0;
   overflow: hidden;
-  transition: max-height 0.3s ease-out;
-  padding: 0 15px;
+  transition:
+    max-height 0.3s ease-out,
+    padding 0.3s ease-out;
+  padding: 0 1.5rem;
 }
 
 .instrument-list-content.expanded {
-  max-height: 500px;
-  padding: 15px;
+  max-height: 2000px;
+  padding: 1.5rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3b82f6 #e5e7eb;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar {
+  width: 8px;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar-track {
+  background: #f3f4f6;
+  border-radius: 4px;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+  border-radius: 4px;
+  border: 2px solid #f3f4f6;
+}
+
+.instrument-list-content.expanded::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
 }
 
 .instrument-list {
   list-style: none;
   padding: 0;
   margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1rem;
 }
 
 .instrument-list-item {
-  margin: 10px 0;
-  padding: 8px;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: background-color 0.2s;
+  padding: 1rem;
+  cursor: default;
+  border-radius: 12px;
+  transition: all 0.2s ease;
+  background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+  border: 1.5px solid #e5e7eb;
+  font-weight: 500;
+  color: #1a1a1a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .instrument-list-item:hover {
-  background-color: #f0f0f0;
+  background: linear-gradient(135deg, #e5e7eb 0%, #d1d5db 100%);
+  border-color: #2563eb;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
+}
+
+.instrument-name-line {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.instrument-channel-line {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #6b7280;
+  font-family: 'Courier New', monospace;
+}
+
+.instrument-list-item:hover {
+  background: linear-gradient(135deg, #e5e7eb 0%, #d1d5db 100%);
+  border-color: #2563eb;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.1);
 }
 
 .arrow {
   transform: rotate(0deg);
   transition: transform 0.3s ease;
   color: white;
+  font-size: 1.25rem;
 }
 
 .arrow.expanded {
   transform: rotate(180deg);
+}
+
+@media (max-width: 768px) {
+  .instrument-list-header {
+    padding: 1rem;
+  }
+
+  .instrument-list {
+    grid-template-columns: 1fr;
+  }
+
+  .instrument-list-content.expanded {
+    padding: 1rem;
+  }
 }

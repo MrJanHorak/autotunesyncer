@@ -71,6 +71,7 @@ from moviepy import (
 )
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 
 import weakref
 
@@ -103,7 +104,7 @@ from processing_utils import encoder_queue, GPUManager
 # Import GPU acceleration functions
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
-from ffmpeg_gpu import ffmpeg_gpu_encode
+# Removed unresolved import; GPU encode is imported lazily from utils.ffmpeg_gpu where used
 
 # Import CUDA compositing if available
 try:
@@ -121,6 +122,7 @@ except ImportError:
 
 from video_utils import run_ffmpeg_command, encode_video, validate_video
 from path_registry import PathRegistry
+from optimized_autotune_cache import OptimizedAutotuneCache as _RealOptimizedAutotuneCache
 
 import mmap
 # from contextlib import ExitStack
@@ -169,37 +171,8 @@ def get_system_metrics():
     except ImportError:
         return {'cpu_percent': 0, 'memory_percent': 0, 'disk_percent': 0}
 
-class OptimizedAutotuneCache:
-    """
-    Optimized cache for autotune video processing
-    Provides fast lookup and management of autotuned video segments
-    """
-    
-    def __init__(self, max_workers=4):
-        self.max_workers = max_workers
-        self.cache = {}
-        self.lock = threading.Lock()
-        logging.info(f"OptimizedAutotuneCache initialized with {max_workers} workers")
-    
-    def get(self, key):
-        """Get cached item"""
-        with self.lock:
-            return self.cache.get(key)
-    
-    def set(self, key, value):
-        """Set cached item"""
-        with self.lock:
-            self.cache[key] = value
-    
-    def clear(self):
-        """Clear cache"""
-        with self.lock:
-            self.cache.clear()
-    
-    def size(self):
-        """Get cache size"""
-        with self.lock:
-            return len(self.cache)
+# Use the real OptimizedAutotuneCache from optimized_autotune_cache.py
+OptimizedAutotuneCache = _RealOptimizedAutotuneCache
 
 class GPUStreamManager:
     def __init__(self, num_streams=4):
@@ -436,7 +409,7 @@ class ProgressTracker:
 
 class VideoComposerConfig:
     def __init__(self):
-        self.CHUNK_DURATION = 4
+        self.CHUNK_DURATION = 16
         self.OVERLAP_DURATION = 1
         self.CROSSFADE_DURATION = 0.5
         self.MIN_VIDEO_DURATION = 1.0
@@ -452,21 +425,35 @@ class VideoComposer:
     FRAME_DURATION = 1.0 / FRAME_RATE
     MIN_NOTE_DURATION = max(0.05, FRAME_DURATION * 1.5)  # ~50ms
     TIME_QUANTUM = 0.01  # 10ms grid to reduce floating point noise
-    CHUNK_DURATION = 4
+    CHUNK_DURATION = 16
     OVERLAP_DURATION = 1
     CROSSFADE_DURATION = 0.5
     MIN_VIDEO_DURATION = 1.0
     DURATION = 1.0
     VOLUME_MULTIPLIERS = {
-        'drums': 0.2,        'instruments': 1.5
+        'drums': 0.2, 'instruments': 1.5
     }
 
-    def __init__(self, processed_videos_dir, midi_data, output_path):
+    def __init__(self, processed_videos_dir, midi_data, output_path, preview_mode=False):
         """Initialize VideoComposer with proper path handling"""
         try:
             logging.info("=== VideoComposer Initialization ===")
+            self.preview_mode = preview_mode
+            
+            # Initialize render configuration for preview vs production
+            self.render_config = self._get_render_config()
+            if self.preview_mode:
+                logging.info(f"🚀 PREVIEW MODE ENABLED: {self.render_config}")
+
             logging.info(f"Received MIDI data structure: {list(midi_data.keys())}")
             logging.info(f"Grid arrangement from MIDI: {midi_data.get('gridArrangement')}")
+
+            # Extract track volumes from midi_data
+            self.track_volumes = midi_data.get('trackVolumes', {})
+            logging.info(f"Initialized VideoComposer with track volumes: {self.track_volumes}")
+
+            # Explicit session-specific video paths (prevents stale uploads from past sessions)
+            self.explicit_video_files = midi_data.get('videoFiles', {})
 
             self.processed_videos_dir = Path(processed_videos_dir)
             
@@ -517,7 +504,6 @@ class VideoComposer:
             self.chunk_cache = {}
             self.chunk_cache_locks = {i: threading.Lock() for i in range(1000)} # Pre-allocate locks
             self.chunk_cache = LRUCache(128)  # Example: Cache up to 128 chunks
-            # self.chunk_cache = {}  # This would overwrite the LRUCache
             self.max_cached_chunks = 4
             self.metrics_log = []
             self.encoder_params = {
@@ -530,16 +516,41 @@ class VideoComposer:
                     "-b:v", "5M",
                     "-maxrate", "10M",
                     "-bufsize", "10M",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-ar", "44100",
+                    "-ac", "2",
+                    "-movflags", "+faststart",
+                    "-threads", "4",
                     "-profile:v", "high"
                 ]
             }
             self.chunk_size = max(1, min(16, os.cpu_count()))  # Smaller chunk size
-            self.max_workers = min(2, os.cpu_count())  # Limit workers            self.use_gpu = True
+            self.max_workers = max(2, min(os.cpu_count() or 2, 4))  # Up to 4 parallel workers
+            self.use_gpu = True
             self.lock = RLock()  # Add class-level lock
             self.clip_pool = ClipPool(max_size=8)  # Add clip pool
             self.chunk_cache_lock = RLock()  # Add dedicated cache lock
             self.max_cache_size = 1024 * 1024 * 100
             self.active_readers = set()  # Add reader tracking
+            # Onset alignment cache and toggle
+            self.onset_trim_cache = {}
+            self.trim_leading_silence = os.environ.get('ATS_TRIM_LEADING_SILENCE', '1') == '1'
+            # Onset offset cache for non-destructive alignment — protected by per-path locks
+            self.onset_offset_cache = {}
+            self._onset_path_locks: dict = defaultdict(threading.Lock)  # one Lock per clip path
+            # Media duration cache — avoids duplicate ffprobe calls from parallel stem threads
+            self._duration_cache: dict = {}
+            self._duration_cache_lock = threading.RLock()
+            # Global FFmpeg concurrency cap — shared by stem sub-batches AND video chunks.
+            # Caps simultaneous filter-complex FFmpeg processes to half the CPU count so
+            # nested parallelism (outer stem workers + inner sub-batch workers) never
+            # over-subscribes the machine.
+            _cpu = os.cpu_count() or 4
+            self._ffmpeg_semaphore = threading.Semaphore(max(4, _cpu // 2))
+            self.max_concurrent_streams = int(os.environ.get('ATS_MAX_CONCURRENT_STREAMS', '16'))
+            self.ffmpeg_hwaccel = self._detect_ffmpeg_hwaccel()
+            logging.info(f"Selected FFmpeg hwaccel: {self.ffmpeg_hwaccel or 'none'}")
             # Initialize path registry - use singleton instance
             self.path_registry = PathRegistry.get_instance()
             
@@ -548,8 +559,9 @@ class VideoComposer:
             self.video_cache = LRUCache(maxsize=64)  # Increase cache size
             self.audio_cache = LRUCache(maxsize=64) 
             self.autotune_cache = LRUCache(maxsize=64) # Keep for backwards compatibility
-            # Initialize optimized autotune cache system
-            self.optimized_cache = OptimizedAutotuneCache(max_workers=self.max_workers)
+            # Initialize optimized autotune cache system — use more workers for cold-start runs
+            _preprocess_workers = min(os.cpu_count() or 4, 8)
+            self.optimized_cache = OptimizedAutotuneCache(max_workers=_preprocess_workers)
             self._tuned_videos_cache = {}  # Cache for preprocessed tuned videos
             # Log track information
             logging.info(f"Regular tracks: {len(self.tracks)}")
@@ -581,7 +593,401 @@ class VideoComposer:
             logging.error(f"VideoComposer init error: {str(e)}")
             raise
 
-        
+    def _get_render_config(self):
+        """
+        Clean separation of rendering configurations for Preview vs Production.
+        Returns a dictionary of encoding settings.
+        """
+        if self.preview_mode:
+            return {
+                'resolution': '640x360',
+                'preset': 'ultrafast',  # CPU: ultrafast, GPU: p1/p2
+                'crf': '28',            # Lower quality
+                'audio_bitrate': '128k',
+                'video_bitrate': '1M',
+                'scale_filter': 'scale=640:360'
+            }
+        else:
+            return {
+                'resolution': '1920x1080',
+                'preset': 'fast',       # CPU: fast, GPU: p4
+                'crf': '23',            # Standard quality
+                'audio_bitrate': '320k',
+                'video_bitrate': '8M',
+                'scale_filter': 'scale=1920:1080'
+            }
+
+    def _get_encoding_settings(self):
+        """Get FFmpeg encoding arguments based on configuration and hardware"""
+        config = self.render_config
+
+        if self.ffmpeg_hwaccel == 'cuda':
+            return [
+                '-c:v', 'h264_nvenc',
+                '-preset', 'fast' if not self.preview_mode else 'p1',  # p1 for preview (fastest), fast for production
+                '-rc', 'vbr',  # Variable bitrate mode
+                '-cq', config['crf'],  # Use config CRF
+                '-b:v', config['video_bitrate'],  # Use config bitrate
+            ]
+        if self.ffmpeg_hwaccel == 'videotoolbox':
+            return [
+                '-c:v', 'h264_videotoolbox',
+                '-b:v', config['video_bitrate'],
+            ]
+        else:
+            # CPU Settings
+            return [
+                '-c:v', 'libx264',
+                '-preset', config['preset'],
+                '-crf', config['crf'],
+            ]
+
+    def _detect_ffmpeg_hwaccel(self):
+        """Probe ffmpeg hw acceleration methods with safe fallbacks."""
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-hwaccels'],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            output = (result.stdout or '') + '\n' + (result.stderr or '')
+            lower = output.lower()
+
+            if 'cuda' in lower:
+                return 'cuda'
+            if 'videotoolbox' in lower:
+                return 'videotoolbox'
+            return None
+        except Exception as e:
+            logging.warning(f"Failed to detect FFmpeg hwaccels: {e}")
+            return None
+
+    def _get_ffmpeg_decode_args(self):
+        """Return decode args for ffmpeg -i based on selected hwaccel."""
+        if self.ffmpeg_hwaccel == 'cuda':
+            return ['-hwaccel', 'cuda']
+        if self.ffmpeg_hwaccel == 'videotoolbox':
+            return ['-hwaccel', 'videotoolbox']
+        return []
+
+    def _resolve_segment_volume(self, segment):
+        """
+        Resolve the volume (in dB) for a given segment using trackVolumes.
+        Supports keys by track_id, normalized instrument name, and drum name.
+        """
+        try:
+            volumes = self.track_volumes or {}
+
+            # Try direct by track_id
+            track_id = str(segment.get('track_id', '')).lower()
+            if track_id:
+                val = volumes.get(track_id)
+                if isinstance(val, (int, float)):
+                    logging.info(f"Resolved volume via track_id '{track_id}': {val} dB")
+                    return float(val)
+
+            seg_type = segment.get('type')
+            # Drums: use 'drum_<normalized>' key
+            if seg_type == 'drum':
+                drum_name = segment.get('drum_name') or segment.get('track_name') or ''
+                drum_key = f"drum_{str(drum_name).lower().replace(' ', '_')}"
+                val = volumes.get(drum_key)
+                if isinstance(val, (int, float)):
+                    logging.info(f"Resolved volume via drum key '{drum_key}': {val} dB")
+                    return float(val)
+
+            # Instruments: normalized instrument name
+            track_name = segment.get('track_name') or segment.get('instrument') or ''
+            if isinstance(track_name, str) and track_name:
+                norm_name = normalize_instrument_name(track_name)
+                val = volumes.get(norm_name)
+                if isinstance(val, (int, float)):
+                    logging.info(f"Resolved volume via instrument '{norm_name}': {val} dB")
+                    return float(val)
+
+            # Fallback: 0 dB
+            return 0.0
+        except Exception as e:
+            logging.warning(f"Volume resolve error: {e}; defaulting to 0 dB")
+            return 0.0
+
+    def _velocity_to_db(self, velocity, min_db=-18.0):
+        """
+        Convert MIDI velocity (1-127) to dB using an exponential mapping.
+        127 -> 0 dB, 1 -> min_db.
+        min_db=-18 maps the typical MIDI dynamic range naturally:
+          v=1  -> -18 dB (pianissimo), v=64 -> -13.5 dB (mezzo-forte),
+          v=100 -> -6.9 dB (forte),    v=127 -> 0 dB (fortissimo).
+        The old min_db=-40 caused v=64 to be attenuated by 30 dB, which
+        drove the mix to -47 LUFS and required a damaging +31 dB loudnorm boost.
+        """
+        try:
+            if velocity is None:
+                return 0.0
+            v = max(1.0, min(127.0, float(velocity)))
+            norm = (v - 1.0) / 126.0
+            return float(min_db + (0.0 - min_db) * (norm ** 2.0))
+        except Exception:
+            return 0.0
+
+    def _detect_leading_silence(self, media_path, threshold_db=-35, min_duration=0.08):
+        """
+        Detect leading silence at the start of the audio stream using ffmpeg's silencedetect.
+        Returns trim_start seconds or 0.0 if no leading silence.
+        """
+        try:
+            if not media_path or not os.path.exists(media_path):
+                return 0.0
+
+            cmd = [
+                'ffmpeg', '-hide_banner', '-i', str(media_path),
+                '-af', f'silencedetect=noise={threshold_db}dB:duration={min_duration}',
+                '-f', 'null', '-'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                return 0.0
+
+            silence_start = None
+            for line in (result.stderr or '').splitlines():
+                if 'silence_start:' in line and silence_start is None:
+                    try:
+                        silence_start = float(line.split('silence_start:')[1].strip())
+                    except:
+                        silence_start = None
+                if 'silence_end:' in line and silence_start is not None:
+                    try:
+                        silence_end = float(line.split('silence_end:')[1].split('|')[0].strip())
+                        if silence_start is not None and silence_start <= 0.2:
+                            return max(0.0, silence_end)
+                        else:
+                            return 0.0
+                    except:
+                        return 0.0
+            return 0.0
+        except Exception as e:
+            logging.debug(f"Silence detect failed: {e}")
+            return 0.0
+
+    def _auto_crop_silence(self, media_path, threshold_db=-35, min_duration=0.08):
+        """
+        Trim leading silence from the media using stream copy for speed.
+        Returns path to trimmed file or original path on failure.
+        """
+        try:
+            trim_start = self._detect_leading_silence(media_path, threshold_db, min_duration)
+            if trim_start <= 0.0:
+                return str(media_path)
+
+            media_path = Path(media_path)
+            cropped_path = media_path.parent / f"cropped_{media_path.name}"
+            crop_cmd = [
+                'ffmpeg', '-y',
+                '-ss', f'{trim_start}',
+                '-i', str(media_path),
+                '-c', 'copy',
+                str(cropped_path)
+            ]
+            crop_result = subprocess.run(crop_cmd, capture_output=True, text=True)
+            if crop_result.returncode == 0 and cropped_path.exists():
+                logging.info(f"Trimmed leading silence ({trim_start:.3f}s) for {media_path.name}")
+                return str(cropped_path)
+            return str(media_path)
+        except Exception as e:
+            logging.debug(f"Auto-crop failed: {e}")
+            return str(media_path)
+
+    def _get_onset_aligned_video(self, video_path):
+        """
+        Return onset-aligned version of video by trimming initial silence; cached per path.
+        Controlled by self.trim_leading_silence.
+        """
+        try:
+            if not self.trim_leading_silence:
+                return video_path
+            if not video_path or not os.path.exists(video_path):
+                return video_path
+            if video_path in self.onset_trim_cache and os.path.exists(self.onset_trim_cache[video_path]):
+                return self.onset_trim_cache[video_path]
+
+            aligned = self._auto_crop_silence(video_path)
+            self.onset_trim_cache[video_path] = aligned
+            return aligned
+        except Exception as e:
+            logging.debug(f"Onset align error: {e}")
+            return video_path
+
+    def _extract_temp_audio(self, video_path):
+        """Extract mono 44.1kHz WAV to temp for onset analysis."""
+        try:
+            if not video_path or not os.path.exists(video_path):
+                return None
+            if not hasattr(self, 'temp_dir') or self.temp_dir is None:
+                import tempfile
+                self.temp_dir = Path(tempfile.mkdtemp(prefix='composer_tmp_'))
+            # Use MD5 of the full path so concurrent threads never share a temp file,
+            # even when two clips happen to have the same basename.
+            import hashlib
+            path_hash = hashlib.md5(str(video_path).encode()).hexdigest()[:12]
+            out_wav = Path(self.temp_dir) / f"onset_{path_hash}.wav"
+            cmd = [
+                'ffmpeg', '-hide_banner', '-y',
+                '-i', str(video_path),
+                '-vn', '-ac', '1', '-ar', '44100',
+                '-acodec', 'pcm_s16le',
+                str(out_wav)
+            ]
+            subprocess.run(cmd, capture_output=True)
+            return str(out_wav) if out_wav.exists() else None
+        except Exception:
+            return None
+
+    def _get_onset_offset(self, video_path):
+        """
+        Detect first audible onset time (seconds) using librosa; fallback to RMS.
+        Cached per video_path with per-path locking so parallel stem threads never
+        race to compute the same clip's onset or write the same temp WAV.
+        """
+        try:
+            if not video_path or not os.path.exists(video_path):
+                return 0.0
+            # Fast path: already cached (pure read, GIL-safe for dict lookup)
+            if video_path in self.onset_offset_cache:
+                return self.onset_offset_cache[video_path]
+
+            # Per-path lock: only one thread runs onset detection per clip path.
+            # defaultdict(Lock) creation is GIL-protected under CPython.
+            with self._onset_path_locks[video_path]:
+                # Re-check: another thread may have populated while we waited.
+                if video_path in self.onset_offset_cache:
+                    return self.onset_offset_cache[video_path]
+
+                wav_path = self._extract_temp_audio(video_path)
+                if not wav_path:
+                    self.onset_offset_cache[video_path] = 0.0
+                    return 0.0
+
+                import librosa, numpy as np
+                y, sr = librosa.load(wav_path, sr=44100, mono=True)
+
+                onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+                onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, units='time')
+                if onsets is not None and len(onsets) > 0:
+                    offset = float(onsets[0])
+                    if offset < 0.02 and len(onsets) > 1:
+                        offset = float(onsets[1])
+                    offset = max(0.0, min(offset, 5.0))
+                    self.onset_offset_cache[video_path] = offset
+                    logging.info(f"Detected onset offset {offset:.3f}s for {Path(video_path).name}")
+                    return offset
+
+                rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+                times = librosa.times_like(rms, sr=sr, hop_length=512)
+                thresh = max(0.01, float(np.median(rms) * 3.0))
+                sustain_frames = max(1, int((0.05 * sr) / 512))
+                for i in range(len(rms) - sustain_frames):
+                    if np.all(rms[i:i + sustain_frames] > thresh):
+                        offset = float(times[i])
+                        offset = max(0.0, min(offset, 5.0))
+                        self.onset_offset_cache[video_path] = offset
+                        logging.info(f"Fallback onset offset {offset:.3f}s for {Path(video_path).name}")
+                        return offset
+
+                self.onset_offset_cache[video_path] = 0.0
+                return 0.0
+
+        except Exception as e:
+            logging.debug(f"Onset offset detect error: {e}")
+            try:
+                if video_path:
+                    self.onset_offset_cache[video_path] = 0.0
+            except Exception:
+                pass
+            return 0.0
+
+    def _get_media_duration(self, media_path):
+        """Return media duration in seconds using ffprobe, or 0.0 on failure.
+        Results are cached so parallel stem threads don't duplicate ffprobe calls."""
+        try:
+            if not media_path or not os.path.exists(media_path):
+                return 0.0
+            with self._duration_cache_lock:
+                if media_path in self._duration_cache:
+                    return self._duration_cache[media_path]
+            cmd = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                str(media_path)
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                return 0.0
+            import json as _json
+            data = _json.loads(r.stdout or '{}')
+            # Prefer audio stream duration if present, else format duration
+            duration = 0.0
+            streams = data.get('streams', [])
+            for s in streams:
+                if s.get('codec_type') == 'audio' and s.get('duration'):
+                    try:
+                        duration = float(s['duration'])
+                        break
+                    except:
+                        pass
+            if duration <= 0.0:
+                fmt = data.get('format', {})
+                try:
+                    duration = float(fmt.get('duration', 0.0))
+                except:
+                    duration = 0.0
+            result = max(0.0, duration)
+            with self._duration_cache_lock:
+                self._duration_cache[media_path] = result
+            return result
+        except Exception:
+            return 0.0
+
+    def _normalize_name_token(self, name: str) -> str:
+        """Normalize instrument names for robust filename matching."""
+        try:
+            import re
+            s = (name or '').lower()
+            s = s.replace(' ', '_')
+            s = re.sub(r'[^a-z0-9_]+', '_', s)
+            s = re.sub(r'_+', '_', s).strip('_')
+            return s
+        except Exception:
+            return (name or '').lower()
+
+    def _find_instrument_video_file(self, instrument_name: str) -> str | None:
+        """
+        Find a preprocessed instrument video by matching normalized tokens against files in uploads.
+        Prefers files starting with 'processed_'.
+        """
+        try:
+            norm = self._normalize_name_token(instrument_name)
+            candidates = list(self.uploads_dir.glob('processed_*.mp4')) or list(self.uploads_dir.glob('*.mp4'))
+            # Prefer processed files
+            for f in candidates:
+                stem = self._normalize_name_token(f.stem)
+                if norm in stem or stem.endswith(norm):
+                    return str(f)
+            # Fallback: partial token match
+            tokens = [t for t in norm.split('_') if t]
+            for f in candidates:
+                stem = self._normalize_name_token(f.stem)
+                if any(tok in stem for tok in tokens):
+                    return str(f)
+            avail = [p.name for p in candidates]
+            logging.warning(f"❌ No instrument file match for '{instrument_name}' (norm='{norm}'). Samples: {avail[:8]}...")
+            return None
+        except Exception as e:
+            logging.warning(f"Error finding instrument file for '{instrument_name}': {e}")
+            return None
 
     @staticmethod
     def normalize_midi_timing(midi_data):
@@ -600,34 +1006,79 @@ class VideoComposer:
         return midi_data
     
     def _register_video_paths(self):
-        """Register paths for all videos in uploads directory"""
-        # Get singleton instance
+        """Register paths for all videos.
+
+        When the caller supplies explicit session-specific video paths (via
+        midi_data['videoFiles']), those are used exclusively — the shared
+        uploads directory is NOT scanned.  This prevents videos from past
+        sessions from contaminating the current composition.
+
+        Falls back to a directory scan only when no explicit paths are provided
+        (e.g. direct VideoComposer usage without the Node.js wrapper).
+        """
         registry = PathRegistry.get_instance()
-        
-        # Set registry file if needed
         registry_file = self.processed_videos_dir / "path_registry.json"
-        
-        # Register from uploads directory where videos are actually stored
-        logging.info(f"Scanning uploads directory for videos: {self.uploads_dir}")
-        
-        # Use the new specialized method for uploads directory
-        success = registry.register_from_uploads_directory(self.uploads_dir)
-        
-        if not success:
-            logging.warning("No videos found in uploads directory, trying processed videos directory as fallback")
-            # Also register from processed videos directory (fallback)
-            registry.register_from_directory(self.processed_videos_dir)
-        
-        # Save registry for debugging
+
+        if self.explicit_video_files:
+            logging.info(
+                f"Using {len(self.explicit_video_files)} explicit session video paths "
+                "(shared uploads scan skipped to prevent stale-video contamination)"
+            )
+            self._register_explicit_video_files(registry)
+        else:
+            logging.info(f"Scanning uploads directory for videos: {self.uploads_dir}")
+            success = registry.register_from_uploads_directory(self.uploads_dir)
+            if not success:
+                logging.warning(
+                    "No videos found in uploads directory, trying processed videos directory as fallback"
+                )
+                registry.register_from_directory(self.processed_videos_dir)
+
         registry.save_registry(str(registry_file))
-        
-        # Debug dump to help troubleshoot
         registry.debug_dump()
-        
-        # Log registration stats
         stats = registry.get_stats()
         logging.info(f"Path registry stats: {stats}")
         logging.info(f"Total videos registered: {stats['total_paths']}")
+
+    def _register_explicit_video_files(self, registry):
+        """Register session-specific video paths into PathRegistry.
+
+        Registers each instrument for every unique MIDI note present in the
+        composition so note-based lookups always resolve to the correct file.
+        Uses the isDrum flag from the payload rather than name heuristics.
+        """
+        count = 0
+        for instrument_name, video_info in self.explicit_video_files.items():
+            if isinstance(video_info, dict):
+                path = video_info.get('path', '')
+                is_drum = video_info.get('isDrum', False)
+                midi_notes = video_info.get('notes', [])
+            else:
+                path = str(video_info)
+                is_drum = instrument_name.lower().startswith('drum_')
+                midi_notes = []
+
+            if not path or not os.path.exists(path):
+                logging.warning(f"Explicit video not found, skipping: {instrument_name} → {path}")
+                continue
+
+            norm_name = instrument_name.lower().replace(' ', '_').replace('-', '_')
+
+            if is_drum:
+                # Strip leading 'drum_' prefix that the grid uses but PathRegistry doesn't store
+                drum_name = norm_name[5:] if norm_name.startswith('drum_') else norm_name
+                registry.register_drum(drum_name, path, validate=False)
+            else:
+                # Register note "60" as a guaranteed default fallback
+                registry.register_instrument(norm_name, "60", path, validate=False)
+                # Also register for every unique MIDI note actually used
+                for midi_note in set(int(n) for n in midi_notes if isinstance(n, (int, float))):
+                    registry.register_instrument(norm_name, str(midi_note), path, validate=False)
+
+            logging.info(f"✅ Pinned explicit video: {instrument_name} → {os.path.basename(path)}")
+            count += 1
+
+        logging.info(f"Registered {count} explicit session videos (stale uploads scan bypassed)")
 
     def encode_video(self, cmd):
         logging.info(f"Encoding video with command: {' '.join(cmd)}")
@@ -870,23 +1321,23 @@ class VideoComposer:
             end = min(end, chunk_end)
 
             # Quantize
-            start = round(start / TIME_QUANTUM) * TIME_QUANTUM
-            end = round(end / TIME_QUANTUM) * TIME_QUANTUM
+            start = round(start / VideoComposer.TIME_QUANTUM) * VideoComposer.TIME_QUANTUM
+            end = round(end / VideoComposer.TIME_QUANTUM) * VideoComposer.TIME_QUANTUM
 
             # Enforce ordering
             if end <= start:
-                end = start + MIN_NOTE_DURATION
+                end = start + VideoComposer.MIN_NOTE_DURATION
 
             # Clamp again to chunk_end
             if end > chunk_end:
                 end = chunk_end
 
             # Enforce minimum duration
-            if (end - start) < MIN_NOTE_DURATION:
-                end = min(start + MIN_NOTE_DURATION, chunk_end)
+            if (end - start) < VideoComposer.MIN_NOTE_DURATION:
+                end = min(start + VideoComposer.MIN_NOTE_DURATION, chunk_end)
 
             duration = end - start
-            if duration < MIN_NOTE_DURATION * 0.5:
+            if duration < VideoComposer.MIN_NOTE_DURATION * 0.5:
                 # Still too tiny after attempts → skip to avoid ffmpeg trim errors
                 continue
 
@@ -1482,6 +1933,30 @@ class VideoComposer:
     #         logging.error(f"Note trigger exception {track_name}: {e}")
     #         return self._create_simple_loop(video_path, self.temp_dir / f"{track_name}_{unique_id}.mp4", chunk_duration)
 
+    @staticmethod
+    def _build_atempo_chain(rate: float) -> str:
+        """
+        Build an FFmpeg atempo filter chain for a given playback rate.
+
+        FFmpeg's atempo filter is restricted to [0.5, 100] per stage.
+        For values outside that range we chain multiple stages whose
+        product equals the target rate.
+
+        For best quality, each stage is kept inside [0.5, 2.0].
+        """
+        STAGE_MIN, STAGE_MAX = 0.5, 2.0
+        if rate <= 0:
+            rate = 1.0
+        filters = []
+        while rate < STAGE_MIN:
+            filters.append(f"atempo={STAGE_MIN:.6f}")
+            rate /= STAGE_MIN  # remaining factor
+        while rate > STAGE_MAX:
+            filters.append(f"atempo={STAGE_MAX:.6f}")
+            rate /= STAGE_MAX
+        filters.append(f"atempo={rate:.6f}")
+        return ",".join(filters)
+
     def _create_note_triggered_video_sequence_fixed(
         self,
         video_path,
@@ -1489,7 +1964,9 @@ class VideoComposer:
         total_duration,
         track_name,
         unique_id,
-        chunk_start_time=0.0
+        chunk_start_time=0.0,
+        onset_offset=0.0,
+        note_audio_map=None,
     ):
         """
         WORKING unified note-triggered clip builder.
@@ -1501,6 +1978,9 @@ class VideoComposer:
             track_name: for filename/logging
             unique_id: short id to avoid collisions
             chunk_start_time: absolute start of this chunk (so we can convert absolute note times)
+            note_audio_map: optional Dict[int, str] mapping midi_note → path of pre-tuned video.
+                When provided the pre-tuned file's audio stream is used for that note (higher
+                quality than the asetrate fallback).
 
         Returns:
             str path or None
@@ -1557,6 +2037,18 @@ class VideoComposer:
 
             valid.sort(key=lambda x: x[0])
 
+            # Build the mapping from midi_note → FFmpeg input index for pre-tuned audio.
+            # Inputs 0, 1, 2 are: source video, black frame, silent audio.
+            # Pre-tuned video files (audio only) start at index 3.
+            note_input_index: dict = {}  # midi_note -> ffmpeg input index
+            extra_audio_inputs: list = []  # paths appended as additional -i args
+            BASE_EXTRA_IDX = 3
+            if note_audio_map:
+                unique_cached = sorted({mn for (_, _, mn) in valid if mn in note_audio_map})
+                for mn in unique_cached:
+                    note_input_index[mn] = BASE_EXTRA_IDX + len(extra_audio_inputs)
+                    extra_audio_inputs.append(note_audio_map[mn])
+
             # Build filter parts
             filter_parts = [
                 # Base black video & silent audio come from inputs 1 & 2
@@ -1567,19 +2059,42 @@ class VideoComposer:
             video_chain = "[base_v]"
             audio_streams = ["[base_a]"]
 
+            # Base onset offset
+            onset_base = 0.0 if onset_offset is None else max(0.0, min(float(onset_offset), 5.0))
+            source_duration = self._get_media_duration(video_path)
+
             for i, (start, dur, midi_note) in enumerate(valid):
                 # Pitch factor relative to C4 (60)
                 pitch_factor = 2 ** ((midi_note - 60) / 12.0)
 
-                # Trim source for dur
-                filter_parts.append(f"[0:v]trim=0:{dur},setpts=PTS-STARTPTS,scale=640:360[v{i}]")
-                if abs(pitch_factor - 1.0) > 0.01:
+                # Compute safe onset per note so trim doesn't overshoot
+                safe_onset = onset_base
+                if source_duration > 0.0:
+                    max_start = max(0.0, source_duration - dur - 0.01)
+                    safe_onset = min(onset_base, max_start)
+                if safe_onset < 0.0:
+                    safe_onset = 0.0
+                logging.info(f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, safe_onset={safe_onset:.3f}s, dur={dur:.3f}s")
+
+                # Video always comes from the original source (input 0)
+                filter_parts.append(f"[0:v]trim=start={safe_onset}:duration={dur},setpts=PTS-STARTPTS,scale=640:360[v{i}]")
+
+                # Audio: prefer pre-tuned file → fall back to asetrate+atempo
+                if midi_note in note_input_index:
+                    idx = note_input_index[midi_note]
                     filter_parts.append(
-                        f"[0:a]atrim=0:{dur},asetpts=PTS-STARTPTS,"
-                        f"asetrate=44100*{pitch_factor},aresample=44100[a{i}]"
+                        f"[{idx}:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]"
+                    )
+                elif abs(pitch_factor - 1.0) > 0.01:
+                    # asetrate shifts pitch but compresses/stretches duration by 1/pitch_factor.
+                    # atempo chain compensates to restore the original duration.
+                    atempo = self._build_atempo_chain(1.0 / pitch_factor)
+                    filter_parts.append(
+                        f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS,"
+                        f"asetrate=44100*{pitch_factor},aresample=44100,{atempo}[a{i}]"
                     )
                 else:
-                    filter_parts.append(f"[0:a]atrim=0:{dur},asetpts=PTS-STARTPTS[a{i}]")
+                    filter_parts.append(f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]")
 
                 # Overlay enable window
                 end = start + dur
@@ -1608,17 +2123,25 @@ class VideoComposer:
                 "-i", str(video_path),
                 "-f", "lavfi", "-i", f"color=black:size=640x360:rate=30:duration={total_duration}",
                 "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}",
-                "-filter_complex", ";".join(filter_parts),
+            ]
+            # Add pre-tuned audio sources (one per unique cached midi_note)
+            for tuned_path in extra_audio_inputs:
+                cmd += ["-i", str(tuned_path)]
+
+            tail_args = [
                 "-map", "[final_v]", "-map", "[final_a]",
                 "-t", f"{total_duration:.3f}",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "192k",
                 "-r", "30",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-avoid_negative_ts", "make_zero",
                 str(out_path)
             ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = self._run_ffmpeg_with_filter_script(cmd, filter_parts, tail_args)
             if r.returncode != 0:
-                logging.error(f"[NoteTrigger] ffmpeg failed for {track_name}: {r.stderr}")
+                logging.error(f"[NoteTrigger] ffmpeg failed for {track_name}: {r.stderr[-2000:]}")
                 return self._create_simple_loop(video_path, out_path, total_duration)
             return str(out_path)
         except Exception as e:
@@ -1932,10 +2455,15 @@ class VideoComposer:
             traceback.print_exc()
 
     def _analyze_composition_requirements(self):
-        """Analyze MIDI composition to find all required instrument/note combinations"""
+        """Analyze MIDI composition to find all required instrument/note combinations.
+        Drum tracks are excluded because they don't need pitch tuning."""
         requirements = {}
         
         for track in self.midi_data.get('tracks', []):
+            # Skip drum tracks — pitch tuning doesn't apply to percussion
+            if track.get('isDrum') or track.get('channel') == 9:
+                continue
+
             instrument_name = track.get('instrument', {}).get('name', 'unknown')
             normalized_name = normalize_instrument_name(instrument_name)
             
@@ -2127,7 +2655,7 @@ class VideoComposer:
             
             pass1_cmd = [
                 'ffmpeg', '-y', '-i', str(input_path),
-                '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json',
+                '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11:linear=true:print_format=json',
                 '-f', 'null', '-'
             ]
             
@@ -2186,10 +2714,16 @@ class VideoComposer:
                 raise Exception("Failed to parse loudnorm stats.")
 
             # Pass 2: Apply normalization with extracted stats
+            # Skip if audio is silent (input_i = -inf) — loudnorm can't handle it
+            if stats.get('input_i') in ('-inf', 'inf'):
+                logging.warning("⚠️  Audio is silent (-inf), skipping loudnorm pass 2.")
+                shutil.copy2(input_path, output_path)
+                return str(output_path)
+
             logging.info("   (Loudnorm Pass 2/2) Applying normalization...")
             pass2_cmd = [
                 'ffmpeg', '-y', '-i', str(input_path),
-                '-af', f'loudnorm=I=-16:TP=-1.5:LRA=11:'
+                '-af', f'loudnorm=I=-16:TP=-1.5:LRA=11:linear=true:'
                     f'measured_I={stats["input_i"]}:'
                     f'measured_LRA={stats["input_lra"]}:'
                     f'measured_tp={stats["input_tp"]}:'
@@ -2384,26 +2918,853 @@ class VideoComposer:
     #         logging.error(f"Full traceback: {traceback.format_exc()}")
     #         return None
 
+    # ── Audio-first pipeline ─────────────────────────────────────────────────
+
+    def _parse_loudnorm_stats(self, stderr_output: str):
+        """Extract loudnorm JSON stats block from FFmpeg stderr."""
+        import re as _re, json as _json
+        patterns = [
+            r'\{[^{}]*"input_i"[^{}]*"input_tp"[^{}]*"input_lra"[^{}]*"input_thresh"[^{}]*"target_offset"[^{}]*\}',
+            r'\{[^{}]*"input_i"[^{}]*\}',
+            r'(\{(?:[^{}]|{[^{}]*})*"input_i"(?:[^{}]|{[^{}]*})*\})',
+        ]
+        for pattern in patterns:
+            for match in _re.findall(pattern, stderr_output, _re.DOTALL):
+                try:
+                    stats = _json.loads(match)
+                    if all(k in stats for k in ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset']):
+                        return stats
+                except _json.JSONDecodeError:
+                    continue
+        for line in stderr_output.split('\n'):
+            line = line.strip()
+            if line.startswith('{') and 'input_i' in line:
+                try:
+                    stats = _json.loads(line)
+                    if 'input_i' in stats and 'target_offset' in stats:
+                        return stats
+                except _json.JSONDecodeError:
+                    continue
+        return None
+
+    def _normalize_audio_file(self, input_path: str, output_path: str,
+                               total_duration: float = None) -> 'str | None':
+        """
+        Two-pass loudnorm + alimiter on an audio-only file.
+        Returns output_path on success, or None on failure.
+        """
+        try:
+            logging.info("🔊 Normalising audio timeline (pass 1/2)…")
+            p1 = subprocess.run(
+                ['ffmpeg', '-y', '-i', input_path,
+                 '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11:linear=true:print_format=json',
+                 '-f', 'null', '-'],
+                capture_output=True, text=True, encoding='utf-8', errors='replace'
+            )
+            if p1.returncode != 0:
+                raise Exception("loudnorm pass 1 failed")
+
+            stats = self._parse_loudnorm_stats(p1.stderr)
+            if not stats:
+                raise Exception("Failed to parse loudnorm stats")
+
+            if stats.get('input_i') in ('-inf', 'inf'):
+                logging.warning("Audio is silent — encoding without loudnorm")
+                args = ['ffmpeg', '-y', '-i', input_path, '-c:a', 'aac', '-b:a', '320k']
+                if total_duration:
+                    args += ['-t', str(total_duration + 0.5)]
+                args.append(str(output_path))
+                subprocess.run(args, capture_output=True, check=True)
+                return str(output_path)
+
+            # If the mix is already within ±3 LUFS of the -16 target AND the true
+            # peak is safe, skip the loudnorm boost to preserve the user's balance.
+            try:
+                input_lufs = float(stats['input_i'])
+                input_tp   = float(stats['input_tp'])
+            except (KeyError, ValueError, TypeError):
+                input_lufs = -100.0
+                input_tp   = -100.0
+
+            near_target = (-19.0 <= input_lufs <= -13.0)
+            peak_safe   = (input_tp <= -0.5)
+
+            if near_target and peak_safe:
+                logging.info(
+                    f"🔊 Mix already at {input_lufs:.1f} LUFS (peak {input_tp:.1f} dBTP) — "
+                    f"applying limiter only (skip loudnorm boost to preserve user balance)"
+                )
+                af_passthru = "alimiter=limit=0.95:attack=20:release=200"
+                args = ['ffmpeg', '-y', '-i', input_path, '-af', af_passthru, '-c:a', 'aac', '-b:a', '320k']
+                if total_duration:
+                    args += ['-t', str(total_duration + 0.5)]
+                args.append(str(output_path))
+                p2 = subprocess.run(args, capture_output=True, text=True, encoding='utf-8', errors='replace')
+                if p2.returncode == 0 and os.path.exists(output_path):
+                    logging.info("✅ Audio timeline encoded (limiter only)")
+                    return str(output_path)
+                # fall through to full loudnorm if this fails
+
+            logging.info(f"🔊 Normalising audio timeline (pass 2/2) — input {input_lufs:.1f} LUFS…")
+            af = (
+                f"loudnorm=I=-16:TP=-1.5:LRA=11:linear=true:"
+                f"measured_I={stats['input_i']}:"
+                f"measured_LRA={stats['input_lra']}:"
+                f"measured_tp={stats['input_tp']}:"
+                f"measured_thresh={stats['input_thresh']}:"
+                f"offset={stats['target_offset']},"
+                f"alimiter=limit=0.95:attack=20:release=200"
+            )
+            args = ['ffmpeg', '-y', '-i', input_path, '-af', af, '-c:a', 'aac', '-b:a', '320k']
+            if total_duration:
+                args += ['-t', str(total_duration + 0.5)]
+            args.append(str(output_path))
+            p2 = subprocess.run(args, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            if p2.returncode == 0 and os.path.exists(output_path):
+                logging.info("✅ Audio timeline normalised")
+                return str(output_path)
+            raise Exception(f"loudnorm pass 2 failed: {p2.stderr[-300:]}")
+        except Exception as e:
+            logging.error(f"_normalize_audio_file failed: {e}")
+            try:
+                args = ['ffmpeg', '-y', '-i', input_path, '-c:a', 'aac', '-b:a', '320k']
+                if total_duration:
+                    args += ['-t', str(total_duration + 0.5)]
+                args.append(str(output_path))
+                subprocess.run(args, capture_output=True, check=True)
+                return str(output_path)
+            except Exception:
+                return None
+
+    def _batch_amix(self, filter_parts: list, labels: list, batch_size: int = 500) -> list:
+        """
+        Split audio labels into sub-mixes to stay within FFmpeg's ~1024 filter
+        input limit. Appends new filter entries to filter_parts in-place and
+        returns a list of sub-mix output labels.
+        """
+        batches = [labels[i:i + batch_size] for i in range(0, len(labels), batch_size)]
+        batch_labels = []
+        for b_idx, batch in enumerate(batches):
+            bl = f"[submix_{b_idx}]"
+            if len(batch) == 1:
+                filter_parts.append(f"{batch[0]}anull{bl}")
+            else:
+                filter_parts.append(
+                    f"{''.join(batch)}amix=inputs={len(batch)}:normalize=0{bl}"
+                )
+            batch_labels.append(bl)
+        return batch_labels
+
+    def _run_ffmpeg_with_filter_script(self, cmd: list, filter_parts: list,
+                                        tail_args: list) -> 'subprocess.CompletedProcess':
+        """
+        Run FFmpeg using -filter_complex_script to avoid Windows' 32,767-character
+        command-line length limit when filter graphs are large.
+
+        Acquires self._ffmpeg_semaphore before launching so nested parallelism
+        (outer stem workers + inner sub-batch workers + video chunk workers) never
+        over-subscribes the machine.
+
+        Writes the filter graph to a temp file inside self.temp_dir, then
+        replaces the inline -filter_complex argument with -filter_complex_script.
+        The temp file is always deleted in the finally block.
+        """
+        script_path = None
+        try:
+            import tempfile as _tf
+            fd, script_path = _tf.mkstemp(suffix='_fc.txt', dir=str(self.temp_dir))
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                fh.write(';'.join(filter_parts))
+            full_cmd = cmd + ['-filter_complex_script', script_path] + tail_args
+            with self._ffmpeg_semaphore:
+                return subprocess.run(
+                    full_cmd, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace'
+                )
+        finally:
+            if script_path and os.path.exists(script_path):
+                try:
+                    os.unlink(script_path)
+                except Exception:
+                    pass
+
+    # ── Sub-batch tuning constants ─────────────────────────────────────────
+    # These are data-driven: sparse MIDIs (<= threshold) build monolithically;
+    # dense MIDIs auto-split into parallel sub-batches.
+    _SUBBATCH_THRESHOLD = 400   # total note occurrences; below → monolithic
+    _SUBBATCH_TARGET    = 350   # target occurrences per sub-batch
+    _MAX_SUBBATCHES     = 4     # cap per stem (avoid spawning too many FFmpeg)
+
+    def _mix_stem_wavs(self, input_paths: list, output_path: str) -> 'str | None':
+        """Mix N per-stem WAV files into one via FFmpeg amix, then delete the inputs."""
+        cmd = ['ffmpeg', '-y']
+        for p in input_paths:
+            cmd.extend(['-i', p])
+        n = len(input_paths)
+        mix_filter = (
+            f"[0:a]anull[out]" if n == 1
+            else "".join(f"[{i}:a]" for i in range(n)) + f"amix=inputs={n}:normalize=0[out]"
+        )
+        cmd += ['-filter_complex', mix_filter, '-map', '[out]',
+                '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2', output_path]
+        with self._ffmpeg_semaphore:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace')
+        if r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+            for p in input_paths:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+            return output_path
+        logging.error(f"❌ _mix_stem_wavs failed: {r.stderr[-300:]}")
+        return None
+
+    def _build_instrument_stem(self, track_name: str, notes: list,
+                                stem_path) -> 'str | None':
+        """
+        Build a per-instrument WAV stem — public entry point.
+
+        For small tracks (≤ _SUBBATCH_THRESHOLD occurrences) the stem is built
+        in one FFmpeg call (monolithic).  For dense tracks the note occurrence
+        list is split into parallel sub-batches of _SUBBATCH_TARGET notes each,
+        each sub-batch runs as its own FFmpeg job, then the results are mixed.
+        Splitting is by occurrence count (not unique-MIDI-note count) so a
+        single high-density pitch is also split correctly.
+
+        The shared_onset is computed once from the full clip set and passed into
+        every sub-batch so all clips trim from the same attack position.
+        """
+        if not notes:
+            return None
+
+        normalized_name = normalize_instrument_name(track_name)
+        track_vol_db = float(self._resolve_segment_volume(
+            {'track_name': track_name, 'type': 'instrument'}
+        ))
+
+        # Group occurrences by MIDI note; resolve cached clip paths
+        by_midi: dict = {}
+        for note in notes:
+            midi = note.get('midi')
+            if midi is None:
+                continue
+            cached_path = self._tuned_videos_cache.get(normalized_name, {}).get(midi)
+            if not cached_path or not os.path.exists(cached_path):
+                logging.debug(f"No cached clip for {track_name} MIDI {midi} — note skipped")
+                continue
+            by_midi.setdefault(midi, {'path': cached_path, 'occurrences': []})['occurrences'].append(note)
+
+        if not by_midi:
+            logging.warning(f"No cached clips for {track_name} — stem skipped")
+            return None
+
+        # Compute shared_onset ONCE from the full clip set so all sub-batches
+        # (and the monolithic path) trim from the same attack position.
+        first_path = next(iter(by_midi.values()))['path']
+        shared_onset = self._get_onset_offset(first_path)
+
+        # Flatten to (midi, path, note) triples for occurrence-count splitting
+        flat = [
+            (midi, info['path'], note)
+            for midi, info in by_midi.items()
+            for note in info['occurrences']
+        ]
+        total_occ = len(flat)
+
+        if total_occ <= self._SUBBATCH_THRESHOLD:
+            return self._build_instrument_stem_inner(
+                track_name, track_vol_db, by_midi, shared_onset, stem_path)
+
+        # ── Sub-batch path ────────────────────────────────────────────────
+        n_batches = min(self._MAX_SUBBATCHES, max(2, math.ceil(total_occ / self._SUBBATCH_TARGET)))
+        chunk_size = math.ceil(total_occ / n_batches)
+        chunks = [flat[i:i + chunk_size] for i in range(0, total_occ, chunk_size)]
+        chunks = [c for c in chunks if c]  # drop empty tail
+        stem_path = Path(stem_path)
+        temp_paths = [stem_path.with_suffix(f'.sub{i}.wav') for i in range(len(chunks))]
+
+        logging.info(
+            f"🔀 Sub-batching {track_name}: {total_occ} notes → "
+            f"{len(chunks)} batches of ~{chunk_size}"
+        )
+
+        def _build_sub(idx):
+            chunk = chunks[idx]
+            sub_by_midi: dict = {}
+            for midi, path, note in chunk:
+                sub_by_midi.setdefault(midi, {'path': path, 'occurrences': []})['occurrences'].append(note)
+            return self._build_instrument_stem_inner(
+                track_name, track_vol_db, sub_by_midi, shared_onset, temp_paths[idx])
+
+        sub_results = []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = {ex.submit(_build_sub, i): i for i in range(len(chunks))}
+            for future in as_completed(futures):
+                try:
+                    r = future.result()
+                    if r:
+                        sub_results.append(r)
+                except Exception as exc:
+                    logging.error(f"❌ Sub-batch error for {track_name}: {exc}")
+
+        if len(sub_results) < len(chunks):
+            # Partial failure — clean up and fall back to monolithic
+            logging.warning(
+                f"⚠️ {track_name}: {len(chunks) - len(sub_results)} sub-batch(es) failed "
+                f"— falling back to monolithic build"
+            )
+            for p in sub_results:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+            return self._build_instrument_stem_inner(
+                track_name, track_vol_db, by_midi, shared_onset, stem_path)
+
+        if len(sub_results) == 1:
+            os.replace(sub_results[0], str(stem_path))
+            return str(stem_path)
+        return self._mix_stem_wavs(sub_results, str(stem_path))
+
+    def _build_instrument_stem_inner(self, track_name: str, track_vol_db: float,
+                                      by_midi: dict, forced_onset: float,
+                                      stem_path) -> 'str | None':
+        """
+        Build one WAV stem from a by_midi dict using a single FFmpeg invocation.
+        Called both by the monolithic path and by each sub-batch worker.
+        Uses forced_onset for all trim positions so sub-batches stay in sync.
+        """
+        cmd = ['ffmpeg', '-y']
+        input_index: dict = {}
+        for idx, (midi, info) in enumerate(by_midi.items()):
+            cmd.extend(['-i', info['path']])
+            input_index[midi] = idx
+
+        filter_parts: list = []
+        final_labels: list = []
+
+        for midi, info in by_midi.items():
+            i_idx = input_index[midi]
+            occurrences = info['occurrences']
+            clip_dur = self._get_media_duration(info['path'])
+            n = len(occurrences)
+
+            if n > 1:
+                split_lbls = [f"sp{i_idx}_{j}" for j in range(n)]
+                filter_parts.append(
+                    f"[{i_idx}:a]asplit={n}" + "".join(f"[{l}]" for l in split_lbls)
+                )
+            else:
+                split_lbls = [f"sp{i_idx}_0"]
+                filter_parts.append(f"[{i_idx}:a]anull[{split_lbls[0]}]")
+
+            for j, note in enumerate(occurrences):
+                note_dur = float(note.get('duration', 1.0))
+                t_ms = int(float(note.get('time', 0)) * 1000)
+                velocity = (note.get('velocity') or note.get('midi_velocity')
+                            or note.get('vel') or 100)
+                vol_db = track_vol_db + self._velocity_to_db(velocity)
+                vol_linear = max(0.01, 10 ** (vol_db / 20.0))
+
+                trim_start = forced_onset
+                trim_end = trim_start + note_dur
+                if clip_dur and trim_end > clip_dur:
+                    if trim_end - clip_dur > 0.05:
+                        logging.debug(
+                            f"{track_name} MIDI {midi} note {j}: dur {note_dur:.2f}s "
+                            f"exceeds clip {clip_dur:.2f}s — audio will truncate"
+                        )
+                    trim_end = clip_dur
+
+                lbl_out = f"n{i_idx}_{j}"
+                seg_dur = trim_end - trim_start
+                fade_in  = min(0.003, seg_dur * 0.05)
+                fade_out = min(0.005, seg_dur * 0.05)
+                fade_out_st = max(0.0, seg_dur - fade_out)
+                filter_parts.append(
+                    f"[{split_lbls[j]}]"
+                    f"atrim={trim_start:.4f}:{trim_end:.4f},"
+                    f"asetpts=PTS-STARTPTS,"
+                    f"volume={vol_linear:.4f},"
+                    f"afade=t=in:st=0:d={fade_in:.4f},"
+                    f"afade=t=out:st={fade_out_st:.4f}:d={fade_out:.4f},"
+                    f"adelay={t_ms}|{t_ms}"
+                    f"[{lbl_out}]"
+                )
+                final_labels.append(f"[{lbl_out}]")
+
+        if not final_labels:
+            return None
+
+        total = len(final_labels)
+        if total > 900:
+            batch_labels = self._batch_amix(filter_parts, final_labels)
+            filter_parts.append(
+                f"{''.join(batch_labels)}amix=inputs={len(batch_labels)}:normalize=0[stem]"
+            )
+        elif total == 1:
+            filter_parts.append(f"{final_labels[0]}anull[stem]")
+        else:
+            filter_parts.append(f"{''.join(final_labels)}amix=inputs={total}:normalize=0[stem]")
+
+        r = self._run_ffmpeg_with_filter_script(
+            cmd, filter_parts,
+            ['-map', '[stem]', '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2', str(stem_path)]
+        )
+        if r.returncode == 0 and os.path.exists(stem_path) and os.path.getsize(stem_path) > 100:
+            logging.info(f"✅ Instrument stem: {track_name} ({total} note events)")
+            return str(stem_path)
+        logging.error(f"❌ Instrument stem failed for {track_name}: {r.stderr[-500:]}")
+        return None
+
+    def _build_drum_stem(self, drum_track: dict, stem_path) -> 'str | None':
+        """
+        Build a per-drum-track WAV stem — public entry point.
+
+        Maps MIDI notes to named drum sounds via DRUM_NOTES, then delegates to
+        _build_drum_stem_inner.  For dense drum tracks (> _SUBBATCH_THRESHOLD
+        total hits) the hit list is split into parallel sub-batches and the
+        results are mixed — identical to the instrument sub-batch strategy.
+        Each drum type computes its own onset independently (no shared_onset
+        coordination needed, unlike instruments).
+        """
+        notes = drum_track.get('notes', [])
+        if not notes:
+            return None
+
+        # Map all notes to drum names and resolve video paths
+        by_drum: dict = {}
+        for note in notes:
+            midi_note = note.get('midi')
+            if midi_note is None:
+                continue
+            drum_name = DRUM_NOTES.get(midi_note, f'Unknown_Drum_{midi_note}')
+            if drum_name.startswith('Unknown_Drum_'):
+                continue
+            if drum_name not in by_drum:
+                drum_path = self._find_drum_video_file_flexible(drum_name)
+                if not drum_path or not os.path.exists(drum_path):
+                    logging.debug(f"No video for drum {drum_name} — skipped")
+                    continue
+                by_drum[drum_name] = {'path': drum_path, 'occurrences': []}
+            by_drum[drum_name]['occurrences'].append(note)
+
+        if not by_drum:
+            return None
+
+        # Flatten for occurrence-count-based splitting
+        flat = [
+            (drum_name, info['path'], note)
+            for drum_name, info in by_drum.items()
+            for note in info['occurrences']
+        ]
+        total_hits = len(flat)
+
+        if total_hits <= self._SUBBATCH_THRESHOLD:
+            return self._build_drum_stem_inner(by_drum, stem_path)
+
+        # ── Sub-batch path ────────────────────────────────────────────────
+        n_batches = min(self._MAX_SUBBATCHES, max(2, math.ceil(total_hits / self._SUBBATCH_TARGET)))
+        chunk_size = math.ceil(total_hits / n_batches)
+        chunks = [flat[i:i + chunk_size] for i in range(0, total_hits, chunk_size)]
+        chunks = [c for c in chunks if c]
+        stem_path = Path(stem_path)
+        temp_paths = [stem_path.with_suffix(f'.dsub{i}.wav') for i in range(len(chunks))]
+
+        logging.info(
+            f"🥁 Sub-batching drums: {total_hits} hits → "
+            f"{len(chunks)} batches of ~{chunk_size}"
+        )
+
+        def _build_drum_sub(idx):
+            chunk = chunks[idx]
+            sub_by_drum: dict = {}
+            for drum_name, path, note in chunk:
+                sub_by_drum.setdefault(drum_name, {'path': path, 'occurrences': []})['occurrences'].append(note)
+            return self._build_drum_stem_inner(sub_by_drum, temp_paths[idx])
+
+        sub_results = []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = {ex.submit(_build_drum_sub, i): i for i in range(len(chunks))}
+            for future in as_completed(futures):
+                try:
+                    r = future.result()
+                    if r:
+                        sub_results.append(r)
+                except Exception as exc:
+                    logging.error(f"❌ Drum sub-batch error: {exc}")
+
+        if len(sub_results) < len(chunks):
+            logging.warning(
+                f"⚠️ Drums: {len(chunks) - len(sub_results)} sub-batch(es) failed "
+                f"— falling back to monolithic drum build"
+            )
+            for p in sub_results:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+            return self._build_drum_stem_inner(by_drum, stem_path)
+
+        if len(sub_results) == 1:
+            os.replace(sub_results[0], str(stem_path))
+            return str(stem_path)
+        return self._mix_stem_wavs(sub_results, str(stem_path))
+
+    def _build_drum_stem_inner(self, by_drum: dict, stem_path) -> 'str | None':
+        """Build one drum WAV stem from a by_drum group using a single FFmpeg call."""
+        cmd = ['ffmpeg', '-y']
+        drum_input_idx: dict = {}
+        for idx, (drum_name, info) in enumerate(by_drum.items()):
+            cmd.extend(['-i', info['path']])
+            drum_input_idx[drum_name] = idx
+
+        filter_parts: list = []
+        final_labels: list = []
+
+        for drum_name, info in by_drum.items():
+            d_idx = drum_input_idx[drum_name]
+            occurrences = info['occurrences']
+            onset = self._get_onset_offset(info['path'])
+            clip_dur = self._get_media_duration(info['path'])
+            n = len(occurrences)
+            track_vol_db = float(self._resolve_segment_volume(
+                {'type': 'drum', 'drum_name': drum_name, 'track_name': drum_name}
+            ))
+
+            if n > 1:
+                split_lbls = [f"ds{d_idx}_{j}" for j in range(n)]
+                filter_parts.append(
+                    f"[{d_idx}:a]asplit={n}" + "".join(f"[{l}]" for l in split_lbls)
+                )
+            else:
+                split_lbls = [f"ds{d_idx}_0"]
+                filter_parts.append(f"[{d_idx}:a]anull[{split_lbls[0]}]")
+
+            for j, note in enumerate(occurrences):
+                note_dur = float(note.get('duration', 0.25))
+                t_ms = int(float(note.get('time', 0)) * 1000)
+                velocity = (note.get('velocity') or note.get('midi_velocity')
+                            or note.get('vel') or 100)
+                vol_db = track_vol_db + self._velocity_to_db(velocity)
+                vol_linear = max(0.01, 10 ** (vol_db / 20.0))
+
+                trim_start = onset
+                trim_end = min(trim_start + note_dur, clip_dur) if clip_dur else trim_start + note_dur
+
+                lbl_out = f"dn{d_idx}_{j}"
+                seg_dur = trim_end - trim_start
+                # Drums: no fade-in (preserve transient attack), only fade-out to avoid tail clicks
+                fade_out = min(0.005, seg_dur * 0.05)
+                fade_out_st = max(0.0, seg_dur - fade_out)
+                filter_parts.append(
+                    f"[{split_lbls[j]}]"
+                    f"atrim={trim_start:.4f}:{trim_end:.4f},"
+                    f"asetpts=PTS-STARTPTS,"
+                    f"volume={vol_linear:.4f},"
+                    f"afade=t=out:st={fade_out_st:.4f}:d={fade_out:.4f},"
+                    f"adelay={t_ms}|{t_ms}"
+                    f"[{lbl_out}]"
+                )
+                final_labels.append(f"[{lbl_out}]")
+
+        if not final_labels:
+            return None
+
+        total = len(final_labels)
+        if total > 900:
+            batch_labels = self._batch_amix(filter_parts, final_labels)
+            filter_parts.append(
+                f"{''.join(batch_labels)}amix=inputs={len(batch_labels)}:normalize=0[dstem]"
+            )
+        elif total == 1:
+            filter_parts.append(f"{final_labels[0]}anull[dstem]")
+        else:
+            filter_parts.append(f"{''.join(final_labels)}amix=inputs={total}:normalize=0[dstem]")
+
+        r = self._run_ffmpeg_with_filter_script(
+            cmd, filter_parts,
+            ['-map', '[dstem]', '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2', str(stem_path)]
+        )
+        if r.returncode == 0 and os.path.exists(stem_path) and os.path.getsize(stem_path) > 100:
+            logging.info(f"✅ Drum stem built ({total} hits)")
+            return str(stem_path)
+        logging.error(f"❌ Drum stem failed: {r.stderr[-500:]}")
+        return None
+
+    def _build_full_audio_timeline(self, total_duration: float) -> 'str | None':
+        """
+        Phase 1: Build one mastered audio file covering the entire song.
+        All instruments and drums are mixed with a single loudnorm + alimiter
+        pass — eliminating per-chunk boundary pumping/phasing.
+
+        Stems are built in parallel (one FFmpeg process per track).  Each stem
+        writes to its own unique file, so there are no write conflicts.
+        Thread-safety is guaranteed by per-path locks in _get_onset_offset and
+        _get_media_duration's cache lock.
+        """
+        audio_dir = self.temp_dir / "audio_first"
+        audio_dir.mkdir(exist_ok=True)
+
+        # Collect all stem tasks (instruments + drums) before launching threads.
+        tasks: list = []
+        for entry_id, track in self.tracks.items():
+            instr = track.get('instrument', {})
+            track_name = (instr.get('name', 'unknown') if isinstance(instr, dict)
+                          else str(instr or 'unknown'))
+            notes = track.get('notes', [])
+            if not notes:
+                continue
+            stem_path = audio_dir / f"stem_{entry_id}_{normalize_instrument_name(track_name)}.wav"
+            tasks.append(('instrument', entry_id, track_name, notes, stem_path))
+
+        for drum_idx, drum_track in enumerate(self.drum_tracks):
+            instr = drum_track.get('instrument', {})
+            tag = instr.get('name', 'drums') if isinstance(instr, dict) else 'drums'
+            stem_path = audio_dir / f"stem_drums_{drum_idx}_{normalize_instrument_name(tag)}.wav"
+            tasks.append(('drum', drum_idx, drum_track, None, stem_path))
+
+        if not tasks:
+            logging.error("❌ No tracks — audio-first cannot continue")
+            return None
+
+        # Use up to half the CPU cores for parallel stem building.
+        # Keep some headroom for the concurrent video phase (Phase 2).
+        cpu = os.cpu_count() or 4
+        stem_workers = min(len(tasks), max(4, cpu // 2))
+        logging.info(f"🎵 Building {len(tasks)} stems with {stem_workers} parallel workers…")
+
+        def _build_one(task):
+            kind, idx, arg, notes, stem_path = task
+            if kind == 'instrument':
+                result = self._build_instrument_stem(arg, notes, stem_path)
+                if not result:
+                    logging.warning(f"⚠️ Stem skipped for {arg} (id={idx})")
+                return result
+            else:  # drum
+                return self._build_drum_stem(arg, stem_path)
+
+        stem_paths: list = []
+        with ThreadPoolExecutor(max_workers=stem_workers) as executor:
+            futures = {executor.submit(_build_one, task): task for task in tasks}
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        stem_paths.append(result)
+                except Exception as exc:
+                    task = futures[future]
+                    logging.error(f"❌ Stem task {task[2]} raised: {exc}")
+
+        if not stem_paths:
+            logging.error("❌ No stems built — audio-first cannot continue")
+            return None
+
+        unmastered_path = audio_dir / "unmastered_mix.wav"
+        cmd = ['ffmpeg', '-y']
+        for sp in stem_paths:
+            cmd.extend(['-i', str(sp)])
+        n = len(stem_paths)
+        mix_filter = (
+            "[0:a]anull[premix]" if n == 1
+            else "".join(f"[{i}:a]" for i in range(n)) + f"amix=inputs={n}:normalize=0[premix]"
+        )
+        cmd += [
+            '-filter_complex', mix_filter,
+            '-map', '[premix]',
+            '-c:a', 'pcm_s16le', '-ar', '44100', '-ac', '2',
+            '-t', str(total_duration + 2.0),
+            str(unmastered_path)
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if r.returncode != 0 or not os.path.exists(unmastered_path):
+            logging.error(f"❌ Stem mix failed: {r.stderr[-500:]}")
+            return None
+
+        mastered_path = audio_dir / "mastered_audio.aac"
+        return self._normalize_audio_file(str(unmastered_path), str(mastered_path), total_duration)
+
+    def _build_silent_video(self, total_duration: float, total_chunks: int,
+                             work_dir) -> 'str | None':
+        """
+        Phase 2: Render the video grid and strip audio so the mux step can
+        attach the mastered audio track.
+
+        Chunks are built in parallel — each writes to its own unique file and
+        only reads shared data (track lists, cached clip paths on disk) so
+        there are no write conflicts.  Results are sorted by index before
+        concatenation to preserve playback order.
+        """
+        try:
+            chunks_dir = work_dir / "video_chunks"
+            chunks_dir.mkdir(exist_ok=True)
+
+            chunk_tasks = [
+                (idx, idx * self.CHUNK_DURATION,
+                 min((idx + 1) * self.CHUNK_DURATION, total_duration), chunks_dir)
+                for idx in range(total_chunks)
+            ]
+
+            # Audio finishes at ~t+136s; video runs until ~t+163s on this hardware.
+            # cpu//3 gives 5 workers on 16-core, reducing waves from 4 to 3 (~40s saved).
+            cpu = os.cpu_count() or 4
+            chunk_workers = min(total_chunks, max(2, cpu // 3))
+            logging.info(f"🎬 Building {total_chunks} video chunks with {chunk_workers} parallel workers…")
+
+            def _build_one_chunk(task):
+                idx, start, end, out_dir = task
+                path = self._create_enhanced_chunk(idx, start, end, out_dir)
+                return idx, path
+
+            chunk_map: dict = {}
+            with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
+                futures = {executor.submit(_build_one_chunk, task): task for task in chunk_tasks}
+                for future in as_completed(futures):
+                    try:
+                        idx, chunk_path = future.result()
+                        if chunk_path and os.path.exists(chunk_path):
+                            chunk_map[idx] = chunk_path
+                        else:
+                            task = futures[future]
+                            duration = task[2] - task[1]
+                            placeholder = self._create_placeholder_chunk_simple(
+                                idx, chunks_dir, duration)
+                            if placeholder:
+                                chunk_map[idx] = placeholder
+                    except Exception as exc:
+                        logging.error(f"❌ Video chunk error: {exc}")
+
+            # Reconstruct ordered list for concatenation
+            chunk_paths = [chunk_map[i] for i in range(total_chunks) if i in chunk_map]
+
+            if not chunk_paths:
+                raise Exception("No video chunks were created")
+
+            concat_path = work_dir / "video_concat_raw.mp4"
+            concat_result = self._concatenate_chunks(chunk_paths, concat_path)
+            if not concat_result or not os.path.exists(concat_result):
+                raise Exception("Chunk concatenation failed")
+
+            silent_path = work_dir / "silent_video.mp4"
+            r = subprocess.run(
+                ['ffmpeg', '-y', '-i', str(concat_result),
+                 '-c:v', 'copy', '-an', str(silent_path)],
+                capture_output=True, text=True
+            )
+            if r.returncode == 0 and os.path.exists(silent_path):
+                logging.info(f"✅ Silent video: {os.path.getsize(silent_path):,} bytes")
+                return str(silent_path)
+            logging.error(f"❌ Audio strip failed: {r.stderr[-200:]}")
+            return None
+        except Exception as e:
+            logging.error(f"❌ _build_silent_video: {e}")
+            return None
+
+    def _mux_video_audio(self, silent_video: str, audio_path: str,
+                          output_path: str, total_duration: float) -> 'str | None':
+        """
+        Phase 3: Combine the silent video grid with the mastered audio track.
+        Uses explicit -t instead of -shortest to expose duration bugs early.
+        """
+        try:
+            video_dur = self._get_media_duration(silent_video)
+            audio_dur = self._get_media_duration(audio_path)
+            if video_dur and audio_dur and abs(video_dur - audio_dur) > 1.5:
+                logging.warning(
+                    f"Mux duration mismatch: video={video_dur:.2f}s "
+                    f"audio={audio_dur:.2f}s (Δ={abs(video_dur - audio_dur):.2f}s)"
+                )
+            r = subprocess.run(
+                ['ffmpeg', '-y',
+                 '-i', str(silent_video),
+                 '-i', str(audio_path),
+                 '-map', '0:v', '-map', '1:a',
+                 '-c:v', 'copy', '-c:a', 'copy',
+                 '-t', str(total_duration),
+                 str(output_path)],
+                capture_output=True, text=True, encoding='utf-8', errors='replace'
+            )
+            if r.returncode == 0 and os.path.exists(output_path):
+                logging.info(f"✅ Mux complete: {os.path.getsize(output_path):,} bytes")
+                return str(output_path)
+            logging.error(f"❌ Mux failed: {r.stderr[-300:]}")
+            return None
+        except Exception as e:
+            logging.error(f"❌ _mux_video_audio: {e}")
+            return None
+
+    def _create_audio_first_composition(self, total_duration: float,
+                                         total_chunks: int) -> 'str | None':
+        """
+        Orchestrates the 3-phase audio-first pipeline.
+        Phases 1 (audio) and 2 (video) run concurrently; Phase 3 muxes them.
+        """
+        work_dir = self.temp_dir / "audio_first_work"
+        work_dir.mkdir(exist_ok=True)
+        logging.info("🎵 Audio-first: launching Phase 1 (audio) + Phase 2 (video) concurrently")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            audio_future = pool.submit(self._build_full_audio_timeline, total_duration)
+            video_future = pool.submit(
+                self._build_silent_video, total_duration, total_chunks, work_dir
+            )
+            full_audio = audio_future.result()
+            silent_video = video_future.result()
+
+        if not full_audio:
+            logging.error("❌ Phase 1 (audio) failed")
+            return None
+        if not silent_video:
+            logging.error("❌ Phase 2 (video) failed")
+            return None
+
+        logging.info("🎬 Phase 3: muxing video + audio…")
+        return self._mux_video_audio(silent_video, full_audio, str(self.output_path), total_duration)
+
     def create_composition(self):
         """
-        ENHANCED composition with all fixes applied
+        ENHANCED composition with audio-first pipeline.
+
+        Tries the 3-phase audio-first approach first (eliminates per-chunk
+        loudnorm/limiter resets and chunk-boundary pumping). Falls back to the
+        legacy sequential/parallel chunk pipeline when running in preview mode
+        or if the audio-first path fails.
         """
         try:
             logging.info("🎬 Starting ENHANCED video composition with fixes...")
             start_time = time.time()
-            
-            # Decide between parallel and sequential processing
+
+            # Pre-process all unique note/instrument combos so each phase can
+            # retrieve pitch-shifted audio instantly from the cache.
+            self.preprocess_composition_optimized()
+
             total_duration = self._calculate_total_duration()
             total_chunks = max(1, math.ceil(total_duration / self.CHUNK_DURATION))
-            
-            # Use parallel processing for compositions with multiple chunks
+
+            # Audio-first pipeline (production only — preview keeps legacy for speed)
+            if not self.preview_mode and self._tuned_videos_cache:
+                try:
+                    logging.info(
+                        f"🎵 Audio-first pipeline: {total_duration:.2f}s, {total_chunks} chunks"
+                    )
+                    result = self._create_audio_first_composition(total_duration, total_chunks)
+                    if result and os.path.exists(result):
+                        elapsed = time.time() - start_time
+                        logging.info(f"🎉 Audio-first composition complete! {elapsed:.2f}s")
+                        return result
+                    logging.warning("⚠️ Audio-first returned no output — falling back to legacy")
+                except Exception as e:
+                    logging.warning(f"⚠️ Audio-first failed ({e}) — falling back to legacy")
+
+            # Legacy chunk-based pipeline (fallback / preview mode)
             if total_chunks > 2 and self.max_workers > 1:
                 logging.info(f"Using parallel processing for {total_chunks} chunks")
                 return self.create_composition_with_parallel_processing()
             else:
                 logging.info(f"Using sequential processing for {total_chunks} chunks")
                 return self._create_composition_sequential()
-                
+
         except Exception as e:
             logging.error(f"❌ Enhanced composition error: {e}")
             return None
@@ -2447,8 +3808,13 @@ class VideoComposer:
             final_path = self._concatenate_chunks(chunk_paths, concatenated_path)
             
             if final_path and os.path.exists(final_path):
-                # Apply enhanced normalization
-                normalized_path = self._normalize_final_audio(final_path, self.output_path)
+                if self.preview_mode:
+                    # Skip 2-pass loudnorm in preview — shaves ~1-2s off quick renders
+                    import shutil
+                    shutil.move(str(final_path), str(self.output_path))
+                    normalized_path = self.output_path
+                else:
+                    normalized_path = self._normalize_final_audio(final_path, self.output_path)
                 
                 total_time = time.time() - start_time
                 logging.info(f"🎉 Enhanced composition complete! Total time: {total_time:.2f}s")
@@ -2483,16 +3849,16 @@ class VideoComposer:
                     if drum_segments:
                         track_video_segments.extend(drum_segments)
                 else:
-                    # Use enhanced note-triggered processing
-                    result = self._process_instrument_track_enhanced(track, start_time, chunk_duration, chunk_idx, track_id)
+                    # Use the same fixed instrument processing used by the simplified path
+                    result = self._process_instrument_track_for_chunk_fixed(track, start_time, chunk_duration, chunk_idx, track_id)
                     if result:
                         track_video_segments.append(result)
             
             if not track_video_segments:
                 return self._create_placeholder_chunk_simple(chunk_idx, chunks_dir, chunk_duration)
             
-            # Create final chunk with optimal encoding
-            return self._create_optimized_chunk_layout(track_video_segments, chunk_path, chunk_duration)
+            # Create final chunk with grid layout using the fixed FFmpeg xstack compositor
+            return self._create_grid_layout_chunk_fixed(track_video_segments, chunk_path, chunk_duration)
             
         except Exception as e:
             logging.error(f"Error creating enhanced chunk {chunk_idx}: {e}")
@@ -2562,8 +3928,12 @@ class VideoComposer:
             final_path = self._concatenate_chunks(ordered_chunk_paths, concatenated_path)
             
             if final_path and os.path.exists(final_path):
-                # Apply normalization
-                normalized_path = self._normalize_final_audio(final_path, self.output_path)
+                if self.preview_mode:
+                    import shutil
+                    shutil.move(str(final_path), str(self.output_path))
+                    normalized_path = self.output_path
+                else:
+                    normalized_path = self._normalize_final_audio(final_path, self.output_path)
                 
                 total_time = time.time() - start_time
                 logging.info(f"🎉 Parallel composition complete! Total time: {total_time:.2f}s")
@@ -2731,42 +4101,18 @@ class VideoComposer:
         
     def _create_optimized_ffmpeg_command(self, inputs, filter_complex, output_path, duration):
         """Create optimized FFmpeg command with hardware acceleration"""
-        encoding_params = self._get_optimal_encoding_params()
+        from video_utils import build_ffmpeg_command
         
-        cmd = ['ffmpeg', '-y']
-        
-        # Add hardware acceleration if available
-        if 'additional_params' in encoding_params:
-            for param in encoding_params['additional_params'][:2]:  # Add hwaccel params first
-                if param in ['-hwaccel', '-hwaccel_output_format']:
-                    cmd.extend([param, encoding_params['additional_params'][encoding_params['additional_params'].index(param) + 1]])
-        
-        # Add inputs
-        for input_path in inputs:
-            cmd.extend(['-i', str(input_path)])
-        
-        # Add filter complex
-        if filter_complex:
-            cmd.extend(['-filter_complex', filter_complex])
-        
-        # Add encoding parameters
-        cmd.extend([
-            '-c:v', encoding_params['video_codec'],
-            '-preset', encoding_params['preset'],
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-t', str(duration),
-            '-r', '30'
-        ])
-        
-        # Add remaining optimization parameters
-        if 'additional_params' in encoding_params:
-            remaining_params = encoding_params['additional_params'][2:]  # Skip hwaccel params already added
-            cmd.extend(remaining_params)
-        
-        cmd.append(str(output_path))
-        
-        return cmd
+        # Use the standardized command builder
+        return build_ffmpeg_command(
+            inputs=inputs,
+            output=output_path,
+            filter_complex=filter_complex,
+            preset='fast',
+            crf=23,
+            audio_bitrate='192k',
+            use_gpu=True
+        )
 
     def _create_track_chunk_optimized(self, track_id, instrument_name, notes, start_time, end_time):
         """Create track chunk using OPTIMIZED autotune retrieval (no individual processing)"""
@@ -3633,7 +4979,7 @@ class VideoComposer:
             # Try multiple strategies to find the video
             video_path = None
 
-            # Strategy 1: Try with first note's MIDI value
+            # Strategy 1: Try with first note's MIDI value via PathRegistry
             if chunk_notes:
                 first_note_midi = chunk_notes[0].get('midi', 60)
                 video_path = registry.get_instrument_path(track_name, str(first_note_midi))
@@ -3642,13 +4988,17 @@ class VideoComposer:
             if not video_path:
                 video_path = registry.get_instrument_path(track_name, "60")
 
-            # Strategy 3: Try fallback approach - find any video for this instrument
+            # Strategy 3: Fallback approach - find any video for this instrument in registry
             if not video_path:
                 normalized_name = normalize_instrument_name(track_name)
                 instrument_paths = registry.instrument_paths.get(normalized_name, {})
                 if instrument_paths:
                     video_path = next(iter(instrument_paths.values()))
-                    logging.info(f"Instrument fallback used: {track_name}:{first_note_midi} -> {video_path}")
+                    logging.info(f"Instrument fallback used from registry: {track_name} -> {video_path}")
+
+            # Strategy 4: Robust filename search in uploads directory
+            if not video_path:
+                video_path = self._find_instrument_video_file(track_name)
 
             if not video_path or not os.path.exists(video_path):
                 logging.warning(f"No video found for instrument: {track_name}")
@@ -3657,13 +5007,31 @@ class VideoComposer:
             # Always use a unique_id for the note-triggered video
             import uuid
             short_id = str(uuid.uuid4())[:8]
+            # Compute onset offset (non-destructive)
+            onset_offset = self._get_onset_offset(video_path)
+
+            # Build per-note pre-tuned audio map from the preprocessing cache.
+            # Each unique MIDI note needed in this chunk gets a cached tuned video
+            # whose audio stream replaces the raw asetrate-based pitch shift.
+            note_audio_map = {}
+            unique_midi_notes = {n.get('midi') for n in chunk_notes if n.get('midi') is not None}
+            for midi_note in unique_midi_notes:
+                tuned = self.get_optimized_tuned_video(track_name, midi_note)
+                if tuned and os.path.exists(tuned):
+                    note_audio_map[midi_note] = tuned
+                    logging.debug(f"[PitchShift] {track_name} MIDI {midi_note} → {os.path.basename(tuned)}")
+                else:
+                    logging.debug(f"[PitchShift] {track_name} MIDI {midi_note} → asetrate fallback")
+
             triggered_video = self._create_note_triggered_video_sequence_fixed(
                 video_path=video_path,
                 notes=chunk_notes,
                 total_duration=chunk_duration,
                 track_name=track_name,
                 unique_id=short_id,
-                chunk_start_time=chunk_start_time
+                chunk_start_time=chunk_start_time,
+                onset_offset=onset_offset,
+                note_audio_map=note_audio_map if note_audio_map else None,
             )
 
             if not triggered_video:
@@ -3672,7 +5040,7 @@ class VideoComposer:
             if triggered_video and os.path.exists(triggered_video):
                 return {
                     'video_path': triggered_video,
-                    'track_id': track_id,  # Use original track ID for grid positioning
+                    'track_id': str(track_id),  # Use original track ID (string) for grid positioning
                     'track_name': track_name,
                     'notes': chunk_notes,
                     'type': 'instrument'
@@ -4599,9 +5967,13 @@ class VideoComposer:
                 logging.error("❌ Grid dimensions are zero, cannot create layout.")
                 return None
 
-            cell_width = 1920 // grid_cols
-            cell_height = 1080 // grid_rows
+            # Use render config resolution for cell calculations
+            target_width, target_height = map(int, self.render_config['resolution'].split('x'))
+            # Ensure even dimensions — libx264 requires width/height divisible by 2
+            cell_width = (target_width // grid_cols) & ~1
+            cell_height = (target_height // grid_rows) & ~1
             
+            logging.info(f"   Target resolution: {target_width}x{target_height} ({'PREVIEW' if self.preview_mode else 'PRODUCTION'})")
             logging.info(f"   Cell dimensions: {cell_width}x{cell_height} pixels")
 
             # Create a placeholder for each cell in the grid
@@ -4650,34 +6022,125 @@ class VideoComposer:
             # Process each cell in the grid
             cells_processed = 0
             cells_with_content = 0
+            decode_args = self._get_ffmpeg_decode_args()
             for r in range(grid_rows):
                 for c in range(grid_cols):
                     cells_processed += 1
                     cell_segment = grid_cells[r][c]
                     if cell_segment and os.path.exists(cell_segment['video_path']):
                         cells_with_content += 1
-                        cmd.extend(['-i', cell_segment['video_path']])
+                        cmd.extend([*decode_args, '-i', cell_segment['video_path']])
                         # Scale the video and prepare for stacking/mixing
                         filter_parts.append(f"[{input_idx}:v]scale={cell_width}:{cell_height}[v{r}_{c}]")
                         video_inputs_for_stack.append(f"[v{r}_{c}]")
-                        # Apply volume balancing to audio
-                        # (Your existing volume logic can be re-inserted here if needed)
-                        filter_parts.append(f"[{input_idx}:a]volume=1.0[a{r}_{c}]")
+                        
+                        # --- VOLUME FIX START ---
+                        # Get volume in dB for this segment (supports keys by track_id or normalized name)
+                        vol_db = float(self._resolve_segment_volume(cell_segment))
+                        # Optional MIDI velocity shaping on top of user track volume.
+                        velocity_val = (
+                            cell_segment.get('velocity')
+                            or cell_segment.get('midi_velocity')
+                            or cell_segment.get('note_velocity')
+                        )
+                        vol_db += self._velocity_to_db(velocity_val)
+                        # Convert dB to linear: 10 ^ (db / 20)
+                        vol_linear = 10 ** (vol_db / 20.0)
+                        
+                        # Apply volume filter
+                        filter_parts.append(f"[{input_idx}:a]volume={vol_linear:.2f}[a{r}_{c}]")
                         audio_inputs_for_mix.append(f"[a{r}_{c}]")
-                        logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name}")
+                        # --- VOLUME FIX END ---
+
+                        logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB")
                         input_idx += 1
                     else:
                         # Use the black placeholder for empty cells
                         video_inputs_for_stack.append(f"[{black_video_input_idx}:v]")
-                        audio_inputs_for_mix.append(f"[{silent_audio_input_idx}:a]")
                         logging.info(f"      Cell ({r},{c}): EMPTY (using placeholder)")
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
 
+            # ── Solo-resolution optimisation ────────────────────────────────
+            # When only one cell has content in this chunk, skip xstack and
+            # render the single clip at the full canvas resolution so the active
+            # instrument fills the screen instead of appearing as a tiny cell.
+            if cells_with_content == 1:
+                solo_w = target_width & ~1
+                solo_h = target_height & ~1
+                # The single video is always at input index 2
+                # (index 0 = black placeholder, 1 = silent audio, 2 = first video)
+                filter_parts.clear()
+                solo_segment = next(
+                    (grid_cells[r][c] for r in range(grid_rows) for c in range(grid_cols)
+                     if grid_cells[r][c] and os.path.exists(grid_cells[r][c].get('video_path', ''))),
+                    None
+                )
+                filter_parts.append(f"[2:v]scale={solo_w}:{solo_h}[video_out]")
+                if solo_segment:
+                    vol_db = float(self._resolve_segment_volume(solo_segment))
+                    velocity_val = (
+                        solo_segment.get('velocity')
+                        or solo_segment.get('midi_velocity')
+                        or solo_segment.get('note_velocity')
+                    )
+                    vol_db += self._velocity_to_db(velocity_val)
+                    vol_linear = 10 ** (vol_db / 20.0)
+                    filter_parts.append(
+                        f"[2:a]volume={vol_linear:.2f},"
+                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_out]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[{silent_audio_input_idx}:a]"
+                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_out]"
+                    )
+                logging.info(f"🎯 Solo mode: rendering at {solo_w}x{solo_h} (full canvas, no xstack)")
+                encoding_args = self._get_encoding_settings()
+                cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+                cmd.extend([
+                    '-map', '[video_out]', '-map', '[audio_out]',
+                    *encoding_args,
+                    '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
+                    '-pix_fmt', 'yuv420p',
+                    '-t', str(duration), '-r', '30', str(output_path)
+                ])
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+                    logging.info(f"✅ Solo chunk created: {output_size:,} bytes")
+                    return str(output_path)
+                else:
+                    # cmd is now partially built — cannot safely fall back to multi-cell.
+                    # Return None so the chunk is skipped; the rest of the composition continues.
+                    logging.warning(f"⚠️ Solo FFmpeg failed for chunk, skipping: {result.stderr[-300:]}")
+                    return None
+            # ── End solo-resolution optimisation ────────────────────────────
+
+            force_cpu_encode = cells_with_content > self.max_concurrent_streams
+            if force_cpu_encode:
+                logging.warning(
+                    f"High stream pressure ({cells_with_content} active cells) exceeds ATS_MAX_CONCURRENT_STREAMS={self.max_concurrent_streams}. "
+                    "Falling back to CPU encode for stability."
+                )
+
             # Create the xstack and amix filters
             layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
             filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[video_out]")
-            filter_parts.append(f"{''.join(audio_inputs_for_mix)}amix=inputs={grid_rows*grid_cols}:duration=longest[audio_out]")
+            # Mix only actual audio inputs to avoid normalization over empty streams
+            audio_input_count = len(audio_inputs_for_mix)
+            if audio_input_count == 0:
+                audio_inputs_for_mix = [f"[{silent_audio_input_idx}:a]"]
+                audio_input_count = 1
+            filter_parts.append(
+                f"{''.join(audio_inputs_for_mix)}"
+                f"amix=inputs={audio_input_count}:duration=longest:normalize=0,"
+                f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                # Soft limiter: 100ms attack / 500ms release keeps level invisible to ears
+                # while preventing hard clips before AAC encode. Final loudnorm pass handles
+                # overall level after chunk concatenation.
+                f"alimiter=limit=0.8:attack=80:release=500[audio_out]"
+            )
             
             logging.info(f"🎬 Final FFmpeg command construction:")
             logging.info(f"   Total inputs: {input_idx}")
@@ -4686,10 +6149,17 @@ class VideoComposer:
 
             # Finalize and run the command
             cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+            
+            # Get encoding settings based on preview mode and GPU availability
+            encoding_args = self._get_encoding_settings()
+            if force_cpu_encode:
+                encoding_args = ['-c:v', 'libx264', '-preset', self.render_config['preset'], '-crf', self.render_config['crf']]
+            
             cmd.extend([
                 '-map', '[video_out]', '-map', '[audio_out]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '320k',
+                *encoding_args,
+                '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
+                '-pix_fmt', 'yuv420p',  # Compatible pixel format
                 '-t', str(duration), '-r', '30', str(output_path)
             ])
 
@@ -5013,12 +6483,15 @@ class VideoComposer:
                     note_copy['time'] = float(note_copy.get('time', 0)) - start_time
                     chunk_notes.append(note_copy)
                 # Use the same note-triggered overlay method as instruments
+                # Align drum source to onset to capture attack
+                onset_offset = self._get_onset_offset(drum_video_path)
                 triggered_video = self._create_note_triggered_video_sequence_fixed(
                     video_path=drum_video_path,
                     notes=chunk_notes,
                     total_duration=chunk_duration,
                     track_name=drum_track_id,
-                    unique_id=short_id
+                    unique_id=short_id,
+                    onset_offset=onset_offset
                 )
                 if triggered_video and os.path.exists(triggered_video):
                     drum_segment = {
@@ -5263,30 +6736,47 @@ class VideoComposer:
             instrument_name
         )
 
-    def _find_instrument_video_file(self, normalized_name, original_name):
-        """Find the video file for an instrument"""
-        # Search patterns - try multiple naming conventions
+    def _find_instrument_video_file(self, name_or_normalized, original_name: str | None = None):
+        """Find the video file for an instrument.
+
+        Accepts either a normalized instrument name or an original display name.
+        The second param is optional to preserve older call sites.
+        """
+        # Derive both original and normalized tokens safely
+        if original_name is None:
+            original_name = str(name_or_normalized)
+        normalized_name = normalize_instrument_name(str(name_or_normalized))
+
+        # Build robust search patterns covering common variations
+        safe_original_underscore = original_name.lower().replace(' ', '_')
         search_patterns = [
             f"*{normalized_name}*.mp4",
-            f"*{original_name.lower().replace(' ', '_')}*.mp4",
+            f"*{safe_original_underscore}*.mp4",
             f"*{original_name.lower()}*.mp4",
-            f"processed_{normalized_name}*.mp4",
-            f"processed_{original_name.lower().replace(' ', '_')}*.mp4"
+            f"processed_*{normalized_name}*.mp4",
+            f"processed_*{safe_original_underscore}*.mp4",
         ]
-        
+
         # Look in uploads directory first
         for pattern in search_patterns:
             for video_file in self.uploads_dir.glob(pattern):
-                if 'drum' not in video_file.name.lower():  # Exclude drum files
-                    logging.info(f"🎹 Instrument match: {original_name} → {video_file.name}")
-                    return str(video_file)
-        
+                # Exclude drum files from instrument lookup
+                if 'drum' in video_file.name.lower():
+                    continue
+                logging.info(f"🎹 Instrument match: {original_name} → {video_file.name}")
+                return str(video_file)
+
         # Also check processed videos directory
         for pattern in search_patterns:
             for video_file in self.processed_videos_dir.glob(pattern):
-                if 'drum' not in video_file.name.lower():  # Exclude drum files
-                    logging.info(f"🎹 Instrument match (processed): {original_name} → {video_file.name}")
-                    return str(video_file)
+                if 'drum' in video_file.name.lower():
+                    continue
+                logging.info(f"🎹 Instrument match (processed): {original_name} → {video_file.name}")
+                return str(video_file)
+
+        # No match found
+        logging.warning(f"No instrument video found for: original='{original_name}', normalized='{normalized_name}'")
+        return None
         
         logging.warning(f"No video file found for instrument: {original_name} (tried patterns: {search_patterns})")
         return None

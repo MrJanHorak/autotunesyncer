@@ -21,6 +21,7 @@ import tempfile
 import logging
 import subprocess
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,7 +44,8 @@ class OptimizedAutotuneCache:
             cache_dir: Directory to store cached tuned videos
             max_workers: Number of parallel workers for autotune processing
         """
-        self.cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), 'autotunesyncer_cache')
+        default_cache = str(Path.home() / '.autotunesyncer' / 'cache_v2')
+        self.cache_dir = cache_dir or default_cache
         self.max_workers = max_workers
         self.cache_index = {}
         self.processing_stats = {
@@ -52,7 +54,9 @@ class OptimizedAutotuneCache:
             'processing_time': 0.0,
             'videos_processed': 0
         }
-        self.lock = threading.RLock()
+        self.lock = threading.RLock()          # guards cache_index and stats only
+        self._key_locks: Dict[str, threading.Lock] = {}  # per-key lock for parallel processing
+        self._key_locks_lock = threading.Lock()  # guards _key_locks dict
         
         # Ensure cache directory exists
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -78,26 +82,33 @@ class OptimizedAutotuneCache:
             self.cache_index = {}
 
     def _save_cache_index(self):
-        """Save cache index to disk"""
+        """Save cache index to disk using an atomic write to prevent corruption
+        if multiple processes write simultaneously."""
         index_file = os.path.join(self.cache_dir, 'cache_index.json')
+        tmp_file = index_file + '.tmp'
         try:
-            with open(index_file, 'w') as f:
+            with open(tmp_file, 'w') as f:
                 json.dump(self.cache_index, f, indent=2)
+            os.replace(tmp_file, index_file)  # atomic on POSIX and Windows
         except Exception as e:
             logging.error(f"Failed to save cache index: {e}")
 
     def _generate_video_hash(self, video_path: str) -> str:
-        """Generate hash for video file to use as cache key"""
+        """Generate a content-based hash for a video file.
+
+        Intentionally excludes mtime so that the same video content uploaded
+        to different paths (or at different times) produces the same key,
+        enabling pre-cache warm-ups to benefit subsequent composition uploads.
+        """
         try:
             with open(video_path, 'rb') as f:
-                # Read first and last 1KB to create fingerprint
                 start_data = f.read(1024)
-                f.seek(-1024, 2)
+                f.seek(-min(1024, os.path.getsize(video_path)), 2)
                 end_data = f.read(1024)
-                
-            file_stats = os.stat(video_path)
-            hash_input = f"{start_data}{end_data}{file_stats.st_size}{file_stats.st_mtime}"
-            return hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+            file_size = os.path.getsize(video_path)
+            # Content fingerprint only — no mtime
+            hash_input = start_data + end_data + str(file_size).encode()
+            return hashlib.sha256(hash_input).hexdigest()[:16]
         except Exception as e:
             logging.warning(f"Failed to hash video {video_path}: {e}")
             return hashlib.md5(video_path.encode()).hexdigest()[:16]
@@ -111,53 +122,64 @@ class OptimizedAutotuneCache:
         """Get path where cached video should be stored"""
         return os.path.join(self.cache_dir, f"{cache_key}.mp4")
 
+    def _get_key_lock(self, cache_key: str) -> threading.Lock:
+        """Return (creating if needed) the per-key lock for a cache entry."""
+        with self._key_locks_lock:
+            if cache_key not in self._key_locks:
+                self._key_locks[cache_key] = threading.Lock()
+            return self._key_locks[cache_key]
+
     def get_tuned_video(self, video_path: str, midi_note: int) -> Optional[str]:
         """
         Get cached tuned video or create it if not exists.
-        
-        Args:
-            video_path: Path to original instrument video
-            midi_note: Target MIDI note for tuning
-            
-        Returns:
-            Path to tuned video or None if failed
+
+        Uses per-key locking so that parallel preprocessing for different
+        note/instrument combinations runs concurrently.
         """
+        cache_key = self._get_cache_key(video_path, midi_note)
+        cached_path = self._get_cached_video_path(cache_key)
+
+        # Fast path: already cached
         with self.lock:
-            cache_key = self._get_cache_key(video_path, midi_note)
-            cached_path = self._get_cached_video_path(cache_key)
-            
-            # Check if cached version exists and is valid
             if cache_key in self.cache_index and os.path.exists(cached_path):
-                # Verify cached file is not corrupted
-                if os.path.getsize(cached_path) > 1000:  # Basic size check
+                if os.path.getsize(cached_path) > 1000:
                     self.processing_stats['cache_hits'] += 1
                     logging.info(f"✅ Cache HIT: {os.path.basename(video_path)} → MIDI {midi_note}")
                     return cached_path
-                else:
-                    # Remove corrupted cache entry
-                    logging.warning(f"Removing corrupted cache entry: {cache_key}")
-                    self.cache_index.pop(cache_key, None)
-                    if os.path.exists(cached_path):
-                        os.remove(cached_path)
-            
-            # Cache miss - need to create tuned video
-            self.processing_stats['cache_misses'] += 1
+                # Corrupted entry — evict under the global lock
+                logging.warning(f"Removing corrupted cache entry: {cache_key}")
+                self.cache_index.pop(cache_key, None)
+                if os.path.exists(cached_path):
+                    os.remove(cached_path)
+
+        # Slow path: acquire per-key lock to avoid duplicate work
+        key_lock = self._get_key_lock(cache_key)
+        with key_lock:
+            # Double-check after acquiring per-key lock
+            with self.lock:
+                if cache_key in self.cache_index and os.path.exists(cached_path):
+                    if os.path.getsize(cached_path) > 1000:
+                        self.processing_stats['cache_hits'] += 1
+                        return cached_path
+
+            with self.lock:
+                self.processing_stats['cache_misses'] += 1
             logging.info(f"❌ Cache MISS: {os.path.basename(video_path)} → MIDI {midi_note} (processing...)")
-            
+
             tuned_path = self._create_tuned_video(video_path, midi_note, cached_path)
             if tuned_path:
-                # Update cache index
-                self.cache_index[cache_key] = {
-                    'original_video': video_path,
-                    'midi_note': midi_note,
-                    'cached_path': cached_path,
-                    'created_at': time.time(),
-                    'file_size': os.path.getsize(cached_path)
-                }
-                self._save_cache_index()
+                with self.lock:
+                    self.cache_index[cache_key] = {
+                        'original_video': video_path,
+                        'midi_note': midi_note,
+                        'cached_path': cached_path,
+                        'created_at': time.time(),
+                        'file_size': os.path.getsize(cached_path)
+                    }
+                    self._save_cache_index()
                 return tuned_path
-            
-            return None
+
+        return None
 
     def _create_tuned_video(self, video_path: str, midi_note: int, output_path: str) -> Optional[str]:
         """

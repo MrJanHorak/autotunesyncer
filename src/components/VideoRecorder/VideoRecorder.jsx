@@ -2,8 +2,8 @@
 /* eslint-disable react/prop-types */
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { handleUploadedVideoAutotune } from '../../js/handleRecordVideo';
-import ControlButtons from '../ControlButtons/ControlButtons';
 import LoadingSpinner from '../LoadingSpinner/LoadingSpinner';
+import SampleSoundButton from '../SampleSoundButton/SampleSoundButton';
 import '../styles.css';
 import { isDrumTrack } from '../../js/drumUtils';
 import CountdownTimer from '../CountdownTimer/CountdownTimer';
@@ -65,6 +65,15 @@ const useRecordingState = (currentVideo) => {
     };
   }, [cleanupMediaStream]);
 
+  // Sync when the parent supplies a new currentVideo (e.g. clip restored from server).
+  useEffect(() => {
+    if (!currentVideo) return;
+    setRecordingState((prev) => {
+      if (prev.autotunedURL === currentVideo) return prev; // already set
+      return { ...prev, autotunedURL: currentVideo, hasVideo: true };
+    });
+  }, [currentVideo]);
+
   return {
     videoRef,
     mediaStreamRef,
@@ -82,6 +91,7 @@ const VideoRecorder = ({
   onVideoReady,
   minDuration,
   currentVideo,
+  midiData,
 }) => {
   const {
     videoRef,
@@ -159,10 +169,13 @@ const VideoRecorder = ({
         videoElement.play();
         mediaRecorder.start();
 
-        setTimeout(() => {
-          mediaRecorder.stop();
-          videoElement.pause();
-        }, (end - start) * 1000);
+        setTimeout(
+          () => {
+            mediaRecorder.stop();
+            videoElement.pause();
+          },
+          (end - start) * 1000,
+        );
       });
     } catch (error) {
       console.error('Error trimming video:', error);
@@ -170,11 +183,14 @@ const VideoRecorder = ({
     }
   };
 
-  const handleAutotuneToggle = useCallback((e) => {
-    console.log('Toggle clicked, previous state:', isAutotuneEnabled);
-    setIsAutotuneEnabled(e.target.checked);
-    console.log('New state:', e.target.checked);
-  }, [isAutotuneEnabled]);
+  const handleAutotuneToggle = useCallback(
+    (e) => {
+      console.log('Toggle clicked, previous state:', isAutotuneEnabled);
+      setIsAutotuneEnabled(e.target.checked);
+      console.log('New state:', e.target.checked);
+    },
+    [isAutotuneEnabled],
+  );
 
   useEffect(() => {
     if (recordingState.autotunedURL && !recordingState.isProcessing) {
@@ -351,13 +367,13 @@ const VideoRecorder = ({
       const url = URL.createObjectURL(blob);
       onVideoReady?.(url, instrument);
     },
-    [instrument, onRecordingComplete, onVideoReady]
+    [instrument, onRecordingComplete, onVideoReady],
   );
 
   const stopRecording = useCallback(() => {
     console.log(
       'Stopping recording at duration:',
-      recordingState.recordingDuration
+      recordingState.recordingDuration,
     );
 
     if (recordingTimer.current) {
@@ -467,7 +483,7 @@ const VideoRecorder = ({
             // Explicitly pass the instrument parameter to onVideoReady
             onVideoReady?.(autotunedURL, instrument);
           },
-          instrument // Add instrument as parameter if needed by handleUploadedVideoAutotune
+          instrument, // Add instrument as parameter if needed by handleUploadedVideoAutotune
         );
       }
     } catch (error) {
@@ -503,7 +519,7 @@ const VideoRecorder = ({
   const renderVideo = () => {
     if (recordingState.isRecording) {
       return (
-        <div className='video-container'>
+        <>
           <video
             ref={videoRef}
             className='video-element'
@@ -515,7 +531,7 @@ const VideoRecorder = ({
             Recording: {recordingState.recordingDuration}s / {minDuration}s
             minimum
           </div>
-        </div>
+        </>
       );
     }
 
@@ -554,12 +570,11 @@ const VideoRecorder = ({
   };
 
   const renderControls = () => {
-    // Get the display name for the instrument
     const instrumentName = instrument.isDrum
       ? `drum_${instrument.group}`
       : instrument.name;
 
-    const uploadId = `video-upload-${instrumentName}`; // Use normalized name for ID
+    const uploadId = `video-upload-${instrumentName}`;
 
     const hasValidVideo =
       recordingState.hasVideo &&
@@ -568,52 +583,103 @@ const VideoRecorder = ({
 
     return (
       <div className='controls-section'>
-        <div className='mode-selector'>
-          <button
-            onClick={() => setIsUploadMode(false)}
-            className={!isUploadMode ? 'active' : ''}
-          >
-            Record Video
-          </button>
-          <button
-            onClick={() => setIsUploadMode(true)}
-            className={isUploadMode ? 'active' : ''}
-          >
-            Upload Video
-          </button>
-        </div>
+        <div className='action-buttons-wrapper'>
+          {/* Button Slot 1: Primary Action */}
+          {isUploadMode ? (
+            <>
+              <input
+                type='file'
+                accept='video/*'
+                onChange={handleFileUpload}
+                id={uploadId}
+                style={{ display: 'none' }}
+              />
+              <label htmlFor={uploadId} className='control-button'>
+                <svg
+                  xmlns='http://www.w3.org/2000/svg'
+                  fill='none'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                  style={{ width: '20px', height: '20px' }}
+                >
+                  <path
+                    strokeLinecap='round'
+                    strokeLinejoin='round'
+                    strokeWidth='2'
+                    d='M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12'
+                  />
+                </svg>
+                {recordingState.hasVideo
+                  ? 'Replace Video'
+                  : 'Choose Video File'}
+              </label>
+            </>
+          ) : (
+            <button
+              className='control-button'
+              onClick={
+                recordingState.isRecording ? stopRecording : startRecording
+              }
+              disabled={recordingState.isCountingDown}
+            >
+              {recordingState.isRecording
+                ? 'Stop Recording'
+                : 'Start Recording'}
+            </button>
+          )}
 
-        {isUploadMode ? (
-          <div className='upload-controls'>
-            <input
-              type='file'
-              accept='video/*'
-              onChange={handleFileUpload}
-              id={uploadId}
-              style={{ display: 'none' }}
-            />
-            <label htmlFor={uploadId} className='upload-button'>
-              {recordingState.hasVideo ? 'Replace Video' : 'Choose Video File'}{' '}
-              for {instrumentName}
-            </label>
-            {recordingState.recordingDuration > 0 && (
+          {/* Button Slot 2: Secondary Action */}
+          {isUploadMode ? (
+            recordingState.recordingDuration > 0 ? (
               <div className='video-duration'>
                 Duration: {recordingState.recordingDuration}s
                 {minDuration > 0 && ` / ${minDuration}s minimum`}
               </div>
-            )}
-          </div>
-        ) : (
-          <ControlButtons
-            isRecording={recordingState.isRecording}
-            hasRecordedVideo={hasValidVideo}
-            onStartRecording={startRecording}
-            onStopRecording={stopRecording}
-            onReRecord={handleReRecord}
-            disabled={recordingState.isCountingDown} // Add this prop
-            instrument={instrumentName} // Pass the string name instead of object
-          />
-        )}
+            ) : (
+              <div className='button-spacer'></div>
+            )
+          ) : hasValidVideo ? (
+            <button className='control-button' onClick={handleReRecord}>
+              Re-record
+            </button>
+          ) : (
+            <SampleSoundButton
+              instrument={instrument}
+              instrumentName={instrumentName}
+              className='control-button'
+              isDrumTrack={isDrum}
+              midiData={midiData}
+            />
+          )}
+
+          {/* Toggle Link */}
+          <button
+            onClick={() => setIsUploadMode(!isUploadMode)}
+            className='upload-toggle'
+          >
+            <svg
+              xmlns='http://www.w3.org/2000/svg'
+              fill='none'
+              viewBox='0 0 24 24'
+              stroke='currentColor'
+            >
+              {isUploadMode ? (
+                <>
+                  <circle cx='12' cy='12' r='9' strokeWidth='2' />
+                  <circle cx='12' cy='12' r='3' fill='currentColor' />
+                </>
+              ) : (
+                <path
+                  strokeLinecap='round'
+                  strokeLinejoin='round'
+                  strokeWidth='2'
+                  d='M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12'
+                />
+              )}
+            </svg>
+            {isUploadMode ? 'Switch to recording' : 'or upload a video instead'}
+          </button>
+        </div>
 
         {recordingState.autotunedURL && !recordingState.isRecording && (
           <button onClick={() => setShowTrimmer(!showTrimmer)}>
@@ -637,6 +703,27 @@ const VideoRecorder = ({
     <>
       <div className='recorder-wrapper' style={style}>
         <div className='video-container'>
+          {!recordingState.isRecording &&
+            !recordingState.hasVideo &&
+            minDuration > 0 && (
+              <div className='duration-badge'>
+                <svg
+                  xmlns='http://www.w3.org/2000/svg'
+                  fill='none'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                >
+                  <circle cx='12' cy='12' r='10' strokeWidth='2' />
+                  <path
+                    strokeLinecap='round'
+                    strokeLinejoin='round'
+                    strokeWidth='2'
+                    d='M12 6v6l4 2'
+                  />
+                </svg>
+                {minDuration}s minimum
+              </div>
+            )}
           {recordingState.showCountdown &&
             !recordingState.isRecording &&
             !isUploadMode && (

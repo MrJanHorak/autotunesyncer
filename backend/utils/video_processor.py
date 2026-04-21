@@ -45,17 +45,19 @@ class EnhancedVideoProcessor:
     Maintains the same interface as the original but uses chunk-based processing
     """
     
-    def __init__(self, performance_mode=True, memory_limit_gb=4, parallel_tracks=None):
+    def __init__(self, performance_mode=True, memory_limit_gb=4, parallel_tracks=None, preview_mode=False):
         """Initialize with VideoComposerWrapper backend"""
         self.performance_mode = performance_mode
         self.memory_limit_gb = memory_limit_gb
         self.parallel_tracks = parallel_tracks
+        self.preview_mode = preview_mode
         
         # Use the efficient VideoComposerWrapper internally
-        self.composer_wrapper = VideoComposerWrapper()
+        self.composer_wrapper = VideoComposerWrapper(preview_mode=preview_mode)
         
         logger.info(f"Initialized EnhancedVideoProcessor with chunk-based backend")
         logger.info(f"Performance mode: {performance_mode}, Memory limit: {memory_limit_gb}GB")
+        logger.info(f"Preview mode: {preview_mode}")
     
     def report_progress(self, progress: int, message: str = ""):
         """Report progress to parent process"""
@@ -170,6 +172,7 @@ def main():
     parser.add_argument('--output-path', required=True, help='Output video path')
     parser.add_argument('--performance-mode', action='store_true', default=True, help='Enable performance mode')
     parser.add_argument('--memory-limit', type=int, default=4, help='Memory limit in GB')
+    parser.add_argument('--preview', action='store_true', help='Enable preview mode (lower resolution/faster)')
     
     args = parser.parse_args()
     
@@ -186,7 +189,8 @@ def main():
     # Initialize processor
     processor = EnhancedVideoProcessor(
         performance_mode=args.performance_mode,
-        memory_limit_gb=args.memory_limit
+        memory_limit_gb=args.memory_limit,
+        preview_mode=args.preview
     )
     
     # Validate inputs
