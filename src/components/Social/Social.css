@@ -391,6 +391,17 @@
   flex-shrink: 0;
 }
 
+.comp-detail__author-avatar--btn {
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, box-shadow 0.15s;
+  padding: 0;
+}
+.comp-detail__author-avatar--btn:hover {
+  opacity: 0.85;
+  box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.3);
+}
+
 .comp-detail__author-link {
   background: none;
   border: none;
@@ -918,6 +929,61 @@
   font-weight: 700;
   color: var(--social-text);
   margin-bottom: 1.25rem;
+}
+
+.user-profile__visibility-note {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--social-text-muted);
+  margin-bottom: 1rem;
+  background: rgba(192, 132, 252, 0.07);
+  border: 1px solid rgba(192, 132, 252, 0.15);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+/* Composition card wrapper with visibility controls */
+.user-profile__comp-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.vis-badge-row {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.vis-badge {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.375rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid rgba(192, 132, 252, 0.2);
+  background: rgba(255,255,255,0.03);
+  color: var(--social-text-muted);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.vis-badge:hover {
+  background: rgba(192, 132, 252, 0.12);
+  color: var(--social-text);
+}
+.vis-badge--active {
+  background: rgba(192, 132, 252, 0.18);
+  border-color: var(--social-accent);
+  color: var(--social-accent);
+}
+.vis-badge:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
 
 /* ─── Shared States ──────────────────────────────────────────────────────── */

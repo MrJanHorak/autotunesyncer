@@ -188,7 +188,13 @@ const CompositionDetail = ({ compositionId, onBack, onSelectUser, onSelectCompos
             <h1 className='comp-detail__title'>{composition.title}</h1>
 
             <div className='comp-detail__author-left'>
-              <div className='comp-detail__author-avatar'>{authorInitial}</div>
+              <button
+                className='comp-detail__author-avatar comp-detail__author-avatar--btn'
+                onClick={() => onSelectUser(composition.user_id)}
+                aria-label={`View ${composition.username}'s profile`}
+              >
+                {authorInitial}
+              </button>
               <div>
                 <button className='comp-detail__author-link' onClick={() => onSelectUser(composition.user_id)}>
                   @{composition.username}

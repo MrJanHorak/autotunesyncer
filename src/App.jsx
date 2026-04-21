@@ -1,7 +1,7 @@
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState, useRef } from 'react';
 import PropTypes from 'prop-types';
-import { Film, Music, Grid3x3, FolderOpen, LogOut } from 'lucide-react';
+import { Film, Music, Grid3x3, FolderOpen, LogOut, Bell, Settings, User } from 'lucide-react';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
 import InstrumentList from './components/InstrumentList/InstrumentList';
@@ -35,6 +35,8 @@ import PreviewPlayer from './components/PreviewPlayer/PreviewPlayer';
 import SocialFeed from './components/Social/SocialFeed.jsx';
 import CompositionDetail from './components/Social/CompositionDetail.jsx';
 import UserProfile from './components/Social/UserProfile.jsx';
+import Notifications from './components/Social/Notifications.jsx';
+import SettingsModal from './components/Social/Settings.jsx';
 import './components/Social/Social.css';
 
 import './App.css';
@@ -87,8 +89,56 @@ function App() {
     }
   }, []);
 
+  // When a project is selected while on the Projects tab, auto-switch to Editor
+  useEffect(() => {
+    if (currentProject && appView === 'projects') {
+      setAppView('compose');
+    }
+  }, [currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Auth modal state for guests
   const [showAuth, setShowAuth] = useState(false);
+
+  // User avatar dropdown menu
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef(null);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handler = (e) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) setUserMenuOpen(false);
+    };
+    const keyHandler = (e) => { if (e.key === 'Escape') setUserMenuOpen(false); };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('keydown', keyHandler);
+    return () => { document.removeEventListener('mousedown', handler); document.removeEventListener('keydown', keyHandler); };
+  }, [userMenuOpen]);
+
+  // Notifications panel
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const fetchUnreadCount = useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch('http://localhost:3000/api/social/notifications/unread-count', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setUnreadCount(data.count || 0);
+      }
+    } catch { /* ignore */ }
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    fetchUnreadCount();
+    const interval = setInterval(fetchUnreadCount, 60000);
+    return () => clearInterval(interval);
+  }, [fetchUnreadCount]);
+
+  // Settings modal
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Auth modal wrapper
   function AuthPageModal({ onClose }) {
@@ -188,33 +238,92 @@ function App() {
       </div>
 
       <div className='app-nav__right'>
-        {user && (
-          <span className='app-nav__user'>
-            <span className='app-nav__avatar'>
-              {user.profileImageUrl
-                ? <img src={user.profileImageUrl} alt='profile' />
-                : user.username?.[0]?.toUpperCase() || 'U'
-              }
-            </span>
-            @{user.username}
+        {appView === 'compose' && currentProject && (
+          <span className='app-nav__project-name'>
+            <FolderOpen size={14} /> {currentProject.name}
           </span>
         )}
-        {appView === 'compose' && currentProject && (
-          <button className='app-nav__btn' onClick={() => selectProject(null)}>
-            <FolderOpen size={15} /> {currentProject.name}
-          </button>
+        {user && (
+          <>
+            {/* Bell icon with unread dot */}
+            <button
+              className='app-nav__bell-btn'
+              onClick={() => { setNotifOpen((v) => !v); setUserMenuOpen(false); }}
+              aria-label='Notifications'
+            >
+              <Bell size={18} />
+              {unreadCount > 0 && <span className='app-nav__notif-dot'>{unreadCount > 9 ? '9+' : unreadCount}</span>}
+            </button>
+
+            <div className='app-nav__user-menu' ref={userMenuRef}>
+              <button
+                className='app-nav__avatar-btn'
+                onClick={() => { setUserMenuOpen((v) => !v); setNotifOpen(false); }}
+                aria-label='User menu'
+                aria-expanded={userMenuOpen}
+              >
+                {user.profileImageUrl
+                  ? <img src={user.profileImageUrl} alt={user.username} className='app-nav__avatar-img' />
+                  : <span className='app-nav__avatar-initials'>{user.username?.[0]?.toUpperCase() || 'U'}</span>
+                }
+              </button>
+              {userMenuOpen && (
+                <div className='app-nav__dropdown'>
+                  <div className='app-nav__dropdown-header'>
+                    <span className='app-nav__dropdown-username'>@{user.username}</span>
+                  </div>
+                  <button className='app-nav__dropdown-item' onClick={() => {
+                    setAppView('feed');
+                    setSocialNav({ page: 'profile', id: user.id });
+                    setUserMenuOpen(false);
+                  }}>
+                    <User size={15} /> My Profile
+                  </button>
+                  <button className='app-nav__dropdown-item' onClick={() => {
+                    setSettingsOpen(true);
+                    setUserMenuOpen(false);
+                  }}>
+                    <Settings size={15} /> Settings
+                  </button>
+                  <div className='app-nav__dropdown-divider' />
+                  <button className='app-nav__dropdown-item app-nav__dropdown-item--danger' onClick={() => {
+                    setUserMenuOpen(false);
+                    logout();
+                  }}>
+                    <LogOut size={15} /> Sign Out
+                  </button>
+                </div>
+              )}
+            </div>
+          </>
         )}
-        <button className='app-nav__btn' onClick={logout}>
-          <LogOut size={15} /> Sign Out
-        </button>
       </div>
     </nav>
+  );
+
+  const overlays = (
+    <>
+      {notifOpen && (
+        <div className='notif-panel-wrap'>
+          <Notifications
+            onClose={() => { setNotifOpen(false); setUnreadCount(0); }}
+            onSelectComposition={(id) => {
+              setAppView('feed');
+              setSocialNav({ page: 'detail', id });
+              setNotifOpen(false);
+            }}
+          />
+        </div>
+      )}
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+    </>
   );
 
   if (appView === 'feed') {
     return (
       <div style={{ minHeight: '100vh', background: 'var(--social-bg)' }}>
         {navBar}
+        {overlays}
         {socialNav.page === 'feed' && (
           <SocialFeed
             onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
@@ -247,32 +356,36 @@ function App() {
     );
   }
 
-  // Compose view — requires project selection
-  if (!currentProject) {
+  // Projects tab — always shows project manager
+  if (appView === 'projects') {
     return (
-      <div
-        style={{
-          minHeight: '100vh',
-          background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)',
-        }}
-      >
+      <div style={{ minHeight: '100vh', background: 'var(--color-bg-dark)' }}>
         {navBar}
-        <ProjectManager />
+        {overlays}
+        <ProjectManager onContinue={() => setAppView('compose')} />
       </div>
     );
   }
 
-  return (
-    <div
-      style={{
-        minHeight: '100vh',
-        background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)',
-      }}
-    >
-      {navBar}
-      <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />
-    </div>
-  );
+  // Compose/Editor tab — show editor if project open, otherwise project selection
+  if (appView === 'compose') {
+    if (!currentProject) {
+      return (
+        <div style={{ minHeight: '100vh', background: 'var(--color-bg-dark)' }}>
+          {navBar}
+          {overlays}
+          <ProjectManager onContinue={() => setAppView('compose')} />
+        </div>
+      );
+    }
+    return (
+      <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+        {navBar}
+        {overlays}
+        <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />
+      </div>
+    );
+  }
 }
 
 function MainApp({ onChangeProject, onLogout }) {

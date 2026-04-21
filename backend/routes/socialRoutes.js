@@ -8,6 +8,7 @@ import {
   getFollowingFeed,
   getComposition,
   deleteComposition,
+  updateVisibility,
   likeComposition,
   unlikeComposition,
   getComments,
@@ -18,6 +19,12 @@ import {
   followUser,
   unfollowUser,
 } from '../controllers/socialController.js';
+import {
+  getNotifications,
+  getUnreadCount,
+  markAllRead,
+  markOneRead,
+} from '../controllers/notificationController.js';
 
 const router = express.Router();
 
@@ -45,6 +52,7 @@ router.get('/feed/following', getFollowingFeed);
 router.post('/compositions', upload.single('video'), shareComposition);
 router.get('/compositions/:id', getComposition);
 router.delete('/compositions/:id', deleteComposition);
+router.patch('/compositions/:id/visibility', updateVisibility);
 
 // Likes (explicit put/delete for idempotency)
 router.put('/compositions/:id/like', likeComposition);
@@ -60,5 +68,11 @@ router.get('/users/:userId', getUserProfile);
 router.get('/users/:userId/compositions', getUserCompositions);
 router.put('/users/:userId/follow', followUser);
 router.delete('/users/:userId/follow', unfollowUser);
+
+// Notifications
+router.get('/notifications', getNotifications);
+router.get('/notifications/unread-count', getUnreadCount);
+router.patch('/notifications/read-all', markAllRead);
+router.patch('/notifications/:notifId/read', markOneRead);
 
 export default router;
