@@ -17,14 +17,47 @@ const MidiInfoDisplay = ({ midiData }) => {
         <span className={`arrow ${isExpanded ? 'expanded' : ''}`}>▼</span>
       </div>
       <div className={`midi-info-content ${isExpanded ? 'expanded' : ''}`}>
-        <div className='midi-info'>
-          <p>File: {midiData.summary?.name || 'Unknown'}</p>
-          <p>Total Tracks: {midiData.tracks?.length || 0}</p>
-          <p>Duration: {Math.round(midiData.duration || 0)}s</p>
-          <p>Format: {midiData.header?.format || 'Unknown'}</p>
-          <p>Time Signature: {midiData.header?.timeSignature || '4/4'}</p>
-          <p>Key: {midiData.header?.key || 'Unknown'}</p>
-          <p>Tempo: {Math.round(midiData.header?.tempo || 120)} BPM</p>
+        <div className='midi-info-grid'>
+          <div className='midi-info-item'>
+            <div className='info-label'>File</div>
+            <div className='info-value'>
+              {midiData.summary?.name || 'Unknown'}
+            </div>
+          </div>
+          <div className='midi-info-item'>
+            <div className='info-label'>Total Tracks</div>
+            <div className='info-value'>{midiData.tracks?.length || 0}</div>
+          </div>
+          <div className='midi-info-item'>
+            <div className='info-label'>Duration</div>
+            <div className='info-value'>
+              {Math.round(midiData.duration || 0)}s
+            </div>
+          </div>
+          <div className='midi-info-item'>
+            <div className='info-label'>Format</div>
+            <div className='info-value'>
+              {midiData.header?.format || 'Unknown'}
+            </div>
+          </div>
+          <div className='midi-info-item'>
+            <div className='info-label'>Time Signature</div>
+            <div className='info-value'>
+              {midiData.header?.timeSignature || '4/4'}
+            </div>
+          </div>
+          <div className='midi-info-item'>
+            <div className='info-label'>Key</div>
+            <div className='info-value'>
+              {midiData.header?.key || 'Unknown'}
+            </div>
+          </div>
+          <div className='midi-info-item'>
+            <div className='info-label'>Tempo</div>
+            <div className='info-value'>
+              {Math.round(midiData.header?.tempo || 120)} BPM
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -34,3 +34,8 @@ venv_py31010/
 backend/python/processed_videos/
 backend/processed_videos/
 backend/uploads/
+
+# Large soundfont files
+*.sf2
+*.dls
+public/soundfonts/*.sf2

@@ -808,6 +808,9 @@ class GPUPipelineProcessor:
                     '-b:a', '192k',
                     '-af', 'aresample=async=1000',  # Better AV sync
                     '-shortest',
+                    '-pix_fmt', 'yuv420p',
+                    '-movflags', '+faststart',
+                    '-avoid_negative_ts', 'make_zero',
                     output_path
                 ]
                 

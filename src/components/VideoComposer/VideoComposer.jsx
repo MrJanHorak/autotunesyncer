@@ -1,56 +1,165 @@
 /* eslint-disable react/prop-types */
-import { useState, useEffect } from 'react';
-import { composeVideos } from '../../../services/videoServices.js';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { startCompositionJob, pollCompositionJob } from '../../../services/videoServices.js';
+import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 
-const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
+const VideoComposer = ({
+  videoFiles,
+  midiData,
+  instrumentTrackMap,
+  gridArrangement,
+  trackVolumes,
+  muteStates = {},
+  soloTrack = null,
+}) => {
   const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [processingMode, setProcessingMode] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
+  const [composedBlob, setComposedBlob] = useState(null);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [error, setError] = useState(null);
+  const timerRef = useRef(null);
+
+  const validationErrors = useMemo(() => {
+    const errors = [];
+
+    if (
+      !midiData ||
+      !Array.isArray(midiData.tracks) ||
+      midiData.tracks.length === 0
+    ) {
+      errors.push('MIDI data is missing tracks.');
+    } else {
+      const hasInvalidNoteTiming = midiData.tracks.some((track) =>
+        (track?.notes || []).some(
+          (note) =>
+            !Number.isFinite(Number(note?.time)) ||
+            !Number.isFinite(Number(note?.duration)) ||
+            Number(note.duration) <= 0,
+        ),
+      );
+
+      if (hasInvalidNoteTiming) {
+        errors.push('MIDI notes contain invalid time or duration values.');
+      }
+    }
+
+    const mapSize =
+      instrumentTrackMap instanceof Map
+        ? instrumentTrackMap.size
+        : Object.keys(instrumentTrackMap || {}).length;
+    if (mapSize === 0) {
+      errors.push(
+        'Instrument-to-track mapping is missing. Re-parse the MIDI file.',
+      );
+    }
+
+    if (!gridArrangement || Object.keys(gridArrangement).length === 0) {
+      errors.push('Grid arrangement is missing.');
+    }
+
+    const entries = Object.entries(videoFiles || {});
+    if (entries.length === 0) {
+      errors.push('At least one video recording is required.');
+    } else {
+      const invalidVideos = entries.filter(([, value]) => {
+        if (!value) return true;
+        if (value instanceof Blob) return value.size === 0;
+        return typeof value !== 'string' || value.length === 0;
+      });
+      if (invalidVideos.length > 0) {
+        errors.push(
+          `Invalid video input for: ${invalidVideos.map(([name]) => name).join(', ')}`,
+        );
+      }
+    }
+
+    return errors;
+  }, [midiData, instrumentTrackMap, gridArrangement, videoFiles]);
+
+  const canCompose = validationErrors.length === 0;
 
   useEffect(() => {
     console.log('VideoFiles received:', videoFiles);
   }, [videoFiles]);
 
-  const startComposition = async () => {
+  // Compute effective volumes applying mute/solo logic
+  const effectiveVolumes = useMemo(() => {
+    const result = { ...trackVolumes };
+    const hasSolo = soloTrack !== null;
+    for (const key of Object.keys(result)) {
+      const isMuted = muteStates[key];
+      const isSolo = key === soloTrack;
+      if (isMuted || (hasSolo && !isSolo)) {
+        result[key] = -Infinity; // silenced
+      }
+    }
+    return result;
+  }, [trackVolumes, muteStates, soloTrack]);
+
+  const startComposition = async (isPreview = false) => {
+    if (!canCompose) {
+      setError(validationErrors.join(' '));
+      return;
+    }
+
     console.log('Grid arrangement:', gridArrangement);
     setIsProcessing(true);
-    setProgress(0);
+    setProcessingMode(isPreview ? 'preview' : 'full');
+    setUploadProgress(0);
+    setRenderProgress(0);
+    setElapsedSeconds(0);
     setError(null);
+    if (composedVideoUrl) {
+      URL.revokeObjectURL(composedVideoUrl);
+      setComposedVideoUrl(null);
+    }
+
+    // Start elapsed-time counter
+    timerRef.current = setInterval(() => {
+      setElapsedSeconds((s) => s + 1);
+    }, 1000);
 
     try {
       const formData = new FormData();
 
-      // Add MIDI data
-      const midiJsonString = JSON.stringify({
+      // Add MIDI data — substitute effective volumes so mute/solo is baked in
+      const midiPayload = {
         ...midiData,
-        gridArrangement, 
+        gridArrangement,
+        trackVolumes: effectiveVolumes,
+      };
+      console.log('Midi data being sent:', midiPayload);
+      const midiBlob = new Blob([JSON.stringify(midiPayload)], {
+        type: 'application/json',
       });
-      console.log('Midi data being sent:', JSON.parse(midiJsonString));
-      const midiBlob = new Blob([midiJsonString], { type: 'application/json' });
       formData.append('midiData', midiBlob);
+
+      if (isPreview) {
+        formData.append('preview', 'true');
+      }
 
       // Process and append videos
       for (const [instrumentName, videoData] of Object.entries(videoFiles)) {
-        console.log(`Processing ${instrumentName} video:`, videoData);
-
         if (!videoData) {
           console.error(`No video data for ${instrumentName}`);
           continue;
         }
 
-        // Convert video URL to Blob if needed
         let videoBlob = videoData;
         if (!(videoData instanceof Blob)) {
           try {
-            const response = await fetch(videoData);
-            if (!response.ok)
+            const fetchRes = await fetch(videoData);
+            if (!fetchRes.ok)
               throw new Error(`Failed to fetch video for ${instrumentName}`);
-            videoBlob = await response.blob();
-          } catch (error) {
+            videoBlob = await fetchRes.blob();
+          } catch (fetchErr) {
             console.error(
               `Error processing video for ${instrumentName}:`,
-              error
+              fetchErr,
             );
             continue;
           }
@@ -58,87 +167,125 @@ const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
 
         formData.append('videos', videoBlob, `${instrumentName}.mp4`);
         console.log(
-          `Added video for ${instrumentName}, size: ${videoBlob.size}`
+          `Added video for ${instrumentName}, size: ${videoBlob.size}`,
         );
       }
 
-      // Log FormData contents for debugging
-      for (const pair of formData.entries()) {
-        console.log('FormData entry:', pair[0], pair[1]);
-      }
+      // ── Async job: upload → get jobId → poll → download ──────────────────
+      const jobId = await startCompositionJob(formData, {
+        onUploadProgress: (pct) => setUploadProgress(pct),
+      });
+      console.log('Composition job started:', jobId);
 
-      const response = await composeVideos(formData, {
-        onUploadProgress: (progressEvent) => {
-          const percentCompleted = Math.round(
-            (progressEvent.loaded * 100) / progressEvent.total
-          );
-          setProgress(percentCompleted);
-        },
-        onDownloadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const percent = Math.round(
-              (progressEvent.loaded * 100) / progressEvent.total
-            );
-            setProgress(percent);
-          }
-        },
+      const blob = await pollCompositionJob(jobId, (pct) => {
+        setRenderProgress(pct);
       });
 
-      if (response.data instanceof Blob) {
-        // Check if the blob is an error message
-        if (response.data.type.includes('application/json')) {
-          const text = await response.data.text();
-          const error = JSON.parse(text);
-          throw new Error(error.error || 'Failed to process video');
-        }
-
-        const url = URL.createObjectURL(response.data);
-        setComposedVideoUrl(url);
-      } else {
-        throw new Error('Invalid response format');
-      }
-    } catch (error) {
-      console.error('Composition failed:', error);
-      setError(error.message || 'Failed to compose video');
-
-      if (error.code === 'ECONNABORTED') {
-        setError(
-          'Video processing took too long. Try with fewer or shorter videos.'
-        );
-      }
+      setComposedBlob(blob);
+      const url = URL.createObjectURL(blob);
+      setComposedVideoUrl(url);
+    } catch (err) {
+      console.error('Composition failed:', err);
+      setError(err.message || 'Failed to compose video');
     } finally {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
       setIsProcessing(false);
+      setProcessingMode(null);
     }
   };
 
-  // Cleanup URLs when component unmounts
+  // Cleanup timer and URL on unmount
   useEffect(() => {
     return () => {
-      if (composedVideoUrl) {
-        URL.revokeObjectURL(composedVideoUrl);
-      }
+      clearInterval(timerRef.current);
+      if (composedVideoUrl) URL.revokeObjectURL(composedVideoUrl);
     };
   }, [composedVideoUrl]);
 
   return (
     <div className='video-composer'>
-      <button
-        onClick={startComposition}
-        disabled={isProcessing || Object.keys(videoFiles).length === 0}
-        className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50'
-      >
-        {isProcessing ? 'Processing...' : 'Start Composition'}
-      </button>
+      {showShareModal && composedBlob && (
+        <ShareCompositionModal
+          blob={composedBlob}
+          onClose={() => setShowShareModal(false)}
+          onShared={() => setShowShareModal(false)}
+        />
+      )}
+      <div className='flex gap-4 mb-4'>
+        <button
+          onClick={() => startComposition(true)}
+          disabled={isProcessing || !canCompose}
+          className='px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 disabled:opacity-50 font-medium'
+        >
+          {isProcessing && processingMode === 'preview'
+            ? 'Generating Preview...'
+            : 'Generate Preview (Fast)'}
+        </button>
+        <button
+          onClick={() => startComposition(false)}
+          disabled={isProcessing || !canCompose}
+          className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 font-medium'
+        >
+          {isProcessing && processingMode === 'full'
+            ? 'Processing Full Video...'
+            : 'Start Full Composition'}
+        </button>
+      </div>
 
       {isProcessing && (
         <div className='mt-4'>
-          <div className='w-full h-2 bg-gray-200 rounded'>
-            <div
-              className='h-full bg-blue-500 rounded'
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <p className='text-sm text-gray-600 mt-1'>{progress}% complete</p>
+          {/* Upload phase */}
+          {uploadProgress < 100 ? (
+            <>
+              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
+                <div
+                  className={`h-full rounded transition-all duration-300 ${
+                    processingMode === 'preview' ? 'bg-yellow-500' : 'bg-blue-500'
+                  }`}
+                  style={{ width: `${uploadProgress}%` }}
+                />
+              </div>
+              <p className='text-sm text-gray-600 mt-1'>
+                Uploading videos… {uploadProgress}%
+              </p>
+            </>
+          ) : renderProgress > 0 ? (
+            /* Render phase: real progress from Python */
+            <>
+              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
+                <div
+                  className={`h-full rounded transition-all duration-500 ${
+                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
+                  }`}
+                  style={{ width: `${renderProgress}%` }}
+                />
+              </div>
+              <p className='text-sm text-gray-600 mt-1'>
+                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
+                rendering… {renderProgress}% — {elapsedSeconds}s elapsed
+              </p>
+            </>
+          ) : (
+            /* Queued / pre-processing phase: indeterminate */
+            <>
+              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
+                <div
+                  className={`h-full rounded ${
+                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
+                  }`}
+                  style={{
+                    width: '40%',
+                    animation: 'indeterminate-progress 1.4s infinite ease-in-out',
+                  }}
+                />
+              </div>
+              <p className='text-sm text-gray-600 mt-1'>
+                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
+                rendering… {elapsedSeconds}s elapsed
+              </p>
+            </>
+          )}
         </div>
       )}
 
@@ -146,9 +293,30 @@ const VideoComposer = ({ videoFiles, midiData, gridArrangement }) => {
         <div className='mt-4 p-4 bg-red-100 text-red-700 rounded'>{error}</div>
       )}
 
+      {!canCompose && !error && (
+        <div className='mt-4 p-4 bg-amber-100 text-amber-800 rounded'>
+          {validationErrors.join(' ')}
+        </div>
+      )}
+
       {composedVideoUrl && (
         <div className='mt-4'>
           <video src={composedVideoUrl} controls className='w-full max-w-4xl' />
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+            <a
+              href={composedVideoUrl}
+              download='composition.mp4'
+              style={{ padding: '0.5rem 1.1rem', background: '#16a34a', color: '#fff', borderRadius: '8px', fontWeight: 600, fontSize: '0.875rem', textDecoration: 'none' }}
+            >
+              ⬇ Download
+            </a>
+            <button
+              onClick={() => setShowShareModal(true)}
+              style={{ padding: '0.5rem 1.1rem', background: '#0f3460', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 600, fontSize: '0.875rem', cursor: 'pointer' }}
+            >
+              📤 Share to Feed
+            </button>
+          </div>
         </div>
       )}
     </div>

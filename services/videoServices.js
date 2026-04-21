@@ -2,6 +2,43 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_URL || 'http://localhost:3000/api';
 
+/** Read the stored JWT from localStorage. */
+function getToken() {
+  return localStorage.getItem('auth_token');
+}
+
+/** Read the current project id from localStorage. */
+function getProjectId() {
+  try {
+    const p = localStorage.getItem('current_project');
+    return p ? JSON.parse(p).id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Append ?projectId=<id> to a URL when a project is active. */
+function withProjectId(url) {
+  const projectId = getProjectId();
+  if (!projectId) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}projectId=${projectId}`;
+}
+
+/** Return fetch-compatible headers with Authorization set. */
+function authFetchHeaders(extra = {}) {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}`, ...extra } : extra;
+}
+
+/** Set Authorization + projectId query param on an open XMLHttpRequest. */
+function prepareXhr(xhr, baseUrl) {
+  const token = getToken();
+  const url = withProjectId(baseUrl);
+  if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+  return url;
+}
+
 /**
  * Custom error class for video processing errors
  */
@@ -30,7 +67,7 @@ async function handleApiResponse(response) {
     const errorData = await response.json().catch(() => ({}));
     throw new VideoProcessingError(
       'Request failed',
-      errorData.message || response.statusText
+      errorData.message || response.statusText,
     );
   }
   return response;
@@ -42,8 +79,11 @@ async function handleApiResponse(response) {
 export const videoService = {
   autotuneVideo: async (formData) => {
     try {
-      console.log('Sending video data to server, size:', formData.get('video').size);
-      
+      console.log(
+        'Sending video data to server, size:',
+        formData.get('video').size,
+      );
+
       const response = await fetch(`${API_BASE_URL}/autotune`, {
         method: 'POST',
         body: formData,
@@ -51,73 +91,217 @@ export const videoService = {
           // Remove Content-Type header to let browser set it with boundary
         },
       });
-      
+
       if (!response.ok) {
         const error = await response.text();
         console.error('Server response:', error);
         throw new Error(`Failed to autotune video: ${response.statusText}`);
       }
-      
+
       const blob = await response.blob();
       if (blob.size === 0) {
         throw new Error('Received empty response from server');
       }
-      
+
       return blob;
     } catch (error) {
       console.error('Autotune error:', error);
       throw error;
     }
   },
-}
-
-  // async composeVideos(videoFiles, midiData, onProgress) {
-  //   try {
-  //     const formData = new FormData();
-
-  //     // Add MIDI data
-  //     const midiBlob = new Blob([JSON.stringify(midiData)], {
-  //       type: 'application/json',
-  //     });
-  //     formData.append('midiData', midiBlob);
-
-  //     // Add video files
-  //     Object.entries(videoFiles).forEach(([instrument, blob]) => {
-  //       if (!(blob instanceof Blob || blob instanceof File)) {
-  //         throw new VideoProcessingError(
-  //           'Invalid video format',
-  //           `Invalid file for instrument: ${instrument}`
-  //         );
-  //       }
-  //       formData.append(`videos[${instrument}]`, blob);
-  //     });
-
-  //     const response = await fetch(`${API_BASE_URL}/compose`, {
-  //       method: 'POST',
-  //       body: formData,
-  //     });
-
-  //     const result = await handleApiResponse(response);
-  //     return await result.blob();
-  //   } catch (error) {
-  //     throw new VideoProcessingError('Composition failed', error.message);
-  //   }
-  // },
-
-  // Frontend API call
-export const composeVideos = async (formData, progressCallbacks = {}) => {
-  const response = await fetch(`${API_BASE_URL}/process-videos`, {
-    method: 'POST',
-    body: formData, // Send FormData directly
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.error || 'Failed to process videos');
-  }
-
-  return {
-    data: await response.blob()
-  };
 };
 
+// async composeVideos(videoFiles, midiData, onProgress) {
+//   try {
+//     const formData = new FormData();
+
+//     // Add MIDI data
+//     const midiBlob = new Blob([JSON.stringify(midiData)], {
+//       type: 'application/json',
+//     });
+//     formData.append('midiData', midiBlob);
+
+//     // Add video files
+//     Object.entries(videoFiles).forEach(([instrument, blob]) => {
+//       if (!(blob instanceof Blob || blob instanceof File)) {
+//         throw new VideoProcessingError(
+//           'Invalid video format',
+//           `Invalid file for instrument: ${instrument}`
+//         );
+//       }
+//       formData.append(`videos[${instrument}]`, blob);
+//     });
+
+//     const response = await fetch(`${API_BASE_URL}/compose`, {
+//       method: 'POST',
+//       body: formData,
+//     });
+
+//     const result = await handleApiResponse(response);
+//     return await result.blob();
+//   } catch (error) {
+//     throw new VideoProcessingError('Composition failed', error.message);
+//   }
+// },
+
+export const composeVideos = (formData, progressCallbacks = {}) => {
+  if (!(formData instanceof FormData)) {
+    return Promise.reject(new Error('Invalid compose request payload'));
+  }
+
+  const midiPart = formData.get('midiData');
+  const videoParts = formData.getAll('videos');
+
+  if (!midiPart) {
+    return Promise.reject(new Error('Missing midiData in compose request'));
+  }
+
+  if (!videoParts || videoParts.length === 0) {
+    return Promise.reject(new Error('Missing videos in compose request'));
+  }
+
+  const { onUploadProgress } = progressCallbacks;
+
+  return new Promise((resolve, reject) => {
+    const xhrOld = new XMLHttpRequest();
+    const xhrOldUrl = withProjectId(`${API_BASE_URL}/process-videos`);
+    xhrOld.open('POST', xhrOldUrl);
+    const tokenOld = getToken();
+    if (tokenOld) xhrOld.setRequestHeader('Authorization', `Bearer ${tokenOld}`);
+    xhrOld.responseType = 'blob';
+
+    if (onUploadProgress) {
+      xhrOld.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const pct = Math.round((event.loaded * 100) / event.total);
+          onUploadProgress(pct);
+        }
+      };
+      xhrOld.upload.onload = () => onUploadProgress(100);
+    }
+
+    xhrOld.onload = () => {
+      if (xhrOld.status >= 200 && xhrOld.status < 300) {
+        resolve({ data: xhrOld.response });
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const errData = JSON.parse(reader.result);
+            reject(new Error(errData.details || errData.error || `Server error ${xhrOld.status}`));
+          } catch {
+            reject(new Error(`Server error ${xhrOld.status}`));
+          }
+        };
+        reader.readAsText(xhrOld.response);
+      }
+    };
+
+    xhrOld.onerror = () => reject(new Error('Network error during video composition'));
+    xhrOld.ontimeout = () => reject(new Error('Request timed out'));
+
+    xhrOld.send(formData);
+  });
+};
+
+/**
+ * Start an async composition job. Returns a Promise that resolves with the
+ * jobId string once the server has accepted the upload (HTTP 202).
+ */
+export const startCompositionJob = (formData, progressCallbacks = {}) => {
+  if (!(formData instanceof FormData)) {
+    return Promise.reject(new Error('Invalid compose request payload'));
+  }
+
+  const { onUploadProgress } = progressCallbacks;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const xhrUrl = withProjectId(`${API_BASE_URL}/process-videos`);
+    xhr.open('POST', xhrUrl);
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+    if (onUploadProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onUploadProgress(Math.round((event.loaded * 100) / event.total));
+        }
+      };
+      xhr.upload.onload = () => onUploadProgress(100);
+    }
+
+    xhr.onload = () => {
+      if (xhr.status === 202) {
+        try {
+          const data = JSON.parse(xhr.responseText);
+          resolve(data.jobId);
+        } catch {
+          reject(new Error('Invalid server response: expected { jobId }'));
+        }
+      } else {
+        try {
+          const errData = JSON.parse(xhr.responseText);
+          reject(new Error(errData.details || errData.error || `Server error ${xhr.status}`));
+        } catch {
+          reject(new Error(`Server error ${xhr.status}`));
+        }
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Network error during video composition'));
+    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.send(formData);
+  });
+};
+
+const POLL_INTERVAL_MS = 3000;
+const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Poll a composition job until it completes, then download the result blob.
+ * @param {string} jobId
+ * @param {function} [onProgress] - called with progress 0-100
+ * @returns {Promise<Blob>}
+ */
+export const pollCompositionJob = (jobId, onProgress) => {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+
+    const poll = () => {
+      if (Date.now() - startTime > POLL_TIMEOUT_MS) {
+        reject(new Error('Composition timed out after 30 minutes'));
+        return;
+      }
+
+      fetch(withProjectId(`${API_BASE_URL}/process-videos/status/${jobId}`), {
+          headers: authFetchHeaders(),
+        })
+        .then((r) => {
+          if (!r.ok) throw new Error(`Status check failed: ${r.statusText}`);
+          return r.json();
+        })
+        .then(({ status, progress, error }) => {
+          if (onProgress && typeof progress === 'number') onProgress(progress);
+
+          if (status === 'done') {
+            return fetch(withProjectId(`${API_BASE_URL}/process-videos/result/${jobId}`), {
+                headers: authFetchHeaders(),
+              })
+              .then((r) => {
+                if (!r.ok) throw new Error('Failed to download composition result');
+                return r.blob();
+              })
+              .then(resolve);
+          } else if (status === 'failed') {
+            reject(new Error(error || 'Composition failed on the server'));
+          } else {
+            setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        })
+        .catch(reject);
+    };
+
+    setTimeout(poll, POLL_INTERVAL_MS);
+  });
+};

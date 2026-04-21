@@ -12,9 +12,9 @@ def ffmpeg_gpu_encode(input_path, output_path, scale=None, framerate=None, codec
         return False
     
     try:
-        # Try GPU encoding first
+        # Try GPU encoding first (decode on CPU for compatibility)
         cmd = [
-            'ffmpeg', '-y', '-hwaccel', 'cuda', '-i', input_path
+            'ffmpeg', '-y', '-i', input_path
         ]
         
         if scale:
@@ -24,7 +24,7 @@ def ffmpeg_gpu_encode(input_path, output_path, scale=None, framerate=None, codec
         if framerate:
             cmd += ['-r', str(framerate)]
         
-        # Conservative GPU encoding settings
+        # Conservative GPU encoding settings (NVENC encode-only)
         cmd += [
             '-c:v', codec,
             '-preset', 'fast',
