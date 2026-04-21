@@ -90,7 +90,7 @@ const FEED_QUERY = (whereClause) => `
   )
   SELECT
     c.id, c.title, c.description, c.video_path, c.thumbnail_path,
-    c.duration, c.created_at,
+    c.duration, c.created_at, c.visibility,
     u.id as user_id, u.username,
     COALESCE(lc.cnt, 0) as like_count,
     COALESCE(cc.cnt, 0) as comment_count
@@ -117,30 +117,36 @@ function attachUserLiked(rows, userId) {
 export const getPublicFeed = (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const offset = (page - 1) * PAGE_SIZE;
-  const rows = db.prepare(FEED_QUERY('')).all(PAGE_SIZE, offset);
-  const total = db.prepare('SELECT COUNT(*) as n FROM compositions').get().n;
+  // Public feed: only visibility='public'
+  const rows = db.prepare(FEED_QUERY("WHERE c.visibility = 'public'")).all(PAGE_SIZE, offset);
+  const total = db.prepare("SELECT COUNT(*) as n FROM compositions WHERE visibility = 'public'").get().n;
   res.json({ compositions: attachUserLiked(rows, req.user.id), page, total, page_size: PAGE_SIZE });
 };
 
 export const getFollowingFeed = (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const offset = (page - 1) * PAGE_SIZE;
+  // Following feed: public + followers-only from people you follow
   const rows = db.prepare(
-    FEED_QUERY('WHERE c.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)')
+    FEED_QUERY(`WHERE c.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+                AND c.visibility IN ('public', 'followers')`)
   ).all(req.user.id, PAGE_SIZE, offset);
   const total = db.prepare(
-    'SELECT COUNT(*) as n FROM compositions WHERE user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)'
+    `SELECT COUNT(*) as n FROM compositions
+     WHERE user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+     AND visibility IN ('public', 'followers')`
   ).get(req.user.id).n;
   res.json({ compositions: attachUserLiked(rows, req.user.id), page, total, page_size: PAGE_SIZE });
 };
 
 export const getComposition = (req, res) => {
   const { id } = req.params;
+  const viewerId = req.user.id;
   const row = db.prepare(`
     WITH like_counts AS (SELECT composition_id, COUNT(*) as cnt FROM likes GROUP BY composition_id),
          comment_counts AS (SELECT composition_id, COUNT(*) as cnt FROM comments GROUP BY composition_id)
     SELECT c.id, c.title, c.description, c.video_path, c.thumbnail_path,
-           c.duration, c.created_at,
+           c.duration, c.created_at, c.visibility,
            u.id as user_id, u.username,
            COALESCE(lc.cnt, 0) as like_count,
            COALESCE(cc.cnt, 0) as comment_count
@@ -153,21 +159,38 @@ export const getComposition = (req, res) => {
 
   if (!row) return res.status(404).json({ error: 'Composition not found' });
 
-  const liked = db.prepare('SELECT 1 FROM likes WHERE user_id = ? AND composition_id = ?')
-    .get(req.user.id, id);
+  // Enforce visibility
+  if (row.visibility === 'private' && row.user_id !== viewerId) {
+    return res.status(403).json({ error: 'This composition is private' });
+  }
+  if (row.visibility === 'followers') {
+    const isOwner = row.user_id === viewerId;
+    const isFollower = !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?').get(viewerId, row.user_id);
+    if (!isOwner && !isFollower) {
+      return res.status(403).json({ error: 'This composition is for followers only' });
+    }
+  }
 
-  // More from same user (up to 4, excluding this one)
+  const liked = db.prepare('SELECT 1 FROM likes WHERE user_id = ? AND composition_id = ?')
+    .get(viewerId, id);
+
+  // More from same user — only show what the viewer can see
+  const isFollowingAuthor = !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?').get(viewerId, row.user_id);
+  const allowedVis = viewerId === row.user_id ? ["'public'", "'followers'", "'private'"]
+    : isFollowingAuthor ? ["'public'", "'followers'"]
+    : ["'public'"];
   const moreFromUser = db.prepare(`
     SELECT id, title, thumbnail_path, created_at FROM compositions
-    WHERE user_id = ? AND id != ? ORDER BY created_at DESC LIMIT 4
+    WHERE user_id = ? AND id != ? AND visibility IN (${allowedVis.join(',')})
+    ORDER BY created_at DESC LIMIT 4
   `).all(row.user_id, id);
 
-  // Recent from anyone (up to 4, excluding this one and duplicates from moreFromUser)
+  // Recent from anyone — only public
   const excludeIds = [id, ...moreFromUser.map((c) => c.id)];
   const recent = db.prepare(`
     SELECT c.id, c.title, c.thumbnail_path, c.created_at, u.username FROM compositions c
     JOIN users u ON c.user_id = u.id
-    WHERE c.id NOT IN (${excludeIds.map(() => '?').join(',')})
+    WHERE c.id NOT IN (${excludeIds.map(() => '?').join(',')}) AND c.visibility = 'public'
     ORDER BY c.created_at DESC LIMIT 4
   `).all(...excludeIds);
 
@@ -195,12 +218,21 @@ export const deleteComposition = (req, res) => {
 
 export const likeComposition = (req, res) => {
   const { id } = req.params;
-  if (!db.prepare('SELECT 1 FROM compositions WHERE id = ?').get(id)) {
-    return res.status(404).json({ error: 'Composition not found' });
-  }
-  try {
-    db.prepare('INSERT OR IGNORE INTO likes (user_id, composition_id) VALUES (?, ?)').run(req.user.id, id);
-  } catch { /* ignore duplicate */ }
+  const actorId = req.user.id;
+  const comp = db.prepare('SELECT user_id FROM compositions WHERE id = ?').get(id);
+  if (!comp) return res.status(404).json({ error: 'Composition not found' });
+
+  db.transaction(() => {
+    db.prepare('INSERT OR IGNORE INTO likes (user_id, composition_id) VALUES (?, ?)').run(actorId, id);
+    // Notify composition owner (skip self-like)
+    if (comp.user_id !== actorId) {
+      db.prepare(`
+        INSERT OR IGNORE INTO notifications (id, user_id, actor_id, type, composition_id)
+        VALUES (?, ?, ?, 'like', ?)
+      `).run(uuidv4(), comp.user_id, actorId, id);
+    }
+  })();
+
   const { cnt } = db.prepare('SELECT COUNT(*) as cnt FROM likes WHERE composition_id = ?').get(id);
   res.json({ like_count: cnt, liked_by_me: true });
 };
@@ -233,13 +265,25 @@ export const addComment = (req, res) => {
   const { id } = req.params;
   const { body } = req.body;
   if (!body?.trim()) return res.status(400).json({ error: 'comment body is required' });
-  if (!db.prepare('SELECT 1 FROM compositions WHERE id = ?').get(id)) {
-    return res.status(404).json({ error: 'Composition not found' });
-  }
+  const comp = db.prepare('SELECT user_id FROM compositions WHERE id = ?').get(id);
+  if (!comp) return res.status(404).json({ error: 'Composition not found' });
+
   const commentId = uuidv4();
-  db.prepare('INSERT INTO comments (id, user_id, composition_id, body) VALUES (?, ?, ?, ?)').run(
-    commentId, req.user.id, id, body.trim()
-  );
+  const actorId = req.user.id;
+
+  db.transaction(() => {
+    db.prepare('INSERT INTO comments (id, user_id, composition_id, body) VALUES (?, ?, ?, ?)').run(
+      commentId, actorId, id, body.trim()
+    );
+    // Notify composition owner (skip self-comment)
+    if (comp.user_id !== actorId) {
+      db.prepare(`
+        INSERT INTO notifications (id, user_id, actor_id, type, composition_id, comment_id)
+        VALUES (?, ?, ?, 'comment', ?, ?)
+      `).run(uuidv4(), comp.user_id, actorId, id, commentId);
+    }
+  })();
+
   const comment = db.prepare(`
     SELECT c.id, c.body, c.created_at, u.id as user_id, u.username
     FROM comments c JOIN users u ON c.user_id = u.id WHERE c.id = ?
@@ -260,38 +304,71 @@ export const deleteComment = (req, res) => {
 
 export const getUserProfile = (req, res) => {
   const { userId } = req.params;
+  const viewerId = req.user.id;
   const user = db.prepare('SELECT id, username, bio, created_at FROM users WHERE id = ?').get(userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
   const { followers } = db.prepare('SELECT COUNT(*) as followers FROM follows WHERE following_id = ?').get(userId);
   const { following } = db.prepare('SELECT COUNT(*) as following FROM follows WHERE follower_id = ?').get(userId);
-  const { compositions } = db.prepare('SELECT COUNT(*) as compositions FROM compositions WHERE user_id = ?').get(userId);
-  const isFollowing = !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?').get(req.user.id, userId);
+  const isFollowing = !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?').get(viewerId, userId);
 
-  res.json({ user: { ...user, followers, following, compositions, is_following: isFollowing } });
+  // Composition count reflects what the viewer can actually see
+  let compCount;
+  if (viewerId === userId) {
+    compCount = db.prepare('SELECT COUNT(*) as n FROM compositions WHERE user_id = ?').get(userId).n;
+  } else if (isFollowing) {
+    compCount = db.prepare("SELECT COUNT(*) as n FROM compositions WHERE user_id = ? AND visibility IN ('public','followers')").get(userId).n;
+  } else {
+    compCount = db.prepare("SELECT COUNT(*) as n FROM compositions WHERE user_id = ? AND visibility = 'public'").get(userId).n;
+  }
+
+  res.json({ user: { ...user, followers, following, compositions: compCount, is_following: isFollowing } });
 };
 
 export const getUserCompositions = (req, res) => {
   const { userId } = req.params;
+  const viewerId = req.user.id;
   if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId)) {
     return res.status(404).json({ error: 'User not found' });
   }
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const offset = (page - 1) * PAGE_SIZE;
-  const rows = db.prepare(
-    FEED_QUERY('WHERE c.user_id = ?')
-  ).all(userId, PAGE_SIZE, offset);
-  const total = db.prepare('SELECT COUNT(*) as n FROM compositions WHERE user_id = ?').get(userId).n;
-  res.json({ compositions: attachUserLiked(rows, req.user.id), page, total, page_size: PAGE_SIZE });
+
+  // Determine what visibility levels this viewer can see
+  let visFilter;
+  if (viewerId === userId) {
+    // Own profile — see everything
+    visFilter = `c.user_id = ?`;
+  } else {
+    const isFollowing = !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?').get(viewerId, userId);
+    if (isFollowing) {
+      visFilter = `c.user_id = ? AND c.visibility IN ('public', 'followers')`;
+    } else {
+      visFilter = `c.user_id = ? AND c.visibility = 'public'`;
+    }
+  }
+
+  const rows = db.prepare(FEED_QUERY(`WHERE ${visFilter}`)).all(userId, PAGE_SIZE, offset);
+  const total = db.prepare(`SELECT COUNT(*) as n FROM compositions c WHERE ${visFilter}`).get(userId).n;
+  res.json({ compositions: attachUserLiked(rows, viewerId), page, total, page_size: PAGE_SIZE });
 };
 
 export const followUser = (req, res) => {
   const { userId } = req.params;
-  if (userId === req.user.id) return res.status(400).json({ error: 'Cannot follow yourself' });
+  const actorId = req.user.id;
+  if (userId === actorId) return res.status(400).json({ error: 'Cannot follow yourself' });
   if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(userId)) {
     return res.status(404).json({ error: 'User not found' });
   }
-  db.prepare('INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)').run(req.user.id, userId);
+
+  db.transaction(() => {
+    db.prepare('INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)').run(actorId, userId);
+    db.prepare(`
+      INSERT OR IGNORE INTO notifications (id, user_id, actor_id, type)
+      VALUES (?, ?, ?, 'follow')
+    `).run(uuidv4(), userId, actorId);
+  })();
+
   const { cnt } = db.prepare('SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?').get(userId);
   res.json({ is_following: true, followers: cnt });
 };
@@ -301,4 +378,19 @@ export const unfollowUser = (req, res) => {
   db.prepare('DELETE FROM follows WHERE follower_id = ? AND following_id = ?').run(req.user.id, userId);
   const { cnt } = db.prepare('SELECT COUNT(*) as cnt FROM follows WHERE following_id = ?').get(userId);
   res.json({ is_following: false, followers: cnt });
+};
+
+// ── Visibility ────────────────────────────────────────────────────────────────
+
+export const updateVisibility = (req, res) => {
+  const { id } = req.params;
+  const { visibility } = req.body;
+  if (!['public', 'followers', 'private'].includes(visibility)) {
+    return res.status(400).json({ error: 'visibility must be public, followers, or private' });
+  }
+  const row = db.prepare('SELECT user_id FROM compositions WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Composition not found' });
+  if (row.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+  db.prepare('UPDATE compositions SET visibility = ? WHERE id = ?').run(visibility, id);
+  res.json({ id, visibility });
 };

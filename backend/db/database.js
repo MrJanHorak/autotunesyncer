@@ -93,4 +93,34 @@ if (!userCols.includes('bio')) {
   db.exec(`ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''`);
 }
 
+const compCols = db.pragma('table_info(compositions)').map((c) => c.name);
+if (!compCols.includes('visibility')) {
+  db.exec(`ALTER TABLE compositions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_compositions_visibility ON compositions(visibility)`);
+}
+
+// Notifications table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notifications (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    actor_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type           TEXT NOT NULL,
+    composition_id TEXT REFERENCES compositions(id) ON DELETE CASCADE,
+    comment_id     TEXT REFERENCES comments(id) ON DELETE CASCADE,
+    read           INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_notif_user_id ON notifications(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_notif_unread  ON notifications(user_id, read, created_at DESC);
+
+  -- Prevent duplicate like notifications from same actor on same composition
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_like_dedup
+    ON notifications(user_id, actor_id, composition_id) WHERE type = 'like';
+
+  -- Prevent duplicate follow notifications from same actor
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_follow_dedup
+    ON notifications(user_id, actor_id) WHERE type = 'follow';
+`);
+
 export default db;

@@ -1,22 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
-import { ArrowLeft, UserPlus, UserCheck, Calendar, Music } from 'lucide-react';
+import { ArrowLeft, UserPlus, UserCheck, Calendar, Music, Globe, Users, Lock } from 'lucide-react';
 import CompositionCard from './CompositionCard.jsx';
+import { useAuth } from '../../context/AuthContext.jsx';
 import './Social.css';
 
 const API_BASE = 'http://localhost:3000/api';
 
 function getToken() {
   return localStorage.getItem('auth_token');
-}
-
-function getCurrentUserId() {
-  try {
-    const token = getToken();
-    if (!token) return null;
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    return payload.id;
-  } catch { return null; }
 }
 
 async function apiFetch(path, options = {}) {
@@ -38,6 +30,7 @@ async function apiFetch(path, options = {}) {
 }
 
 const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
+  const { user: currentUser } = useAuth();
   const [profile, setProfile] = useState(null);
   const [compositions, setCompositions] = useState([]);
   const [page, setPage] = useState(1);
@@ -46,9 +39,28 @@ const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [followPending, setFollowPending] = useState(false);
+  // Tracks in-flight visibility updates per composition
+  const [visUpdating, setVisUpdating] = useState({});
 
-  const currentUserId = getCurrentUserId();
+  const currentUserId = currentUser?.id;
   const isOwnProfile = currentUserId === userId;
+
+  const handleVisibilityChange = async (compositionId, newVis) => {
+    setVisUpdating((prev) => ({ ...prev, [compositionId]: true }));
+    // Optimistic update
+    setCompositions((prev) => prev.map((c) => c.id === compositionId ? { ...c, visibility: newVis } : c));
+    try {
+      await apiFetch(`/social/compositions/${compositionId}/visibility`, {
+        method: 'PATCH',
+        body: JSON.stringify({ visibility: newVis }),
+      });
+    } catch {
+      // Revert on failure
+      setCompositions((prev) => prev.map((c) => c.id === compositionId ? { ...c, visibility: c.visibility } : c));
+    } finally {
+      setVisUpdating((prev) => ({ ...prev, [compositionId]: false }));
+    }
+  };
 
   const fetchProfile = useCallback(async () => {
     setLoading(true);
@@ -164,6 +176,12 @@ const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
 
       <h2 className='user-profile__compositions-title'>Compositions ({total})</h2>
 
+      {isOwnProfile && (
+        <p className='user-profile__visibility-note'>
+          <Globe size={13} /> Set who can see each composition. Changes take effect immediately.
+        </p>
+      )}
+
       <div className='social-feed__grid'>
         {compositions.length === 0 ? (
           <div className='social-feed__empty'>
@@ -171,14 +189,37 @@ const UserProfile = ({ userId, onBack, onSelectComposition, onSelectUser }) => {
             <p>{isOwnProfile ? 'Share your first composition from the Editor tab!' : "This user hasn't shared anything yet."}</p>
           </div>
         ) : (
-          compositions.map((c) => (
-            <CompositionCard
-              key={c.id}
-              composition={c}
-              onSelect={onSelectComposition}
-              onProfileClick={onSelectUser}
-            />
-          ))
+          compositions.map((c) => {
+            const vis = c.visibility || 'public';
+            return (
+              <div key={c.id} className='user-profile__comp-wrap'>
+                <CompositionCard
+                  composition={c}
+                  onSelect={onSelectComposition}
+                  onProfileClick={onSelectUser}
+                />
+                {isOwnProfile && (
+                  <div className='vis-badge-row'>
+                    {[
+                      { value: 'public', label: 'Public', Icon: Globe },
+                      { value: 'followers', label: 'Followers', Icon: Users },
+                      { value: 'private', label: 'Private', Icon: Lock },
+                    ].map(({ value, label, Icon }) => (
+                      <button
+                        key={value}
+                        className={`vis-badge ${vis === value ? 'vis-badge--active' : ''}`}
+                        onClick={() => handleVisibilityChange(c.id, value)}
+                        disabled={visUpdating[c.id]}
+                        title={label}
+                      >
+                        <Icon size={11} /> {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 

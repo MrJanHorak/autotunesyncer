@@ -93,7 +93,7 @@ function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
   );
 }
 
-export default function ProjectManager() {
+export default function ProjectManager({ onContinue }) {
   const { user } = useAuth();
   const { projects, currentProject, loadingProjects, selectProject, createProject, deleteProject } = useProject();
 
@@ -232,7 +232,7 @@ export default function ProjectManager() {
               <Film size={18} />
               <span>Active: <strong>{currentProject.name}</strong></span>
             </div>
-            <button className='pm-btn-primary' onClick={() => selectProject(currentProject)}>
+            <button className='pm-btn-primary' onClick={() => onContinue ? onContinue() : null}>
               Continue →
             </button>
           </div>
