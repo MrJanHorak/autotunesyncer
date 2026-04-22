@@ -730,9 +730,10 @@ const SampleSoundButton = ({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (synthRef.current && !synthRef.current.disposed) {
+      if (synthRef.current && typeof synthRef.current.dispose === 'function' && !synthRef.current.disposed) {
         synthRef.current.dispose();
       }
+      synthRef.current = null;
     };
   }, []);
 

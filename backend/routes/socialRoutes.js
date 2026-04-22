@@ -28,15 +28,17 @@ import {
 
 const router = express.Router();
 
-// Multer for video uploads (store in temp, controller moves to published/)
+// Multer for video + optional thumbnail uploads (store in temp, controller moves to published/)
 const upload = multer({
   dest: os.tmpdir(),
   limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(file.originalname)) {
+    const isVideo = file.mimetype.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(file.originalname);
+    const isImage = file.mimetype.startsWith('image/') || /\.(jpe?g|png|gif|webp)$/i.test(file.originalname);
+    if (isVideo || isImage) {
       cb(null, true);
     } else {
-      cb(new Error('Only video files are accepted'));
+      cb(new Error('Only video or image files are accepted'));
     }
   },
 });
@@ -49,7 +51,7 @@ router.get('/feed', getPublicFeed);
 router.get('/feed/following', getFollowingFeed);
 
 // Compositions
-router.post('/compositions', upload.single('video'), shareComposition);
+router.post('/compositions', upload.fields([{ name: 'video', maxCount: 1 }, { name: 'thumbnail', maxCount: 1 }]), shareComposition);
 router.get('/compositions/:id', getComposition);
 router.delete('/compositions/:id', deleteComposition);
 router.patch('/compositions/:id/visibility', updateVisibility);

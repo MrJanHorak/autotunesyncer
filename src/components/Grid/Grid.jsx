@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import PropTypes from 'prop-types';
 import {
   DndContext,
@@ -18,7 +18,7 @@ import { SortableItem } from './SortableItems';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
 import './Grid.css';
 
-const Grid = ({ midiData, onArrangementChange }) => {
+const Grid = ({ midiData, onArrangementChange, initialArrangement }) => {
   // 1. Process MIDI data first
   const processedData = useMemo(() => {
     const trackData = [];
@@ -107,6 +107,23 @@ const Grid = ({ midiData, onArrangementChange }) => {
   const [columnCount, setColumnCount] = useState(
     calculateOptimalColumns[0] || 4
   );
+  const arrangementRestoredRef = useRef(false);
+
+  // Restore saved drag order once (on first non-empty initialArrangement)
+  useEffect(() => {
+    if (arrangementRestoredRef.current) return;
+    if (!initialArrangement || Object.keys(initialArrangement).length === 0) return;
+    arrangementRestoredRef.current = true;
+    setItems((current) =>
+      [...current].sort((a, b) => {
+        const idA = a.id.replace(/^(track-|drum-)/, '');
+        const idB = b.id.replace(/^(track-|drum-)/, '');
+        const posA = initialArrangement[idA]?.position ?? Infinity;
+        const posB = initialArrangement[idB]?.position ?? Infinity;
+        return posA - posB;
+      })
+    );
+  }, [initialArrangement]);
 
   // DND setup
   const sensors = useSensors(
@@ -217,10 +234,6 @@ const Grid = ({ midiData, onArrangementChange }) => {
   const getAccentColor = () => {
     return '#ffffff'; // Always white for best readability
   };
-  console.log('columnCount', columnCount);
-  console.log('calculateOptimalColumns', calculateOptimalColumns);
-  console.log('items', items);
-  console.log('row', Math.ceil(items.length / columnCount));
   useEffect(() => {
     if (calculateOptimalColumns.length > 0) {
       const optimalColumnCount = calculateOptimalColumns[0];
@@ -327,6 +340,7 @@ Grid.propTypes = {
     ),
   }).isRequired,
   onArrangementChange: PropTypes.func.isRequired,
+  initialArrangement: PropTypes.object,
 };
 
 export default Grid;

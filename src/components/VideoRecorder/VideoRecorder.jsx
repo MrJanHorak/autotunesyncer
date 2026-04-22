@@ -7,7 +7,6 @@ import SampleSoundButton from '../SampleSoundButton/SampleSoundButton';
 import '../styles.css';
 import { isDrumTrack } from '../../js/drumUtils';
 import CountdownTimer from '../CountdownTimer/CountdownTimer';
-import VideoTrimmer from '../VideoTrimmer/VideoTrimmer';
 import ToggleSwitch from '../ToggleSwitch/ToggleSwitch';
 
 import './VideoRecorder.css';
@@ -95,7 +94,6 @@ const VideoRecorder = ({
 }) => {
   const {
     videoRef,
-    // eslint-disable-next-line no-unused-vars
     mediaStreamRef,
     recordingTimer,
     recordingState,
@@ -105,81 +103,90 @@ const VideoRecorder = ({
 
   const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(false);
   const [isDrum] = useState(() => isDrumTrack(instrument));
+  const isPercussion = isDrum ||
+    ['percussion', 'percussive'].includes(instrument.family?.toLowerCase());
   const [isUploadMode, setIsUploadMode] = useState(false);
   const [showTrimmer, setShowTrimmer] = useState(false);
-  const countdownDuration = 3; // Can be made configurable later
-  const duration = 60; // Example duration, replace with actual value
-  const STEP = 1; // Example step value, replace with actual value
+  const [isTrimming, setIsTrimming] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const STEP = 0.125;
   const [startTime, setStartTime] = useState(0);
-  const [endTime, setEndTime] = useState(duration);
-
-  console.log('minDuration:', minDuration); // Debug log
-  console.log('typeof minDuration:', typeof minDuration); // Debug log
+  const [endTime, setEndTime] = useState(0);
+  const countdownDuration = 3;
 
   const handleTimeUpdate = (value, isStart) => {
+    const newTime = Number(value);
     if (isStart) {
-      setStartTime(value);
+      setStartTime(Math.min(newTime, endTime - STEP));
     } else {
-      setEndTime(value);
+      setEndTime(Math.max(newTime, startTime + STEP));
     }
   };
 
   const formatTime = (time) => {
     const minutes = Math.floor(time / 60);
-    const seconds = time % 60;
-    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+    const seconds = Math.floor(time % 60);
+    const ms = Math.floor((time % 1) * 10);
+    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}.${ms}`;
   };
 
-  const handleTrim = async () => {
-    if (!videoRef.current) return;
-
-    const trimmedVideo = await trimVideo(videoRef.current, startTime, endTime);
-    if (trimmedVideo) {
-      // Update state with trimmed video
-      setRecordingState((prev) => ({
-        ...prev,
-        recordedURL: URL.createObjectURL(trimmedVideo),
-        autotunedURL: URL.createObjectURL(trimmedVideo),
-        recordingDuration: endTime - startTime,
-      }));
-
-      // Send trimmed video to backend
-      onRecordingComplete(trimmedVideo, instrument);
-      onVideoReady?.(URL.createObjectURL(trimmedVideo), instrument);
-      setShowTrimmer(false);
-    }
-  };
-
-  // Helper function to trim video (you'll need to implement this)
   const trimVideo = async (videoElement, start, end) => {
-    // Implementation depends on your video processing library
-    // This is a placeholder - you'll need to implement actual video trimming
     try {
-      // Example using MediaRecorder to record the video element playing
+      // Seek to start and wait for the seek to complete
+      videoElement.pause();
+      videoElement.currentTime = start;
+      await new Promise((resolve) => {
+        videoElement.addEventListener('seeked', resolve, { once: true });
+      });
+
       const stream = videoElement.captureStream();
-      const mediaRecorder = new MediaRecorder(stream);
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus'
+        : 'video/webm';
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
       const chunks = [];
 
-      return new Promise((resolve) => {
-        mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-        mediaRecorder.onstop = () =>
-          resolve(new Blob(chunks, { type: 'video/webm' }));
+      return new Promise((resolve, reject) => {
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+        mediaRecorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+        mediaRecorder.onerror = (e) => reject(e.error);
 
-        videoElement.currentTime = start;
-        videoElement.play();
-        mediaRecorder.start();
-
-        setTimeout(
-          () => {
+        videoElement.play().then(() => {
+          mediaRecorder.start(100);
+          setTimeout(() => {
             mediaRecorder.stop();
             videoElement.pause();
-          },
-          (end - start) * 1000,
-        );
+          }, (end - start) * 1000);
+        }).catch(reject);
       });
     } catch (error) {
       console.error('Error trimming video:', error);
       return null;
+    }
+  };
+
+  const handleTrim = async () => {
+    if (!videoRef.current || isTrimming) return;
+    setIsTrimming(true);
+    try {
+      const trimmedBlob = await trimVideo(videoRef.current, startTime, endTime);
+      if (trimmedBlob) {
+        const url = URL.createObjectURL(trimmedBlob);
+        setRecordingState((prev) => ({
+          ...prev,
+          recordedURL: url,
+          autotunedURL: url,
+          recordingDuration: endTime - startTime,
+          hasVideo: true,
+        }));
+        onRecordingComplete(trimmedBlob, instrument);
+        onVideoReady?.(url, instrument);
+        setShowTrimmer(false);
+      }
+    } finally {
+      setIsTrimming(false);
     }
   };
 
@@ -192,39 +199,24 @@ const VideoRecorder = ({
     [isAutotuneEnabled],
   );
 
+  // Initialize trim start/end from actual video duration when trimmer opens
   useEffect(() => {
-    if (recordingState.autotunedURL && !recordingState.isProcessing) {
-      onVideoReady?.(recordingState.autotunedURL, instrument);
+    if (!showTrimmer || !videoRef.current) return;
+    const video = videoRef.current;
+    const init = () => {
+      const d = video.duration;
+      if (isFinite(d) && d > 0) {
+        setDuration(d);
+        setStartTime(0);
+        setEndTime(d);
+      }
+    };
+    if (video.readyState >= 1) {
+      init();
+    } else {
+      video.addEventListener('loadedmetadata', init, { once: true });
     }
-  }, [
-    recordingState.autotunedURL,
-    recordingState.isProcessing,
-    instrument,
-    onVideoReady,
-  ]);
-
-  // Add a ref to keep track of the previous currentVideo
-  // const prevCurrentVideo = useRef(currentVideo);
-
-  // Modify the useEffect that calls onVideoReady
-  useEffect(() => {
-    if (
-      recordingState.autotunedURL &&
-      !recordingState.isProcessing &&
-      recordingState.autotunedURL !== prevAutotunedURL.current
-    ) {
-      onVideoReady?.(recordingState.autotunedURL, instrument);
-      prevAutotunedURL.current = recordingState.autotunedURL;
-    }
-  }, [
-    recordingState.autotunedURL,
-    recordingState.isProcessing,
-    instrument,
-    onVideoReady,
-  ]);
-
-  // Add a ref to keep track of the previous autotunedURL
-  const prevAutotunedURL = useRef(recordingState.autotunedURL);
+  }, [showTrimmer]);
 
   useEffect(() => {
     // When recording starts, initialize the recording timer
@@ -295,8 +287,17 @@ const VideoRecorder = ({
         audio: true,
       });
 
+      // Connect stream to the video element so the user can see themselves
+      mediaStreamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+
       return new Promise((resolve) => {
-        const mediaRecorder = new MediaRecorder(stream);
+        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+          ? 'video/webm;codecs=vp9,opus'
+          : 'video/webm';
+        const mediaRecorder = new MediaRecorder(stream, { mimeType });
         const chunks = [];
 
         mediaRecorder.ondataavailable = (e) => {
@@ -306,21 +307,26 @@ const VideoRecorder = ({
         };
 
         mediaRecorder.onstop = () => {
-          const blob = new Blob(chunks, { type: 'video/webm' });
-          console.log('Created video blob:', blob.size); // Debug log
+          // Detach live preview before switching to recorded playback
+          if (videoRef.current) {
+            videoRef.current.srcObject = null;
+          }
           stream.getTracks().forEach((track) => track.stop());
-          onRecordingComplete(blob, instrument); // Pass both blob and instrument
+          mediaStreamRef.current = null;
+
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          onRecordingComplete(blob, instrument);
           resolve(blob);
         };
 
-        mediaRecorder.start();
+        mediaRecorder.start(100);
         setTimeout(() => mediaRecorder.stop(), (minDuration + 1) * 1000);
       });
     } catch (error) {
       console.error('Recording failed:', error);
       throw error;
     }
-  }, [minDuration, instrument, onRecordingComplete]);
+  }, [minDuration, instrument, onRecordingComplete, videoRef, mediaStreamRef]);
 
   const handleCountdownComplete = useCallback(async () => {
     setRecordingState((prev) => ({
@@ -412,12 +418,6 @@ const VideoRecorder = ({
     recordingState.autotunedURL,
   ]);
 
-  const handleTrimComplete = (trimmedVideoUrl) => {
-    setRecordingState((prev) => ({ ...prev, autotunedURL: trimmedVideoUrl }));
-    setShowTrimmer(false);
-    onVideoReady?.(trimmedVideoUrl, instrument);
-  };
-
   const handleFileUpload = async (event) => {
     console.log(`Uploading for instrument: ${instrument}`); // Debug log
     const file = event.target.files[0];
@@ -461,10 +461,13 @@ const VideoRecorder = ({
 
       // If it's a drum track or autotune is disabled, use the uploaded video directly
       if (isDrum || !isAutotuneEnabled) {
-        setRecordingState({
+        setRecordingState((prev) => ({
+          ...prev,
           recordedURL: uploadedVideoUrl,
           autotunedURL: uploadedVideoUrl,
-        });
+          hasVideo: true,
+          isProcessing: false,
+        }));
         // Explicitly pass the instrument parameter to onVideoReady
         onVideoReady?.(uploadedVideoUrl, instrument);
         handleRecordingFinished(file); // Use the original file
@@ -519,19 +522,13 @@ const VideoRecorder = ({
   const renderVideo = () => {
     if (recordingState.isRecording) {
       return (
-        <>
-          <video
-            ref={videoRef}
-            className='video-element'
-            muted
-            autoPlay
-            playsInline
-          ></video>
-          <div className='recording-duration'>
-            Recording: {recordingState.recordingDuration}s / {minDuration}s
-            minimum
-          </div>
-        </>
+        <video
+          ref={videoRef}
+          className='video-element'
+          muted
+          autoPlay
+          playsInline
+        />
       );
     }
 
@@ -546,7 +543,7 @@ const VideoRecorder = ({
           autoPlay
           playsInline
           onError={(e) => console.error('Video error:', e)}
-        ></video>
+        />
       );
     }
 
@@ -558,7 +555,7 @@ const VideoRecorder = ({
           controls
           autoPlay
           playsInline
-        ></video>
+        />
       );
     }
 
@@ -686,15 +683,17 @@ const VideoRecorder = ({
             {showTrimmer ? 'Hide Trimmer' : 'Trim Video'}
           </button>
         )}
-        <div className='autotune-checkbox'>
-          <ToggleSwitch
-            checked={isAutotuneEnabled}
-            onChange={handleAutotuneToggle}
-            onText='ON'
-            offText='OFF'
-          />
-          <span className='autotune-checkbox-text'>Enable Autotune</span>
-        </div>
+        {!isPercussion && (
+          <div className='autotune-checkbox'>
+            <ToggleSwitch
+              checked={isAutotuneEnabled}
+              onChange={handleAutotuneToggle}
+              onText='ON'
+              offText='OFF'
+            />
+            <span className='autotune-checkbox-text'>Enable Autotune</span>
+          </div>
+        )}
       </div>
     );
   };
@@ -733,6 +732,11 @@ const VideoRecorder = ({
               />
             )}
           {renderVideo()}
+          {recordingState.isRecording && (
+            <div className='duration-badge' style={{ top: 'auto', bottom: '10px' }}>
+              {recordingState.recordingDuration}s / {minDuration}s min
+            </div>
+          )}
           {recordingState.isProcessing && <LoadingSpinner />}
         </div>
 
@@ -761,38 +765,13 @@ const VideoRecorder = ({
               <span>Duration: {formatTime(endTime - startTime)}</span>
               <span>End: {formatTime(endTime)}</span>
             </div>
-            <button onClick={handleTrim} className='control-button'>
-              Apply Trim
+            <button onClick={handleTrim} className='control-button' disabled={isTrimming}>
+              {isTrimming ? 'Trimming…' : 'Apply Trim'}
             </button>
-          </div>
-        )}
-
-        {recordingState.isRecording && (
-          <div
-            className='recording-duration'
-            style={{
-              position: 'absolute',
-              top: '10px',
-              left: '10px',
-              background: 'rgba(0,0,0,0.7)',
-              color: 'white',
-              padding: '5px',
-              borderRadius: '4px',
-              zIndex: 1000,
-            }}
-          >
-            Recording: {recordingState.recordingDuration}s / {minDuration}s
-            minimum
           </div>
         )}
       </div>
       {renderControls()}
-      {showTrimmer && recordingState.autotunedURL && (
-        <VideoTrimmer
-          videoUrl={recordingState.autotunedURL}
-          onTrimComplete={handleTrimComplete}
-        />
-      )}
     </>
   );
 };

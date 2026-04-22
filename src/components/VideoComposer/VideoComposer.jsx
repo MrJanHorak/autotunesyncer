@@ -301,7 +301,12 @@ const VideoComposer = ({
 
       {composedVideoUrl && (
         <div className='mt-4'>
-          <video src={composedVideoUrl} controls className='w-full max-w-4xl' />
+          <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+          <video
+            src={composedVideoUrl}
+            controls
+            style={{ width: '100%', maxHeight: '65vh', objectFit: 'contain', background: '#000', borderRadius: '8px', display: 'block' }}
+          />
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
             <a
               href={composedVideoUrl}
@@ -316,6 +321,7 @@ const VideoComposer = ({
             >
               📤 Share to Feed
             </button>
+          </div>
           </div>
         </div>
       )}

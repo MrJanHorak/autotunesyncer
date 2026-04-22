@@ -420,6 +420,7 @@ function MainApp({ onChangeProject, onLogout }) {
   const [soloTrack, setSoloTrack] = useState(null);
   const [activeLevels, setActiveLevels] = useState({});
   const lastMeterStateRef = useRef(0);
+  const saveArrangementTimeoutRef = useRef(null);
 
   // Persisted clip keys from server (instrument keys that have saved clips)
   const [savedClipKeys, setSavedClipKeys] = useState(new Set());
@@ -461,6 +462,12 @@ function MainApp({ onChangeProject, onLogout }) {
             state.midiFileName || 'project.mid',
           );
           setMidiFile(file);
+        }
+        if (state?.gridArrangement && Object.keys(state.gridArrangement).length > 0) {
+          setGridArrangement(state.gridArrangement);
+        }
+        if (state?.trackVolumes && Object.keys(state.trackVolumes).length > 0) {
+          setTrackVolumes(state.trackVolumes);
         }
       })
       .catch((err) =>
@@ -538,6 +545,20 @@ function MainApp({ onChangeProject, onLogout }) {
     reader.readAsDataURL(midiFile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [midiFile, currentProject?.id]);
+
+  // Debounced save of grid arrangement and track volumes to project state
+  useEffect(() => {
+    if (!currentProject || Object.keys(gridArrangement).length === 0) return;
+    clearTimeout(saveArrangementTimeoutRef.current);
+    saveArrangementTimeoutRef.current = setTimeout(async () => {
+      try {
+        const currentState = await loadProjectState(currentProject.id).catch(() => null);
+        await saveProjectState({ ...(currentState || {}), gridArrangement, trackVolumes });
+      } catch (err) {
+        console.warn('[state] Failed to save arrangement:', err);
+      }
+    }, 1500);
+  }, [gridArrangement, trackVolumes, currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -774,6 +795,7 @@ function MainApp({ onChangeProject, onLogout }) {
           <Grid
             midiData={parsedMidiData}
             onArrangementChange={setGridArrangement}
+            initialArrangement={gridArrangement}
           />
 
           {!isReadyToCompose && instruments.length > 0 && (
@@ -791,19 +813,19 @@ function MainApp({ onChangeProject, onLogout }) {
             instrumentVideos={instrumentVideos}
             midiData={parsedMidiData}
           />
-        </>
-      )}
 
-      {isReadyToCompose && instruments.length > 0 && (
-        <CompositionSection
-          videoFiles={videoFiles}
-          midiData={parsedMidiData}
-          instrumentTrackMap={instrumentTrackMap}
-          gridArrangement={gridArrangement}
-          trackVolumes={trackVolumes}
-          muteStates={muteStates}
-          soloTrack={soloTrack}
-        />
+          {instruments.length > 0 && (
+            <CompositionSection
+              videoFiles={videoFiles}
+              midiData={parsedMidiData}
+              instrumentTrackMap={instrumentTrackMap}
+              gridArrangement={gridArrangement}
+              trackVolumes={trackVolumes}
+              muteStates={muteStates}
+              soloTrack={soloTrack}
+            />
+          )}
+        </>
       )}
     </div>
   );

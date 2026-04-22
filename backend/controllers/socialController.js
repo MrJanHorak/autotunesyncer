@@ -36,7 +36,11 @@ async function generateThumbnail(videoPath, outputPath) {
 export const shareComposition = async (req, res) => {
   const { title, description = '' } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title is required' });
-  if (!req.file) return res.status(400).json({ error: 'video file is required' });
+
+  const videoFile = req.files?.video?.[0];
+  const thumbnailFile = req.files?.thumbnail?.[0];
+
+  if (!videoFile) return res.status(400).json({ error: 'video file is required' });
 
   const id = uuidv4();
   const userId = req.user.id;
@@ -47,15 +51,27 @@ export const shareComposition = async (req, res) => {
   const thumbFilename = `${id}_thumb.jpg`;
   const thumbPath = join(dir, thumbFilename);
 
-  // Move the uploaded file to published dir
+  // Move the uploaded video to published dir
   try {
-    copyFileSync(req.file.path, videoPath);
-    try { unlinkSync(req.file.path); } catch { /* ignore */ }
+    copyFileSync(videoFile.path, videoPath);
+    try { unlinkSync(videoFile.path); } catch { /* ignore */ }
   } catch (err) {
     return res.status(500).json({ error: 'Failed to save video file' });
   }
 
-  const thumbnailPath = await generateThumbnail(videoPath, thumbPath);
+  // Use user-provided thumbnail or auto-generate from video
+  let thumbnailPath;
+  if (thumbnailFile) {
+    try {
+      copyFileSync(thumbnailFile.path, thumbPath);
+      try { unlinkSync(thumbnailFile.path); } catch { /* ignore */ }
+      thumbnailPath = thumbPath;
+    } catch { /* fall back to auto-generate */ }
+  }
+  if (!thumbnailPath) {
+    thumbnailPath = await generateThumbnail(videoPath, thumbPath);
+  }
+
   const relVideoPath = `${userId}/${videoFilename}`;
   const relThumbPath = thumbnailPath ? `${userId}/${thumbFilename}` : null;
 
