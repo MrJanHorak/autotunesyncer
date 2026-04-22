@@ -12,6 +12,7 @@ const VideoTrimmer = ({ videoUrl, onTrimComplete }) => {
   const [duration, setDuration] = useState(0);
   const [startTime, setStartTime] = useState(0);
   const [endTime, setEndTime] = useState(0);
+  const [isTrimming, setIsTrimming] = useState(false);
   const videoRef = useRef(null);
   const STEP = 0.125; // 1/8th of a second
 
@@ -41,34 +42,41 @@ const VideoTrimmer = ({ videoUrl, onTrimComplete }) => {
   };
 
   const handleTrim = async () => {
+    if (!videoRef.current || isTrimming) return;
+    setIsTrimming(true);
     try {
-      const response = await fetch(videoUrl);
-      const blob = await response.blob();
-      
-      // Create a new MediaSource
-      const mediaSource = new MediaSource();
-      const sourceUrl = URL.createObjectURL(mediaSource);
-      
-      mediaSource.addEventListener('sourceopen', async () => {
-        const sourceBuffer = mediaSource.addSourceBuffer('video/mp4');
-        
-        // Read the video data and trim it
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          const videoData = new Uint8Array(e.target.result);
-          // Here you would implement the actual trimming logic
-          // This is a simplified version - in practice, you'd need a more robust solution
-          sourceBuffer.appendBuffer(videoData);
-          
-          sourceBuffer.addEventListener('updateend', () => {
-            mediaSource.endOfStream();
-            onTrimComplete(sourceUrl);
-          });
+      const video = videoRef.current;
+      const stream = video.captureStream();
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus'
+        : 'video/webm';
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
+      const chunks = [];
+
+      await new Promise((resolve, reject) => {
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
         };
-        reader.readAsArrayBuffer(blob);
+        mediaRecorder.onstop = () => {
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          onTrimComplete(URL.createObjectURL(blob));
+          resolve();
+        };
+        mediaRecorder.onerror = (e) => reject(e.error);
+
+        video.currentTime = startTime;
+        video.play().then(() => {
+          mediaRecorder.start();
+          setTimeout(() => {
+            mediaRecorder.stop();
+            video.pause();
+          }, (endTime - startTime) * 1000);
+        }).catch(reject);
       });
     } catch (error) {
       console.error('Error trimming video:', error);
+    } finally {
+      setIsTrimming(false);
     }
   };
 
@@ -106,7 +114,9 @@ const VideoTrimmer = ({ videoUrl, onTrimComplete }) => {
             style={{width: '100%'}}
           />
         </div>
-        <button onClick={handleTrim}>Apply Trim</button>
+        <button onClick={handleTrim} disabled={isTrimming}>
+          {isTrimming ? 'Trimming…' : 'Apply Trim'}
+        </button>
       </div>
       <div className="trim-times">
         <span>Start: {formatTime(startTime)}</span>

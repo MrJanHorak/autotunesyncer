@@ -15,7 +15,7 @@ const upload = multer({
   storage: storage,
   limits: {
     fileSize: 500 * 1024 * 1024, // 500MB per file
-    files: 20, // Allow up to 20 files
+    files: 100, // Up to 100 files
     fieldSize: 500 * 1024 * 1024, // 500MB field size
   },
 }).any();
@@ -25,7 +25,7 @@ const optimizedUpload = multer({
   storage: storage,
   limits: {
     fileSize: 1000 * 1024 * 1024, // 1GB per file for optimized processing
-    files: 30, // Allow more files
+    files: 100, // Up to 100 files (supports large compositions with many instruments)
     fieldSize: 1000 * 1024 * 1024,
   },
 }).any();

@@ -363,3 +363,47 @@
 .settings-security { display: flex; flex-direction: column; }
 .settings-section-title { font-size: 0.85rem; font-weight: 700; color: var(--color-text-muted); margin: 0 0 0.5rem; padding: 1.25rem 1.5rem 0; text-transform: uppercase; letter-spacing: 0.06em; }
 .settings-divider { border: none; border-top: 1px solid rgba(192,132,252,0.12); margin: 0.5rem 0; }
+
+/* ── MIDI Uploader / Dropzone ─────────────────────────────────────────── */
+.midi-uploader {
+  width: 100%;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.dropzone {
+  border: 2px dashed rgba(192, 132, 252, 0.4);
+  border-radius: 0.75rem;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  background: rgba(192, 132, 252, 0.04);
+}
+
+.dropzone:hover:not(.loading) {
+  border-color: var(--color-accent);
+  background: rgba(192, 132, 252, 0.1);
+}
+
+.dropzone.loading {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.dropzone p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+}
+
+.dropzone:hover p {
+  color: var(--color-text-main);
+}
+
+.error-message {
+  color: #f87171;
+  font-size: 0.83rem;
+  margin-top: 0.5rem;
+  text-align: center;
+}

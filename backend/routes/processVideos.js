@@ -112,7 +112,7 @@ const upload = multer({
     fileSize: 1000 * 1024 * 1024, // 1GB per file
     fieldSize: 1000 * 1024 * 1024,
     fields: 50,
-    files: 30, // Allow more files for multi-track compositions
+    files: 100, // Support large compositions with many instruments
   },
   fileFilter: (req, file, cb) => {
     console.log('Processing file:', {
