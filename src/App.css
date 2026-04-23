@@ -364,6 +364,171 @@
 .settings-section-title { font-size: 0.85rem; font-weight: 700; color: var(--color-text-muted); margin: 0 0 0.5rem; padding: 1.25rem 1.5rem 0; text-transform: uppercase; letter-spacing: 0.06em; }
 .settings-divider { border: none; border-top: 1px solid rgba(192,132,252,0.12); margin: 0.5rem 0; }
 
+/* ══════════════════════════════════════════════════════════════════
+   EDITOR SHELL — 3-panel DAW layout
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Root shell — sits below the 64px .app-nav */
+.editor-shell {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 64px);
+  background: var(--color-bg-dark);
+  overflow: hidden;
+  color: var(--color-text-main);
+}
+
+/* Compact top strip (MIDI info + global actions) */
+.editor-topbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 1rem;
+  height: 48px;
+  background: var(--color-bg-card);
+  border-bottom: 1px solid rgba(192, 132, 252, 0.14);
+  z-index: 10;
+}
+.editor-topbar__midi-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: rgba(192, 132, 252, 0.1);
+  border: 1px solid rgba(192, 132, 252, 0.2);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 200px;
+  text-overflow: ellipsis;
+}
+.editor-topbar__sep {
+  width: 1px;
+  height: 20px;
+  background: rgba(192, 132, 252, 0.18);
+  flex-shrink: 0;
+}
+.editor-topbar__spacer { flex: 1; }
+.editor-topbar__btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 0.4rem;
+  border: 1px solid rgba(192, 132, 252, 0.25);
+  background: rgba(192, 132, 252, 0.07);
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.editor-topbar__btn:hover {
+  background: rgba(192, 132, 252, 0.15);
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.editor-topbar__btn--primary {
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-pink) 100%);
+  color: #fff;
+  border-color: transparent;
+}
+.editor-topbar__btn--primary:hover {
+  opacity: 0.88;
+  color: #fff;
+}
+
+/* 3-panel body */
+.editor-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── LEFT PANEL ── */
+.editor-left {
+  flex-shrink: 0;
+  width: 260px;
+  transition: width 0.22s ease;
+  overflow: hidden;
+  background: var(--color-bg-nav);
+  border-right: 1px solid rgba(192, 132, 252, 0.12);
+  display: flex;
+  flex-direction: column;
+}
+.editor-left--collapsed { width: 52px; }
+
+/* ── CENTER CANVAS ── */
+.editor-center {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+/* Empty state when no MIDI loaded */
+.editor-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  min-height: 300px;
+}
+.editor-empty__title {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+.editor-empty__sub {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+/* ── RIGHT PANEL ── */
+.editor-right {
+  flex-shrink: 0;
+  width: 300px;
+  transition: width 0.22s ease;
+  overflow: hidden;
+  background: var(--color-bg-nav);
+  border-left: 1px solid rgba(192, 132, 252, 0.12);
+  display: flex;
+  flex-direction: column;
+}
+.editor-right--collapsed { width: 52px; }
+
+/* ══════════════════════════════════════════════════════════════════
+   Shared panel primitives
+   ══════════════════════════════════════════════════════════════════ */
+.panel-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem;
+  border-radius: 0.35rem;
+  transition: color 0.15s, background 0.15s;
+  flex-shrink: 0;
+}
+.panel-toggle-btn:hover {
+  color: var(--color-accent);
+  background: rgba(192, 132, 252, 0.1);
+}
+
 /* ── MIDI Uploader / Dropzone ─────────────────────────────────────────── */
 .midi-uploader {
   width: 100%;

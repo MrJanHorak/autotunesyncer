@@ -18,7 +18,7 @@ import { SortableItem } from './SortableItems';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
 import './Grid.css';
 
-const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, onClipStyleChange }) => {
+const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, onClipStyleChange, instrumentVideos, isPreviewPlaying, activeLevels }) => {
   // 1. Process MIDI data first
   const processedData = useMemo(() => {
     const trackData = [];
@@ -302,6 +302,11 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
           <SortableContext items={items} strategy={rectSortingStrategy}>
             {items.map((item) => {
               const intensity = getHeatIntensity(item.count);
+              // Derive the instrumentVideos key from the item id/name
+              const videoKey = item.id.startsWith('drum-')
+                ? item.id.replace('drum-', '')
+                : (item.name || '').toLowerCase().replace(/\s+/g, '_');
+              const videoUrl = instrumentVideos?.[videoKey] || null;
               return (
                 <SortableItem
                   key={item.id}
@@ -320,6 +325,9 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
                   isEmpty={item.isEmpty}
                   clipStyle={clipStyles?.[item.id]}
                   onClipStyleChange={(newStyle) => onClipStyleChange?.(item.id, newStyle)}
+                  videoUrl={videoUrl}
+                  isPreviewPlaying={isPreviewPlaying}
+                  activeLevel={activeLevels?.[videoKey]}
                 />
               );
             })}
@@ -345,6 +353,9 @@ Grid.propTypes = {
   initialArrangement: PropTypes.object,
   clipStyles: PropTypes.object,
   onClipStyleChange: PropTypes.func,
+  instrumentVideos: PropTypes.object,
+  isPreviewPlaying: PropTypes.bool,
+  activeLevels: PropTypes.object,
 };
 
 export default Grid;

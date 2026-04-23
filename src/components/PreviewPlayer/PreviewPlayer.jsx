@@ -3,7 +3,7 @@ import * as Tone from 'tone';
 import PropTypes from 'prop-types';
 import { isDrumTrack, getNoteGroup } from '../../js/drumUtils';
 
-const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null, onMeterUpdate }) => {
+const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null, onMeterUpdate, onPlayStateChange }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const samplersRef = useRef({});
@@ -141,6 +141,7 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       isPlayingRef.current = false;
       stopMeterLoop();
       setIsPlaying(false);
+      onPlayStateChange?.(false);
       return;
     }
 
@@ -198,12 +199,14 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       isPlayingRef.current = false;
       stopMeterLoop();
       setIsPlaying(false);
+      onPlayStateChange?.(false);
     }, endTime + 0.1);
 
     isPlayingRef.current = true;
     Tone.Transport.start();
     startMeterLoop();
     setIsPlaying(true);
+    onPlayStateChange?.(true);
   };
 
   return (
@@ -238,6 +241,7 @@ PreviewPlayer.propTypes = {
   muteStates: PropTypes.object,
   soloTrack: PropTypes.string,
   onMeterUpdate: PropTypes.func,
+  onPlayStateChange: PropTypes.func,
 };
 
 export default PreviewPlayer;

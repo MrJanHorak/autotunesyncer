@@ -338,11 +338,14 @@ const VideoRecorder = ({
 
     try {
       const blob = await handleRecord();
+      const url = URL.createObjectURL(blob);
       setRecordingState((prev) => ({
         ...prev,
         isRecording: false,
-        recordedURL: URL.createObjectURL(blob),
+        recordedURL: url,
       }));
+      // Notify parent so instrumentVideos updates (sidebar checkmarks, grid overlays)
+      onVideoReady?.(url, instrument);
     } catch (error) {
       console.error('Recording failed:', error);
       setRecordingState((prev) => ({
@@ -350,7 +353,7 @@ const VideoRecorder = ({
         isRecording: false,
       }));
     }
-  }, [handleRecord]);
+  }, [handleRecord, instrument, onVideoReady]);
 
   const handleRecordingFinished = useCallback(
     async (blob) => {

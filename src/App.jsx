@@ -6,6 +6,9 @@ import { Film, Music, Grid3x3, FolderOpen, LogOut, Bell, Settings, User } from '
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
 import { DEFAULT_COMPOSITION_STYLE, DEFAULT_CLIP_STYLE } from './js/styleDefaults';
 import InstrumentList from './components/InstrumentList/InstrumentList';
+import InstrumentSidebar from './components/InstrumentSidebar/InstrumentSidebar';
+import RecordingModal from './components/RecordingModal/RecordingModal';
+import RightPanel from './components/RightPanel/RightPanel';
 
 import { useMidiProcessing } from './hooks/useMidiProcessing';
 import { useVideoRecording } from './hooks/useVideoRecording';
@@ -381,7 +384,7 @@ function App() {
       );
     }
     return (
-      <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%)' }}>
+      <div style={{ minHeight: '100vh', background: 'var(--color-bg-dark)', display: 'flex', flexDirection: 'column' }}>
         {navBar}
         {overlays}
         <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />
@@ -425,6 +428,14 @@ function MainApp({ onChangeProject, onLogout }) {
   const [activeLevels, setActiveLevels] = useState({});
   const lastMeterStateRef = useRef(0);
   const saveArrangementTimeoutRef = useRef(null);
+
+  // Panel open/close state
+  const [leftPanelOpen, setLeftPanelOpen] = useState(true);
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  // Currently open recording modal target (instrument object or null)
+  const [recordingTarget, setRecordingTarget] = useState(null);
+  // Preview playback state — synced to grid video overlays
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
 
   // Persisted clip keys from server (instrument keys that have saved clips)
   const [savedClipKeys, setSavedClipKeys] = useState(new Set());
@@ -759,104 +770,130 @@ function MainApp({ onChangeProject, onLogout }) {
   }, [isAudioContextReady, startAudioContext]);
 
   return (
-    <div className='app-container'>
-      <AudioContextInitializer
-        audioContextStarted={audioContextStarted}
-        onInitialize={startAudioContext}
-      />
-      <MidiUploader onMidiProcessed={handleMidiProcessed} />
-
+    <div className='editor-shell'>
+      {/* Non-rendering helpers always present */}
       {midiFile && <MidiParser file={midiFile} onParsed={handleParsedMidi} />}
 
-      {parsedMidiData && (
-        <>
-          <MidiInfoDisplay midiData={parsedMidiData} />
-          {instruments.length > 0 && (
-            <InstrumentList instruments={instruments} />
-          )}
+      {/* ── Top bar ──────────────────────────────────────────────── */}
+      <div className='editor-topbar'>
+        {parsedMidiData ? (
+          <>
+            <span className='editor-topbar__midi-pill'>
+              🎵 {midiFile?.name?.replace(/\.midi?$/i, '') || 'MIDI loaded'}
+            </span>
+            <div className='editor-topbar__sep' />
+            <MidiUploader onMidiProcessed={handleMidiProcessed} compact />
+          </>
+        ) : (
+          <MidiUploader onMidiProcessed={handleMidiProcessed} compact />
+        )}
+        <div className='editor-topbar__spacer' />
+        <AudioContextInitializer
+          audioContextStarted={audioContextStarted}
+          onInitialize={startAudioContext}
+        />
+      </div>
 
-          {instruments.length > 0 && (
-            <div
-              className='audio-control-section'
-              style={{
-                margin: '20px 0',
-                padding: '20px',
-                background: '#f5f5f5',
-                borderRadius: '8px',
-              }}
-            >
-              <Mixer
-                instruments={instruments}
-                volumes={trackVolumes}
-                onVolumeChange={handleVolumeChange}
-                muteStates={muteStates}
-                soloTrack={soloTrack}
-                onMuteChange={handleMuteChange}
-                onSoloChange={handleSoloChange}
+      {/* ── 3-panel body ─────────────────────────────────────────── */}
+      <div className='editor-body'>
+
+        {/* LEFT: Instrument sidebar */}
+        <div className={`editor-left${leftPanelOpen ? '' : ' editor-left--collapsed'}`}>
+          <InstrumentSidebar
+            instruments={instruments}
+            instrumentVideos={instrumentVideos}
+            longestNotes={longestNotes}
+            onRecordClick={setRecordingTarget}
+            isOpen={leftPanelOpen}
+            onToggle={() => setLeftPanelOpen((v) => !v)}
+          />
+        </div>
+
+        {/* CENTER: Grid canvas or empty state */}
+        <div className='editor-center'>
+          {parsedMidiData ? (
+            <>
+              <MidiInfoDisplay midiData={parsedMidiData} />
+
+              {!isReadyToCompose && instruments.length > 0 && (
+                <ProgressBar
+                  current={recordedVideosCount}
+                  total={instruments.length}
+                />
+              )}
+
+              <Grid
+                midiData={parsedMidiData}
+                onArrangementChange={setGridArrangement}
+                initialArrangement={gridArrangement}
+                clipStyles={clipStyles}
+                instrumentVideos={instrumentVideos}
+                isPreviewPlaying={isPreviewPlaying}
                 activeLevels={activeLevels}
+                onClipStyleChange={(itemId, newStyle) =>
+                  setClipStyles((prev) => ({
+                    ...prev,
+                    [itemId]: { ...DEFAULT_CLIP_STYLE, ...prev[itemId], ...newStyle },
+                  }))
+                }
               />
 
-              <div style={{ marginTop: '15px' }}>
-                <PreviewPlayer
-                  midiData={parsedMidiData}
+              {instruments.length > 0 && (
+                <CompositionSection
                   videoFiles={videoFiles}
-                  volumes={trackVolumes}
+                  midiData={parsedMidiData}
+                  instrumentTrackMap={instrumentTrackMap}
+                  gridArrangement={gridArrangement}
+                  trackVolumes={trackVolumes}
                   muteStates={muteStates}
                   soloTrack={soloTrack}
-                  instruments={instruments}
-                  onMeterUpdate={handleMeterUpdate}
+                  compositionStyle={compositionStyle}
+                  clipStyles={clipStyles}
                 />
-              </div>
+              )}
+            </>
+          ) : (
+            <div className='editor-empty'>
+              <span className='editor-empty__title'>🎵 AutoTune Syncer</span>
+              <span className='editor-empty__sub'>
+                Drop a MIDI file above or click "Load MIDI" to get started
+              </span>
             </div>
           )}
+        </div>
 
-          <Grid
-            midiData={parsedMidiData}
-            onArrangementChange={setGridArrangement}
-            initialArrangement={gridArrangement}
-            clipStyles={clipStyles}
-            onClipStyleChange={(itemId, newStyle) =>
-              setClipStyles((prev) => ({ ...prev, [itemId]: { ...DEFAULT_CLIP_STYLE, ...prev[itemId], ...newStyle } }))
-            }
-          />
+        {/* RIGHT: Style + Mix panel */}
+        <RightPanel
+          isOpen={rightPanelOpen}
+          onToggle={() => setRightPanelOpen((v) => !v)}
+          compositionStyle={compositionStyle}
+          onStyleChange={setCompositionStyle}
+          instruments={instruments}
+          volumes={trackVolumes}
+          muteStates={muteStates}
+          soloTrack={soloTrack}
+          onVolumeChange={handleVolumeChange}
+          onMuteChange={handleMuteChange}
+          onSoloChange={handleSoloChange}
+          activeLevels={activeLevels}
+          midiData={parsedMidiData}
+          videoFiles={videoFiles}
+          onMeterUpdate={handleMeterUpdate}
+          onPlayStateChange={setIsPreviewPlaying}
+        />
+      </div>
 
-          <div style={{ marginTop: '1rem' }}>
-            <CompositionStylePanel
-              style={compositionStyle}
-              onChange={setCompositionStyle}
-            />
-          </div>
-
-          {!isReadyToCompose && instruments.length > 0 && (
-            <ProgressBar
-              current={recordedVideosCount}
-              total={instruments.length}
-            />
-          )}
-
-          <RecordingSection
-            instruments={instruments}
-            longestNotes={longestNotes}
-            onRecordingComplete={handleRecordingComplete}
-            onVideoReady={handleVideoReady}
-            instrumentVideos={instrumentVideos}
-            midiData={parsedMidiData}
-          />
-
-          {instruments.length > 0 && (
-            <CompositionSection
-              videoFiles={videoFiles}
-              midiData={parsedMidiData}
-              instrumentTrackMap={instrumentTrackMap}
-              gridArrangement={gridArrangement}
-              trackVolumes={trackVolumes}
-              muteStates={muteStates}
-              soloTrack={soloTrack}
-              compositionStyle={compositionStyle}
-              clipStyles={clipStyles}
-            />
-          )}
-        </>
+      {/* Recording modal — portal rendered to document.body */}
+      {recordingTarget && (
+        <RecordingModal
+          instrument={recordingTarget}
+          instrumentVideos={instrumentVideos}
+          longestNotes={longestNotes}
+          midiData={parsedMidiData}
+          onRecordingComplete={handleRecordingComplete}
+          onVideoReady={handleVideoReady}
+          onClose={() => setRecordingTarget(null)}
+        />
       )}
     </div>
   );

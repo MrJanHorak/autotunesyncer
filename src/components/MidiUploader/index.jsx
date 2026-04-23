@@ -2,7 +2,7 @@ import { useState } from 'react';
 import PropTypes from 'prop-types';
 import Dropzone from 'react-dropzone';
 
-const MidiUploader = ({ onMidiProcessed }) => {
+const MidiUploader = ({ onMidiProcessed, compact = false }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -14,28 +14,29 @@ const MidiUploader = ({ onMidiProcessed }) => {
     setError(null);
     onMidiProcessed(file);
     setLoading(false);
-
-    // const reader = new FileReader();
-    
-    // reader.onload = async () => {
-    //   try {
-    //     const arrayBuffer = reader.result;
-    //     const midiData = new Midi(arrayBuffer);
-    //     if (typeof onMidiProcessed === 'function') {
-    //       onMidiProcessed(midiData);
-    //     } else {
-    //       throw new Error('onMidiProcessed must be a function');
-    //     }
-    //   } catch (error) {
-    //     console.error('Error parsing MIDI file:', error);
-    //     setError(error.message);
-    //   } finally {
-    //     setLoading(false);
-    //   }
-    // };
-    
-    // reader.readAsArrayBuffer(file);
   };
+
+  if (compact) {
+    return (
+      <Dropzone
+        onDrop={handleMidiUpload}
+        accept={{ 'audio/midi': ['.mid', '.midi'] }}
+        disabled={loading}
+      >
+        {({ getRootProps, getInputProps }) => (
+          <button
+            {...getRootProps()}
+            className='editor-topbar__btn'
+            type='button'
+            title='Load a MIDI file'
+          >
+            <input {...getInputProps()} />
+            {loading ? '⏳' : '🎵'} {loading ? 'Loading…' : 'Load MIDI'}
+          </button>
+        )}
+      </Dropzone>
+    );
+  }
 
   return (
     <div className="midi-uploader">
@@ -61,7 +62,8 @@ const MidiUploader = ({ onMidiProcessed }) => {
 };
 
 MidiUploader.propTypes = {
-  onMidiProcessed: PropTypes.func.isRequired
+  onMidiProcessed: PropTypes.func.isRequired,
+  compact: PropTypes.bool,
 };
 
 export default MidiUploader;
