@@ -1,6 +1,5 @@
 /* eslint-disable react/prop-types */
-import { useState, useRef, useEffect } from 'react';
-import { useSortable } from '@dnd-kit/sortable';
+import { useState, useRef, useEffect, memo } from 'react';import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { DEFAULT_CLIP_STYLE, COLOR_GRADE_LABELS } from '../../js/styleDefaults';
 
@@ -146,7 +145,7 @@ const ClipStylePopover = ({ style, onChange, onClose, instrumentName }) => {
   );
 };
 
-export const SortableItem = ({
+export const SortableItem = memo(function SortableItem({
   id,
   item,
   getHeatColor,
@@ -154,11 +153,73 @@ export const SortableItem = ({
   isEmpty,
   clipStyle,
   onClipStyleChange,
-}) => {
+  videoUrl,
+  isPreviewPlaying,
+  activeLevel,
+}) {
   const [showStylePicker, setShowStylePicker] = useState(false);
+  const videoRef = useRef(null);
+  const wasActiveRef = useRef(false);
 
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id });
+
+  // Opacity logic:
+  //   idle (no preview)      → 0.35, looping
+  //   preview + note active  → 0.7, playing from note start
+  //   preview + note silent  → 0, hidden
+  const ACTIVE_THRESHOLD_DB = -45;
+  const isInstrumentActive = isPreviewPlaying
+    ? (activeLevel !== undefined && activeLevel > ACTIVE_THRESHOLD_DB)
+    : false;
+
+  const videoOpacity = !isPreviewPlaying ? 0.35 : isInstrumentActive ? 0.7 : 0;
+
+  // Start idle loop on initial mount (once video is ready)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !videoUrl || isPreviewPlaying) return;
+    const start = () => video.play().catch(() => {});
+    if (video.readyState >= 2) {
+      start();
+    } else {
+      video.addEventListener('canplay', start, { once: true });
+      return () => video.removeEventListener('canplay', start);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoUrl]);
+
+  // When preview toggles: restore idle loop or pause to wait for first note
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !videoUrl) return;
+    if (!isPreviewPlaying) {
+      wasActiveRef.current = false;
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+      wasActiveRef.current = false;
+    }
+  }, [isPreviewPlaying, videoUrl]);
+
+  // Note onset/release during preview — reset to 0 on each new note
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !videoUrl || !isPreviewPlaying) return;
+
+    const isActive = activeLevel !== undefined && activeLevel > ACTIVE_THRESHOLD_DB;
+
+    if (isActive && !wasActiveRef.current) {
+      // Note just started — jump to beginning and play
+      video.currentTime = 0;
+      video.play().catch(() => {});
+    } else if (!isActive && wasActiveRef.current) {
+      // Note just ended — pause the clip
+      video.pause();
+    }
+
+    wasActiveRef.current = isActive;
+  }, [activeLevel, isPreviewPlaying, videoUrl]);
 
   const cs = clipStyle || DEFAULT_CLIP_STYLE;
 
@@ -170,6 +231,8 @@ export const SortableItem = ({
     aspectRatio: '16/9',
     border: cs.borderWidth > 0 ? `${cs.borderWidth}px solid ${cs.borderColor}` : 'none',
     boxSizing: 'border-box',
+    position: 'relative',
+    overflow: 'hidden',
   };
 
   const cellContentStyle = {
@@ -184,9 +247,33 @@ export const SortableItem = ({
       {...attributes}
       {...listeners}
     >
+      {/* Semi-transparent video overlay — pointer events disabled so DnD works */}
+      {!isEmpty && videoUrl && (
+        <video
+          ref={videoRef}
+          src={videoUrl}
+          loop
+          muted
+          playsInline
+          preload='auto'
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            opacity: videoOpacity,
+            transition: 'opacity 0.08s ease',
+            pointerEvents: 'none',
+            zIndex: 0,
+            borderRadius: 'inherit',
+          }}
+        />
+      )}
+
       {!isEmpty && (
         <>
-          <div className='cell-content' style={cellContentStyle}>
+          <div className='cell-content' style={{ ...cellContentStyle, position: 'relative', zIndex: 1 }}>
             <span className='cell-name'>{item.name}</span>
             <span className='cell-count'>{item.count} notes</span>
           </div>
@@ -195,6 +282,7 @@ export const SortableItem = ({
           <button
             className='cell-style-btn'
             title='Style this clip'
+            style={{ position: 'relative', zIndex: 2 }}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); setShowStylePicker((s) => !s); }}
           >
@@ -213,5 +301,5 @@ export const SortableItem = ({
       )}
     </div>
   );
-};
+});
 

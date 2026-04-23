@@ -1,0 +1,161 @@
+.instrument-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--color-bg-nav);
+  overflow: hidden;
+  transition: width 0.22s ease;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+.instrument-sidebar__header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid rgba(192, 132, 252, 0.12);
+  min-height: 44px;
+  flex-shrink: 0;
+}
+
+.instrument-sidebar__title {
+  flex: 1;
+  font-weight: 700;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.instrument-sidebar__count {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: rgba(192, 132, 252, 0.1);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  white-space: nowrap;
+}
+
+.instrument-sidebar__toggle {
+  margin-left: auto;
+  font-size: 0.7rem;
+  opacity: 0.7;
+}
+.instrument-sidebar--collapsed .instrument-sidebar__toggle {
+  margin-left: 0;
+}
+
+/* ── Progress bar ───────────────────────────────────────────────── */
+.instrument-sidebar__progress-bar {
+  position: relative;
+  height: 20px;
+  background: rgba(192, 132, 252, 0.08);
+  border-bottom: 1px solid rgba(192, 132, 252, 0.1);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.instrument-sidebar__progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, rgba(192, 132, 252, 0.5) 0%, rgba(244, 114, 182, 0.5) 100%);
+  transition: width 0.4s ease;
+}
+
+.instrument-sidebar__progress-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #fff;
+  text-shadow: 0 0 6px rgba(0,0,0,0.8);
+  pointer-events: none;
+}
+
+/* ── Instrument list ────────────────────────────────────────────── */
+.instrument-sidebar__list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.4rem 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(192,132,252,0.3) transparent;
+}
+
+.instrument-sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(192, 132, 252, 0.06);
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.instrument-sidebar__item:hover {
+  background: rgba(192, 132, 252, 0.08);
+  color: var(--color-text-main);
+}
+
+.instrument-sidebar__item--recorded {
+  color: var(--color-text-main);
+}
+
+.instrument-sidebar__item--recorded:hover {
+  background: rgba(192, 132, 252, 0.12);
+}
+
+/* Collapsed — center everything */
+.instrument-sidebar--collapsed .instrument-sidebar__item {
+  justify-content: center;
+  padding: 0.5rem 0;
+}
+
+.instrument-sidebar__status {
+  font-size: 0.75rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.instrument-sidebar__emoji {
+  flex-shrink: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.instrument-sidebar__name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.instrument-sidebar__hint {
+  font-size: 0.67rem;
+  color: var(--color-text-muted);
+  opacity: 0.65;
+  flex-shrink: 0;
+}
+
+.instrument-sidebar__empty {
+  padding: 1.5rem 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+  line-height: 1.5;
+}

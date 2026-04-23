@@ -1,0 +1,103 @@
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  /* width handled by .editor-right / .editor-right--collapsed in App.css */
+}
+
+/* ── Tab strip ───────────────────────────────────────────────────── */
+.right-panel__tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid rgba(192, 132, 252, 0.12);
+  flex-shrink: 0;
+  min-height: 44px;
+}
+
+.right-panel__tab {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: 0.35rem;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+
+.right-panel__tab:hover {
+  color: var(--color-text-main);
+  background: rgba(192, 132, 252, 0.08);
+}
+
+.right-panel__tab--active {
+  color: var(--color-accent);
+  background: rgba(192, 132, 252, 0.12);
+  border-color: rgba(192, 132, 252, 0.25);
+}
+
+.right-panel__tab-icon {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.right-panel__tab-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.right-panel__tabs-spacer { flex: 1; }
+
+/* ── Panel body ─────────────────────────────────────────────────── */
+.right-panel__body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(192,132,252,0.3) transparent;
+}
+
+/* Mix tab */
+.right-panel__mix {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.right-panel__preview {
+  border-top: 1px solid rgba(192, 132, 252, 0.12);
+  padding: 0.75rem;
+}
+
+.right-panel__empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+/* Collapsed icon strip */
+.right-panel--collapsed .right-panel__tabs {
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem 0;
+  align-items: center;
+  height: 100%;
+  border-bottom: none;
+  border-left: 1px solid rgba(192, 132, 252, 0.12);
+}
+
+.right-panel--collapsed .right-panel__tab {
+  padding: 0.45rem;
+  justify-content: center;
+}
+
+.right-panel--collapsed .right-panel__tabs-spacer { flex: 1; }
