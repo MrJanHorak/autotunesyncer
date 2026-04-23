@@ -18,7 +18,7 @@ import { SortableItem } from './SortableItems';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
 import './Grid.css';
 
-const Grid = ({ midiData, onArrangementChange, initialArrangement }) => {
+const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, onClipStyleChange }) => {
   // 1. Process MIDI data first
   const processedData = useMemo(() => {
     const trackData = [];
@@ -318,6 +318,8 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement }) => {
                       : getAccentColor(intensity)
                   }
                   isEmpty={item.isEmpty}
+                  clipStyle={clipStyles?.[item.id]}
+                  onClipStyleChange={(newStyle) => onClipStyleChange?.(item.id, newStyle)}
                 />
               );
             })}
@@ -341,6 +343,8 @@ Grid.propTypes = {
   }).isRequired,
   onArrangementChange: PropTypes.func.isRequired,
   initialArrangement: PropTypes.object,
+  clipStyles: PropTypes.object,
+  onClipStyleChange: PropTypes.func,
 };
 
 export default Grid;

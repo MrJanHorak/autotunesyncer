@@ -39,3 +39,5 @@ backend/uploads/
 *.sf2
 *.dls
 public/soundfonts/*.sf2
+published
+/published

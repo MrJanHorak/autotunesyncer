@@ -11,6 +11,8 @@ const VideoComposer = ({
   trackVolumes,
   muteStates = {},
   soloTrack = null,
+  compositionStyle = null,
+  clipStyles = null,
 }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingMode, setProcessingMode] = useState(null);
@@ -131,6 +133,8 @@ const VideoComposer = ({
         ...midiData,
         gridArrangement,
         trackVolumes: effectiveVolumes,
+        compositionStyle: compositionStyle || {},
+        clipStyles: clipStyles || {},
       };
       console.log('Midi data being sent:', midiPayload);
       const midiBlob = new Blob([JSON.stringify(midiPayload)], {
