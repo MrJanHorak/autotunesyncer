@@ -197,37 +197,69 @@ class OptimizedAutotuneCache:
         temp_dir = None
         
         try:
+            # Ensure output directory exists (may have been deleted externally)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
             # Create temporary directory for processing
             temp_dir = tempfile.mkdtemp(prefix='autotune_processing_')
-              # Extract audio from video
+
+            # ── Step 1: extract audio ─────────────────────────────────────────
             audio_path = os.path.join(temp_dir, 'audio.wav')
             cmd = [
                 'ffmpeg', '-y', '-i', video_path, 
                 '-vn', '-acodec', 'pcm_s16le', 
                 '-ac', '1', '-ar', '44100', audio_path
             ]
-            subprocess.run(cmd, check=True, capture_output=True, 
-                         text=True, encoding='utf-8', errors='replace')
-              # Autotune audio
+            r1 = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding='utf-8', errors='replace')
+            if r1.returncode != 0:
+                logging.error(f"[precache] Audio extraction failed (rc={r1.returncode}) "
+                              f"for MIDI {midi_note}:\n{r1.stderr[-400:]}")
+                return None
+
+            if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 100:
+                logging.error(f"[precache] Extracted audio is empty for MIDI {midi_note} "
+                              f"— source video may have no audio stream")
+                return None
+
+            # ── Step 2: autotune audio ────────────────────────────────────────
             autotuned_audio_path = os.path.join(temp_dir, 'autotuned.wav')
             autotune_script = os.path.join(os.path.dirname(__file__), 'autotune.py')
             cmd = ['python', autotune_script, audio_path, autotuned_audio_path, str(midi_note)]
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True, 
-                                  encoding='utf-8', errors='replace')
-              # Combine original video with autotuned audio
+            r2 = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding='utf-8', errors='replace')
+            if r2.returncode != 0:
+                logging.error(f"[precache] Autotune script failed (rc={r2.returncode}) "
+                              f"for MIDI {midi_note}:\n{r2.stderr[-400:]}")
+                return None
+
+            if not os.path.exists(autotuned_audio_path) or os.path.getsize(autotuned_audio_path) < 100:
+                logging.error(f"[precache] Autotuned audio is empty for MIDI {midi_note}")
+                return None
+
+            # ── Step 3: mux video + autotuned audio ───────────────────────────
+            # Always re-encode video: browser MediaRecorder produces WebM/VP8 which
+            # cannot be stream-copied into an MP4 container.
             cmd = [
                 'ffmpeg', '-y', 
-                '-i', video_path,           # Original video
+                '-i', video_path,           # Original video (may be WebM renamed .mp4)
                 '-i', autotuned_audio_path, # Autotuned audio
-                '-c:v', 'copy',             # Copy video stream
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',  # high quality master — WebM→H264 loses one gen
+                '-pix_fmt', 'yuv420p',
                 '-c:a', 'aac',              # Encode audio to AAC
                 '-map', '0:v:0',            # Video from first input
                 '-map', '1:a:0',            # Audio from second input
                 '-shortest',                # Match shortest stream
                 output_path
             ]
-            subprocess.run(cmd, check=True, capture_output=True, 
-                         text=True, encoding='utf-8', errors='replace')
+            r3 = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding='utf-8', errors='replace')
+            if r3.returncode != 0:
+                logging.error(f"[precache] Mux failed (rc={r3.returncode}) "
+                              f"for MIDI {midi_note}:\n{r3.stderr[-400:]}")
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                return None
             
             processing_time = time.time() - start_time
             self.processing_stats['processing_time'] += processing_time

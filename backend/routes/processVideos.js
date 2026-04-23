@@ -337,6 +337,8 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
       header: midiData.header,
       gridArrangement: midiData.gridArrangement,
       trackVolumes,
+      compositionStyle: midiData.compositionStyle || {},
+      clipStyles: midiData.clipStyles || {},
       videos,
       preview: isPreview,
     };

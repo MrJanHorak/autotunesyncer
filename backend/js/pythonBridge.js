@@ -26,6 +26,9 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
         gridArrangement: config.gridArrangement || {},
         // Include track volumes from config so Python can apply them
         trackVolumes: config.trackVolumes || {},
+        // Visual styling settings
+        compositionStyle: config.compositionStyle || {},
+        clipStyles: config.clipStyles || {},
       };
 
       // Add validation to ensure grid arrangement is not empty

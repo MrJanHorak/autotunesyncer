@@ -452,6 +452,18 @@ class VideoComposer:
             self.track_volumes = midi_data.get('trackVolumes', {})
             logging.info(f"Initialized VideoComposer with track volumes: {self.track_volumes}")
 
+            # ── Composition & clip style settings ────────────────────────────
+            self.composition_style = midi_data.get('compositionStyle', {})
+            self.clip_styles = midi_data.get('clipStyles', {})  # keyed by grid item id
+            if self.composition_style:
+                logging.info(f"Composition style loaded: {list(self.composition_style.keys())}")
+            else:
+                logging.info("Composition style: empty (no global effects)")
+            if self.clip_styles:
+                logging.info(f"Clip styles loaded for: {list(self.clip_styles.keys())}")
+            else:
+                logging.info("Clip styles: empty (no per-clip effects)")
+
             # Explicit session-specific video paths (prevents stale uploads from past sessions)
             self.explicit_video_files = midi_data.get('videoFiles', {})
 
@@ -611,9 +623,9 @@ class VideoComposer:
             return {
                 'resolution': '1920x1080',
                 'preset': 'fast',       # CPU: fast, GPU: p4
-                'crf': '23',            # Standard quality
-                'audio_bitrate': '320k',
-                'video_bitrate': '8M',
+                'crf': '26',            # Slightly lower quality for intermediate chunks; final pass re-encodes at 28
+                'audio_bitrate': '192k',
+                'video_bitrate': '3M',  # Reduced from 8M — GPU hard cap; CPU uses CRF only
                 'scale_filter': 'scale=1920:1080'
             }
 
@@ -3694,6 +3706,91 @@ class VideoComposer:
             logging.error(f"❌ _mux_video_audio: {e}")
             return None
 
+    def _compress_final_output(self, input_path: str, output_path: str) -> 'str | None':
+        """
+        Final re-encode pass: compress the muxed output and apply any global
+        post-processing (intro card overlay) in a single FFmpeg pass.
+        Falls back to a stream-copy rename if re-encode fails.
+        """
+        tmp = output_path + '.tmp_compress.mp4'
+        try:
+            enc = self._get_encoding_settings()
+            if '-c:v' in enc and enc[enc.index('-c:v') + 1] == 'h264_nvenc':
+                final_enc = [
+                    '-c:v', 'h264_nvenc', '-preset', 'p5',
+                    '-rc', 'vbr', '-cq', '28', '-b:v', '2M', '-maxrate', '4M',
+                ]
+            else:
+                final_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '28']
+
+            # ── Intro card overlay (applied as vf filter during compression) ──
+            cs = getattr(self, 'composition_style', {}) or {}
+            vf_filters = []
+            if cs.get('introCardEnabled'):
+                intro_dur = max(1.0, float(cs.get('introCardDuration', 3)))
+                bg_col = self._hex_to_ffmpeg_color(cs.get('introCardBg', '#000000'))
+                txt_col = self._hex_to_ffmpeg_color(cs.get('introCardTextColor', '#ffffff'))
+                animated = bool(cs.get('introCardAnimated', True))
+                alpha_expr = f'min(t/0.5,1)*gt(t,0)*lt(t,{intro_dur-0.3})+max(0,1-(t-({intro_dur-0.3}))/0.3)*lt(t,{intro_dur})' \
+                             if animated else '1'
+
+                def _ic_esc(t):
+                    return (t or '').replace('\r', '').replace('\n', ' ') \
+                                    .replace('\\', '\\\\').replace("'", "\\'")
+
+                # Solid colour fill for intro duration
+                vf_filters.append(
+                    f"drawbox=x=0:y=0:w=iw:h=ih:color={bg_col}@1:t=fill"
+                    f":enable='lt(t,{intro_dur})'"
+                )
+                title = _ic_esc(cs.get('introCardText', ''))
+                sub = _ic_esc(cs.get('introCardSubtext', ''))
+                if title:
+                    vf_filters.append(
+                        f"drawtext=text='{title}':expansion=none"
+                        f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize=72"
+                        f":fontcolor={txt_col}:alpha='{alpha_expr}'"
+                        f":enable='lt(t,{intro_dur})'"
+                    )
+                if sub:
+                    vf_filters.append(
+                        f"drawtext=text='{sub}':expansion=none"
+                        f":x=(w-text_w)/2:y=h*0.62:fontsize=36"
+                        f":fontcolor={txt_col}:alpha='{alpha_expr}'"
+                        f":enable='lt(t,{intro_dur})'"
+                    )
+                logging.info(f'🎬 Intro card: {intro_dur}s, bg={bg_col}, '
+                             f'title={bool(title)}, subtitle={bool(sub)}')
+
+            cmd = ['ffmpeg', '-y', '-i', input_path]
+            if vf_filters:
+                cmd.extend(['-vf', ','.join(vf_filters)])
+            cmd.extend([
+                *final_enc,
+                '-c:a', 'aac', '-b:a', '192k',
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                tmp,
+            ])
+            logging.info('🗜️  Final compression pass (CRF 28 / medium)…')
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            if r.returncode == 0 and os.path.exists(tmp):
+                orig_size = os.path.getsize(input_path)
+                new_size = os.path.getsize(tmp)
+                os.replace(tmp, output_path)
+                logging.info(
+                    f'✅ Compression complete: {orig_size:,} → {new_size:,} bytes '
+                    f'({100*(1-new_size/orig_size):.0f}% reduction)'
+                )
+                return output_path
+            logging.warning(f'⚠️  Compression pass failed, keeping original: {r.stderr[-400:]}')
+        except Exception as e:
+            logging.warning(f'⚠️  Compression pass error: {e}')
+        finally:
+            if os.path.exists(tmp):
+                try: os.unlink(tmp)
+                except Exception: pass
+        return input_path  # fall back to uncompressed mux
+
     def _create_audio_first_composition(self, total_duration: float,
                                          total_chunks: int) -> 'str | None':
         """
@@ -3720,7 +3817,22 @@ class VideoComposer:
             return None
 
         logging.info("🎬 Phase 3: muxing video + audio…")
-        return self._mux_video_audio(silent_video, full_audio, str(self.output_path), total_duration)
+        mux_path = str(self.output_path) + '.mux_raw.mp4'
+        muxed = self._mux_video_audio(silent_video, full_audio, mux_path, total_duration)
+        if not muxed:
+            return None
+
+        if not self.preview_mode:
+            logging.info("🗜️  Phase 4: final compression pass…")
+            result = self._compress_final_output(mux_path, str(self.output_path))
+            try: os.unlink(mux_path)
+            except Exception: pass
+            return result
+
+        # Preview mode: just rename the mux output
+        import shutil
+        shutil.move(mux_path, str(self.output_path))
+        return str(self.output_path)
 
     def create_composition(self):
         """
@@ -5901,6 +6013,361 @@ class VideoComposer:
     #         logging.error(f"Error creating grid layout: {e}")
     #         return None
 
+    def _get_windows_font_path(self):
+        """Return a usable font path for FFmpeg drawtext on Windows."""
+        candidates = [
+            r'C:/Windows/Fonts/arial.ttf',
+            r'C:/Windows/Fonts/verdana.ttf',
+            r'C:/Windows/Fonts/segoeui.ttf',
+            r'C:/Windows/Fonts/calibri.ttf',
+            r'C:/Windows/Fonts/tahoma.ttf',
+        ]
+        for p in candidates:
+            if os.path.exists(p.replace('/', os.sep)):
+                # Return path with forward slashes — no colon escaping needed
+                # when the path is wrapped in single quotes in the filtergraph.
+                return p
+        return None  # Let FFmpeg use its built-in font
+
+    def _get_color_grade_filter(self, grade):
+        """Return FFmpeg filter string for a named color grade."""
+        grades = {
+            'warm':      'eq=saturation=1.2:gamma_r=1.1:gamma_b=0.88',
+            'cool':      'eq=saturation=1.1:gamma_b=1.15:gamma_r=0.88',
+            'vintage':   'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+            'cyberpunk': 'eq=saturation=1.6:contrast=1.1,colorchannelmixer=1.15:0:0.15:0:0:1.15:0.15:0:0.25:0:1.0',
+            'bw':        'hue=s=0',
+            'vivid':     'eq=saturation=1.8:contrast=1.1:brightness=0.04',
+        }
+        return grades.get(grade, '')
+
+    def _hex_to_ffmpeg_color(self, hex_color):
+        """Convert #RRGGBB to 0xRRGGBB for FFmpeg."""
+        h = hex_color.lstrip('#')
+        if len(h) == 6:
+            return f'0x{h.upper()}'
+        return '0x000000'
+
+    def _write_text_tempfile(self, text, prefix='ats_text_'):
+        """Write text to a temp file and return its path (for drawtext textfile= option)."""
+        fd, path = tempfile.mkstemp(prefix=prefix, suffix='.txt')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(text)
+        except Exception:
+            os.close(fd)
+        return path
+
+    def _escape_path_for_filter(self, path):
+        """Escape a filesystem path for use in an FFmpeg filter option value.
+
+        In FFmpeg filter strings, ':' is an option separator.  Single-quoted
+        wrappers ('...') do NOT protect a Windows drive colon in this FFmpeg
+        build — FFmpeg still splits on it.  The correct level-1 escape is a
+        backslash before the colon: C\:/path/to/file.txt (no outer quotes).
+        """
+        p = path.replace('\\', '/')   # normalise to forward slashes
+        p = p.replace(':', '\\:')     # escape drive-letter colon: C: → C\:
+        return p
+
+    def _apply_cell_style_filters(self, filter_parts, input_label, output_label,
+                                   cell_w, cell_h, track_id, cell_segment, temp_files):
+        """
+        Build per-cell styling filters (scale, pad/bgColor, color grade, beat flash, label, border).
+        Chains filters from input_label → output_label.
+        temp_files: list to append any created temp file paths for cleanup.
+        """
+        cs = getattr(self, 'clip_styles', {})
+
+        # Look up style: frontend keys use prefixes ('track-0', 'drum-drum_snare_drum')
+        # while backend track_ids are bare ('0', 'drum_crash_cymbal'), so try all formats.
+        candidates = [track_id, f'track-{track_id}', f'drum-{track_id}']
+        style = next((cs[k] for k in candidates if k in cs), {})
+
+        logging.info(
+            f"[style] cell={track_id!r}  candidates={candidates}  "
+            f"matched={'yes ('+next((k for k in candidates if k in cs), 'none')+')'}  "
+            f"effects={[k for k,v in style.items() if v and k.endswith('Enabled')]}"
+        )
+
+        bg_color = style.get('bgColor', '#1a1a2e')
+        border_width = int(style.get('borderWidth', 0))
+        border_color = style.get('borderColor', '#7c3aed')
+        color_grade = style.get('colorGrade', 'none')
+        rounded_corners = bool(style.get('roundedCorners', False))
+        corner_radius = int(style.get('cornerRadius', 12))
+        label_enabled = bool(style.get('labelEnabled', False))
+        label_text = style.get('labelText', '') or ''
+        label_color = style.get('labelColor', '#ffffff')
+        label_size = int(style.get('labelFontSize', 14))
+        beat_flash_enabled = bool(style.get('beatFlashEnabled', False))
+        beat_flash_intensity = float(style.get('beatFlashIntensity', 0.4))
+        fade_enabled = bool(style.get('fadeEnabled', False))
+        fade_duration = float(style.get('fadeDuration', 0.15))
+        transparent_bg = bool(style.get('transparentBg', False))
+
+        font_path = self._get_windows_font_path()
+        current = input_label
+
+        # ── 1. Scale to cell dimensions, letterbox ───────────────────────────
+        # When transparentBg is on: use the global composition background so the
+        # letterbox "padding" blends seamlessly with the canvas background.
+        comp_bg_color = getattr(self, 'composition_style', {}).get('backgroundColor', '#0a0a0f')
+        if transparent_bg:
+            pad_color = self._hex_to_ffmpeg_color(comp_bg_color)
+            logging.info(f"[style] cell={track_id!r} transparentBg=True → pad color={comp_bg_color}")
+        else:
+            pad_color = self._hex_to_ffmpeg_color(bg_color)
+
+        # With zoom-to-fill (transparent_bg), video always fills the full cell —
+        # borders/rounded corners always apply to the full cell bounds.
+        content_x, content_y, content_w, content_h = 0, 0, cell_w, cell_h
+
+        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_color)
+        next_label = f'v_pad_{output_label[1:-1]}'
+        if transparent_bg:
+            # Zoom-to-fill: scale so the video fills the entire cell in both dimensions,
+            # then center-crop. This eliminates ALL black margins — both letterbox bars
+            # added by FFmpeg and any black bars baked into the recording itself.
+            filter_parts.append(
+                f"{current}scale={cell_w}:{cell_h}:force_original_aspect_ratio=increase,"
+                f"crop={cell_w}:{cell_h}[{next_label}]"
+            )
+            logging.info(f"[style] cell={track_id!r} transparentBg zoom-to-fill → {cell_w}x{cell_h}")
+        else:
+            # Letterbox: scale to fit, pad remaining area with per-clip bg color
+            filter_parts.append(
+                f"{current}scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
+                f"pad={cell_w}:{cell_h}:-1:-1:color={pad_color}[{next_label}]"
+            )
+        current = f'[{next_label}]'
+
+        # ── 2. Color grade ───────────────────────────────────────────────────
+        grade_filter = self._get_color_grade_filter(color_grade)
+        if grade_filter:
+            next_label = f'v_gr_{output_label[1:-1]}'
+            filter_parts.append(f"{current}{grade_filter}[{next_label}]")
+            current = f'[{next_label}]'
+
+        # ── 3. Beat flash ────────────────────────────────────────────────────
+        # Simple onset flash: bright burst at t=0 (chunk/clip start = note onset).
+        # For multi-note chunks, add additional flashes based on notes in segment.
+        if beat_flash_enabled:
+            notes = cell_segment.get('notes', []) if cell_segment else []
+            flash_windows = [(0.0, 0.1)]  # Always flash at clip start
+            for note in notes[:20]:  # Cap to 20 notes for expression length
+                t = float(note.get('chunk_time', note.get('time', 0)))
+                if t > 0.05:  # Skip if too close to the start flash
+                    flash_windows.append((round(t, 3), round(t + 0.1, 3)))
+            enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in flash_windows)
+            next_label = f'v_fl_{output_label[1:-1]}'
+            filter_parts.append(
+                f"{current}eq=brightness={beat_flash_intensity:.2f}:enable='{enable_expr}'[{next_label}]"
+            )
+            current = f'[{next_label}]'
+
+        # ── 4. Instrument label ──────────────────────────────────────────────
+        if label_enabled:
+            if label_text:
+                display_text = label_text
+            elif cell_segment:
+                display_text = (
+                    cell_segment.get('track_name')
+                    or cell_segment.get('drum_name')
+                    or cell_segment.get('instrument_name')
+                    or track_id
+                )
+            else:
+                display_text = track_id
+            # Inline text= — avoids Windows path escaping issues with textfile=
+            escaped_label = display_text.replace('\r', '').replace('\n', ' ') \
+                                        .replace('\\', '\\\\').replace("'", "\\'")
+            lc = self._hex_to_ffmpeg_color(label_color)
+            next_label = f'v_lbl_{output_label[1:-1]}'
+            filter_parts.append(
+                f"{current}drawtext=text='{escaped_label}'"
+                f":expansion=none"
+                f":x=6:y=h-{label_size + 6}:fontsize={label_size}"
+                f":fontcolor={lc}:alpha='1':box=1:boxcolor=0x000000@0.45:boxborderw=3[{next_label}]"
+            )
+            current = f'[{next_label}]'
+
+        # ── 5. Clip fade-in (applied before border so border is always visible) ──
+        if fade_enabled and fade_duration > 0:
+            fd = max(fade_duration, 0.001)
+            next_label = f'v_fade_{output_label[1:-1]}'
+            filter_parts.append(
+                f"{current}fade=t=in:st=0:d={fd:.3f}[{next_label}]"
+            )
+            current = f'[{next_label}]'
+
+        # ── 6. Border ────────────────────────────────────────────────────────
+        if border_width > 0:
+            bc = self._hex_to_ffmpeg_color(border_color)
+            next_label = f'v_brd_{output_label[1:-1]}'
+            # When transparent bg is on, draw border around actual video content
+            bx, by, bw, bh = (content_x, content_y, content_w, content_h) \
+                              if transparent_bg else (0, 0, cell_w, cell_h)
+            filter_parts.append(
+                f"{current}drawbox=x={bx}:y={by}:w={bw}:h={bh}"
+                f":color={bc}@1.0:t={border_width}[{next_label}]"
+            )
+            current = f'[{next_label}]'
+
+        # ── 7. Rounded corners (paint corner-fill color over corners) ────────
+        if rounded_corners and corner_radius > 0:
+            # When transparent bg is on, round the actual video content corners;
+            # corner fill uses the global bg so they blend into the canvas.
+            if transparent_bg:
+                rx, ry, rw, rh = content_x, content_y, content_w, content_h
+                corner_fill = self._hex_to_ffmpeg_color(comp_bg_color)
+            else:
+                rx, ry, rw, rh = 0, 0, cell_w, cell_h
+                corner_fill = self._hex_to_ffmpeg_color(bg_color)
+            r = min(corner_radius, rw // 4, rh // 4)
+            if r > 0:
+                next_label = f'v_rnd_{output_label[1:-1]}'
+                filter_parts.append(
+                    f"{current}"
+                    f"drawbox=x={rx}:y={ry}:w={r}:h={r}:color={corner_fill}@1:t=fill,"
+                    f"drawbox=x={rx + rw - r}:y={ry}:w={r}:h={r}:color={corner_fill}@1:t=fill,"
+                    f"drawbox=x={rx}:y={ry + rh - r}:w={r}:h={r}:color={corner_fill}@1:t=fill,"
+                    f"drawbox=x={rx + rw - r}:y={ry + rh - r}:w={r}:h={r}:color={corner_fill}@1:t=fill"
+                    f"[{next_label}]"
+                )
+                current = f'[{next_label}]'
+
+        # Terminate chain at the output_label expected by the caller
+        filter_parts.append(f"{current}null{output_label}")
+
+    def _apply_global_style_filters(self, filter_parts, current_label,
+                                     target_w, target_h, duration,
+                                     audio_label, temp_files):
+        """
+        Apply global composition effects after xstack:
+        title, tagline, watermark, waveform overlay, vignette, glitch.
+        Returns (final_video_label, final_audio_label).
+        """
+        cs = getattr(self, 'composition_style', {})
+        if not cs:
+            logging.info("[style] No composition_style set — skipping global effects")
+            return current_label, audio_label
+
+        logging.info(
+            f"[style] global effects enabled: "
+            f"{[k for k,v in cs.items() if str(k).endswith('Enabled') and v]}"
+        )
+
+        def _esc(t):
+            """Escape text for single-quoted FFmpeg drawtext text= value.
+
+            Inside single quotes, only backslash and single-quote are special.
+            expansion=none (added to each filter) prevents % format strings.
+            Newlines are stripped — drawtext is single-line only.
+            """
+            return t.replace('\r', '').replace('\n', ' ') \
+                     .replace('\\', '\\\\').replace("'", "\\'")
+
+        def add_drawtext(text, x_expr, y_expr, size, color_hex, alpha_expr='1', enabled='1'):
+            nonlocal current_label, filter_parts
+            # Use inline text= (no file path) — avoids ALL Windows drive-letter
+            # colon escaping issues that break textfile= and fontfile= on Windows.
+            # expansion=none prevents % format string expansion on user text.
+            # No fontfile/font specified — FFmpeg uses its built-in fallback font.
+            escaped = _esc(text)
+            fc = self._hex_to_ffmpeg_color(color_hex)
+            nxt = f'v_gt_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{current_label}]drawtext=text='{escaped}'"
+                f":expansion=none"
+                f":x={x_expr}:y={y_expr}:fontsize={size}"
+                f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'[{nxt}]"
+            )
+            current_label = nxt
+
+        # ── Title ────────────────────────────────────────────────────────────
+        if cs.get('titleEnabled') and cs.get('titleText', '').strip():
+            pos = cs.get('titlePosition', 'top-center')
+            size = int(cs.get('titleFontSize', 56))
+            color = cs.get('titleColor', '#ffffff')
+            animated = bool(cs.get('titleAnimated', True))
+            alpha = 'min(t/1.0,1)' if animated else '1'
+            if pos == 'top-center':
+                y = str(max(20, size // 2))
+            elif pos == 'bottom-center':
+                y = f'h-{size * 2}'
+            else:
+                y = '(h-text_h)/2'
+            add_drawtext(cs['titleText'], '(w-text_w)/2', y, size, color, alpha_expr=alpha)
+
+        # ── Tagline ──────────────────────────────────────────────────────────
+        if cs.get('taglineEnabled') and cs.get('taglineText', '').strip():
+            size = int(cs.get('taglineFontSize', 24))
+            color = cs.get('taglineColor', '#cccccc')
+            y = f'h-{size * 2 + 10}'
+            add_drawtext(cs['taglineText'], '(w-text_w)/2', y, size, color)
+
+        # ── Watermark ────────────────────────────────────────────────────────
+        if cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip():
+            size = int(cs.get('watermarkFontSize', 18))
+            color = cs.get('watermarkColor', '#ffffff')
+            opacity = float(cs.get('watermarkOpacity', 0.5))
+            wpos = cs.get('watermarkPosition', 'bottom-right')
+            padding = 16
+            if wpos == 'bottom-right':
+                x, y = f'w-text_w-{padding}', f'h-text_h-{padding}'
+            elif wpos == 'bottom-left':
+                x, y = str(padding), f'h-text_h-{padding}'
+            elif wpos == 'top-right':
+                x, y = f'w-text_w-{padding}', str(padding)
+            else:
+                x, y = str(padding), str(padding)
+            add_drawtext(cs['watermarkText'], x, y, size, color, alpha_expr=str(round(opacity, 2)))
+
+        # ── Waveform bar ─────────────────────────────────────────────────────
+        if cs.get('waveformEnabled'):
+            wh = int(cs.get('waveformHeight', 60))
+            wc = self._hex_to_ffmpeg_color(cs.get('waveformColor', '#00ff88'))
+            # Split audio: one copy for waveform vis, one continues as the output audio
+            wave_audio = f'audio_wave_{len(filter_parts)}'
+            audio_main = f'audio_main_{len(filter_parts)}'
+            filter_parts.append(f"[{audio_label}]asplit=2[{audio_main}][{wave_audio}]")
+            audio_label = audio_main
+            # showwaves renders on a solid black background; key out black so the
+            # waveform composites transparently over the video.
+            wave_video = f'waveform_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{wave_audio}]showwaves=s={target_w}x{wh}:mode=cline:rate=30"
+                f":colors={wc},"
+                f"colorkey=0x000000:0.1:0.0,"
+                f"format=yuva420p[{wave_video}]"
+            )
+            nxt = f'v_wf_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{current_label}][{wave_video}]overlay=x=0:y=h-{wh}:format=auto[{nxt}]"
+            )
+            current_label = nxt
+
+        # ── Vignette ─────────────────────────────────────────────────────────
+        if cs.get('vignetteEnabled'):
+            strength = float(cs.get('vignetteStrength', 0.5))
+            angle = round(strength * 3.14159, 3)
+            nxt = f'v_vig_{len(filter_parts)}'
+            filter_parts.append(f"[{current_label}]vignette=angle={angle}[{nxt}]")
+            current_label = nxt
+
+        # ── Glitch / VHS ─────────────────────────────────────────────────────
+        if cs.get('glitchEnabled'):
+            intensity_map = {'subtle': 8, 'medium': 20, 'heavy': 40}
+            noise_level = intensity_map.get(cs.get('glitchIntensity', 'subtle'), 8)
+            nxt = f'v_glitch_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{current_label}]noise=alls={noise_level}:allf=t,eq=saturation=0.85[{nxt}]"
+            )
+            current_label = nxt
+
+        return current_label, audio_label
+
     def _create_ffmpeg_grid_layout_fixed(self, track_segments, output_path, duration):
         """
         FIXED: Create grid with INTELLIGENT volume balancing for any instruments
@@ -5914,14 +6381,9 @@ class VideoComposer:
                 logging.warning("⚪ No segments provided for grid layout.")
                 return None
             
-            if len(track_segments) == 1:
-                single_video = track_segments[0]['video_path']
-                import shutil
-                logging.info(f"📋 Single segment, copying directly: {Path(single_video).name}")
-                shutil.copy2(single_video, output_path)
-                logging.info(f"✅ Single video copied successfully")
-                return str(output_path)
-            
+            # NOTE: Do NOT shortcut single-segment; run through the style/solo pipeline
+            # so per-clip and global styles are applied even for 1-track chunks.
+
             logging.info(f"🔍 Analyzing video inputs...")
             
             # Build FFmpeg command
@@ -6007,9 +6469,15 @@ class VideoComposer:
             video_inputs_for_stack = []
             audio_inputs_for_mix = []
             input_idx = 0
+            style_temp_files = []  # Temp files created during styling (cleaned up after ffmpeg)
 
-            # Add a black placeholder input for empty cells
-            cmd.extend(['-f', 'lavfi', '-i', f'color=black:s={cell_width}x{cell_height}:r=30:d={duration}'])
+            # Determine canvas background color from composition style
+            cs = getattr(self, 'composition_style', {}) or {}
+            bg_hex = cs.get('backgroundColor', '#0a0a0f')
+            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
+
+            # Add a placeholder input for empty cells using background color
+            cmd.extend(['-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s={cell_width}x{cell_height}:r=30:d={duration}'])
             black_video_input_idx = input_idx
             input_idx += 1
             cmd.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}'])
@@ -6017,7 +6485,7 @@ class VideoComposer:
             input_idx += 1
             
             logging.info(f"🎛️ Building FFmpeg filter complex...")
-            logging.info(f"   Added black placeholder (input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
+            logging.info(f"   Added bg placeholder ({bg_hex}, input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
 
             # Process each cell in the grid
             cells_processed = 0
@@ -6030,24 +6498,24 @@ class VideoComposer:
                     if cell_segment and os.path.exists(cell_segment['video_path']):
                         cells_with_content += 1
                         cmd.extend([*decode_args, '-i', cell_segment['video_path']])
-                        # Scale the video and prepare for stacking/mixing
-                        filter_parts.append(f"[{input_idx}:v]scale={cell_width}:{cell_height}[v{r}_{c}]")
+
+                        # Apply per-cell style filters (scale, pad/bgColor, grade, flash, label, border)
+                        track_id = cell_segment.get('track_id', f'{r}_{c}')
+                        self._apply_cell_style_filters(
+                            filter_parts, f"[{input_idx}:v]", f"[v{r}_{c}]",
+                            cell_width, cell_height, track_id, cell_segment, style_temp_files
+                        )
                         video_inputs_for_stack.append(f"[v{r}_{c}]")
                         
                         # --- VOLUME FIX START ---
-                        # Get volume in dB for this segment (supports keys by track_id or normalized name)
                         vol_db = float(self._resolve_segment_volume(cell_segment))
-                        # Optional MIDI velocity shaping on top of user track volume.
                         velocity_val = (
                             cell_segment.get('velocity')
                             or cell_segment.get('midi_velocity')
                             or cell_segment.get('note_velocity')
                         )
                         vol_db += self._velocity_to_db(velocity_val)
-                        # Convert dB to linear: 10 ^ (db / 20)
                         vol_linear = 10 ** (vol_db / 20.0)
-                        
-                        # Apply volume filter
                         filter_parts.append(f"[{input_idx}:a]volume={vol_linear:.2f}[a{r}_{c}]")
                         audio_inputs_for_mix.append(f"[a{r}_{c}]")
                         # --- VOLUME FIX END ---
@@ -6069,14 +6537,19 @@ class VideoComposer:
                 solo_w = target_width & ~1
                 solo_h = target_height & ~1
                 # The single video is always at input index 2
-                # (index 0 = black placeholder, 1 = silent audio, 2 = first video)
+                # (index 0 = bg placeholder, 1 = silent audio, 2 = first video)
                 filter_parts.clear()
+                style_temp_files.clear()
                 solo_segment = next(
                     (grid_cells[r][c] for r in range(grid_rows) for c in range(grid_cols)
                      if grid_cells[r][c] and os.path.exists(grid_cells[r][c].get('video_path', ''))),
                     None
                 )
-                filter_parts.append(f"[2:v]scale={solo_w}:{solo_h}[video_out]")
+                solo_track_id = solo_segment.get('track_id', 'solo') if solo_segment else 'solo'
+                self._apply_cell_style_filters(
+                    filter_parts, '[2:v]', '[v_solo]',
+                    solo_w, solo_h, solo_track_id, solo_segment, style_temp_files
+                )
                 if solo_segment:
                     vol_db = float(self._resolve_segment_volume(solo_segment))
                     velocity_val = (
@@ -6088,31 +6561,52 @@ class VideoComposer:
                     vol_linear = 10 ** (vol_db / 20.0)
                     filter_parts.append(
                         f"[2:a]volume={vol_linear:.2f},"
-                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_out]"
+                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_pre]"
                     )
                 else:
                     filter_parts.append(
                         f"[{silent_audio_input_idx}:a]"
-                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_out]"
+                        f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_pre]"
                     )
+                final_video, final_audio = self._apply_global_style_filters(
+                    filter_parts, 'v_solo', solo_w, solo_h,
+                    duration, 'audio_pre', style_temp_files
+                )
+                final_video_map = f'[{final_video}]' if not final_video.startswith('[') else final_video
+                final_audio_map = f'[{final_audio}]' if not final_audio.startswith('[') else final_audio
+
                 logging.info(f"🎯 Solo mode: rendering at {solo_w}x{solo_h} (full canvas, no xstack)")
                 encoding_args = self._get_encoding_settings()
-                cmd.extend(['-filter_complex', ';'.join(filter_parts)])
+                fc_str = ';'.join(filter_parts)
+                # Use filter_complex_script on Windows to avoid command-line length limit
+                fc_script_path = None
+                try:
+                    fd, fc_script_path = tempfile.mkstemp(prefix='ats_fc_', suffix='.txt')
+                    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                        f.write(fc_str)
+                    cmd.extend(['-filter_complex_script', fc_script_path])
+                except Exception:
+                    cmd.extend(['-filter_complex', fc_str])
                 cmd.extend([
-                    '-map', '[video_out]', '-map', '[audio_out]',
+                    '-map', final_video_map, '-map', final_audio_map,
                     *encoding_args,
                     '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
                     '-pix_fmt', 'yuv420p',
                     '-t', str(duration), '-r', '30', str(output_path)
                 ])
                 result = subprocess.run(cmd, capture_output=True, text=True)
+                # Cleanup temp files
+                for tf in style_temp_files:
+                    try: os.unlink(tf)
+                    except Exception: pass
+                if fc_script_path:
+                    try: os.unlink(fc_script_path)
+                    except Exception: pass
                 if result.returncode == 0:
                     output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
                     logging.info(f"✅ Solo chunk created: {output_size:,} bytes")
                     return str(output_path)
                 else:
-                    # cmd is now partially built — cannot safely fall back to multi-cell.
-                    # Return None so the chunk is skipped; the rest of the composition continues.
                     logging.warning(f"⚠️ Solo FFmpeg failed for chunk, skipping: {result.stderr[-300:]}")
                     return None
             # ── End solo-resolution optimisation ────────────────────────────
@@ -6126,7 +6620,7 @@ class VideoComposer:
 
             # Create the xstack and amix filters
             layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
-            filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[video_out]")
+            filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[xstack_out]")
             # Mix only actual audio inputs to avoid normalization over empty streams
             audio_input_count = len(audio_inputs_for_mix)
             if audio_input_count == 0:
@@ -6136,36 +6630,56 @@ class VideoComposer:
                 f"{''.join(audio_inputs_for_mix)}"
                 f"amix=inputs={audio_input_count}:duration=longest:normalize=0,"
                 f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                # Soft limiter: 100ms attack / 500ms release keeps level invisible to ears
-                # while preventing hard clips before AAC encode. Final loudnorm pass handles
-                # overall level after chunk concatenation.
-                f"alimiter=limit=0.8:attack=80:release=500[audio_out]"
+                f"alimiter=limit=0.8:attack=80:release=500[audio_pre]"
             )
-            
+
+            # Apply global composition effects (title, tagline, watermark, waveform, vignette, glitch)
+            final_video, final_audio = self._apply_global_style_filters(
+                filter_parts, 'xstack_out', target_width, target_height,
+                duration, 'audio_pre', style_temp_files
+            )
+            final_video_map = final_video if final_video.startswith('[') else f'[{final_video}]'
+            final_audio_map = final_audio if final_audio.startswith('[') else f'[{final_audio}]'
+
             logging.info(f"🎬 Final FFmpeg command construction:")
             logging.info(f"   Total inputs: {input_idx}")
             logging.info(f"   Filter complex parts: {len(filter_parts)}")
             logging.info(f"   Grid layout: {layout_string}")
 
-            # Finalize and run the command
-            cmd.extend(['-filter_complex', ';'.join(filter_parts)])
-            
+            # Use filter_complex_script to avoid Windows 32k command-line length limit
+            fc_str = ';'.join(filter_parts)
+            fc_script_path = None
+            try:
+                fd, fc_script_path = tempfile.mkstemp(prefix='ats_fc_', suffix='.txt')
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(fc_str)
+                cmd.extend(['-filter_complex_script', fc_script_path])
+            except Exception:
+                cmd.extend(['-filter_complex', fc_str])
+
             # Get encoding settings based on preview mode and GPU availability
             encoding_args = self._get_encoding_settings()
             if force_cpu_encode:
                 encoding_args = ['-c:v', 'libx264', '-preset', self.render_config['preset'], '-crf', self.render_config['crf']]
             
             cmd.extend([
-                '-map', '[video_out]', '-map', '[audio_out]',
+                '-map', final_video_map, '-map', final_audio_map,
                 *encoding_args,
                 '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
-                '-pix_fmt', 'yuv420p',  # Compatible pixel format
+                '-pix_fmt', 'yuv420p',
                 '-t', str(duration), '-r', '30', str(output_path)
             ])
 
             logging.info(f"🚀 Executing FFmpeg grid composition...")
-            logging.info(f"   Command length: {len(' '.join(cmd))} characters")
+            logging.info(f"   Filter complex length: {len(fc_str)} characters")
             result = subprocess.run(cmd, capture_output=True, text=True)
+            # Cleanup temp files
+            for tf in style_temp_files:
+                try: os.unlink(tf)
+                except Exception: pass
+            if fc_script_path:
+                try: os.unlink(fc_script_path)
+                except Exception: pass
             
             if result.returncode == 0:
                 output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0

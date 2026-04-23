@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import db from '../db/database.js';
 import { BASE_UPLOADS_DIR } from '../middleware/projectOwnership.js';
 
-const SAFE_KEY_RE = /^[a-z0-9_-]{1,80}$/i;
+const SAFE_KEY_RE = /^[a-z0-9_()\-]{1,80}$/i;
 
 function verifyOwnership(projectId, userId) {
   return db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(projectId, userId);

@@ -4,6 +4,7 @@ import PropTypes from 'prop-types';
 import { Film, Music, Grid3x3, FolderOpen, LogOut, Bell, Settings, User } from 'lucide-react';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
+import { DEFAULT_COMPOSITION_STYLE, DEFAULT_CLIP_STYLE } from './js/styleDefaults';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 
 import { useMidiProcessing } from './hooks/useMidiProcessing';
@@ -30,6 +31,7 @@ import ProgressBar from './components/ProgressBar/ProgressBar';
 import Grid from './components/Grid/Grid';
 import Mixer from './components/Mixer/Mixer';
 import PreviewPlayer from './components/PreviewPlayer/PreviewPlayer';
+import CompositionStylePanel from './components/CompositionStylePanel/CompositionStylePanel';
 
 // Social components
 import SocialFeed from './components/Social/SocialFeed.jsx';
@@ -417,6 +419,8 @@ function MainApp({ onChangeProject, onLogout }) {
   const [gridArrangement, setGridArrangement] = useState({});
   const [trackVolumes, setTrackVolumes] = useState({});
   const [muteStates, setMuteStates] = useState({});
+  const [compositionStyle, setCompositionStyle] = useState(() => ({ ...DEFAULT_COMPOSITION_STYLE }));
+  const [clipStyles, setClipStyles] = useState({}); // keyed by item.id (e.g. 'drum-drum_snare_drum')
   const [soloTrack, setSoloTrack] = useState(null);
   const [activeLevels, setActiveLevels] = useState({});
   const lastMeterStateRef = useRef(0);
@@ -468,6 +472,20 @@ function MainApp({ onChangeProject, onLogout }) {
         }
         if (state?.trackVolumes && Object.keys(state.trackVolumes).length > 0) {
           setTrackVolumes(state.trackVolumes);
+        }
+        if (state?.compositionStyle) {
+          setCompositionStyle((prev) => ({ ...DEFAULT_COMPOSITION_STYLE, ...prev, ...state.compositionStyle }));
+        }
+        if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {
+          // Merge each saved style with DEFAULT_CLIP_STYLE so any fields added
+          // since the project was saved are populated with sensible defaults.
+          const merged = Object.fromEntries(
+            Object.entries(state.clipStyles).map(([id, saved]) => [
+              id,
+              { ...DEFAULT_CLIP_STYLE, ...saved },
+            ])
+          );
+          setClipStyles(merged);
         }
       })
       .catch((err) =>
@@ -546,19 +564,19 @@ function MainApp({ onChangeProject, onLogout }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [midiFile, currentProject?.id]);
 
-  // Debounced save of grid arrangement and track volumes to project state
+  // Debounced save of grid arrangement, track volumes, and style settings to project state
   useEffect(() => {
     if (!currentProject || Object.keys(gridArrangement).length === 0) return;
     clearTimeout(saveArrangementTimeoutRef.current);
     saveArrangementTimeoutRef.current = setTimeout(async () => {
       try {
         const currentState = await loadProjectState(currentProject.id).catch(() => null);
-        await saveProjectState({ ...(currentState || {}), gridArrangement, trackVolumes });
+        await saveProjectState({ ...(currentState || {}), gridArrangement, trackVolumes, compositionStyle, clipStyles });
       } catch (err) {
         console.warn('[state] Failed to save arrangement:', err);
       }
     }, 1500);
-  }, [gridArrangement, trackVolumes, currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [gridArrangement, trackVolumes, compositionStyle, clipStyles, currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -796,7 +814,18 @@ function MainApp({ onChangeProject, onLogout }) {
             midiData={parsedMidiData}
             onArrangementChange={setGridArrangement}
             initialArrangement={gridArrangement}
+            clipStyles={clipStyles}
+            onClipStyleChange={(itemId, newStyle) =>
+              setClipStyles((prev) => ({ ...prev, [itemId]: { ...DEFAULT_CLIP_STYLE, ...prev[itemId], ...newStyle } }))
+            }
           />
+
+          <div style={{ marginTop: '1rem' }}>
+            <CompositionStylePanel
+              style={compositionStyle}
+              onChange={setCompositionStyle}
+            />
+          </div>
 
           {!isReadyToCompose && instruments.length > 0 && (
             <ProgressBar
@@ -823,6 +852,8 @@ function MainApp({ onChangeProject, onLogout }) {
               trackVolumes={trackVolumes}
               muteStates={muteStates}
               soloTrack={soloTrack}
+              compositionStyle={compositionStyle}
+              clipStyles={clipStyles}
             />
           )}
         </>
