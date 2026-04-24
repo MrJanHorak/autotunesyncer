@@ -3735,10 +3735,10 @@ class VideoComposer:
                              if animated else '1'
 
                 def _ic_esc(t):
-                    """Escape text for double-quoted FFmpeg drawtext text= value.
-                    Only \\ and \" need escaping; apostrophes are safe in double quotes."""
+                    """Escape text for single-quoted FFmpeg drawtext text= value.
+                    Use '\\'' to include apostrophes (backslash-escape outside quotes)."""
                     return (t or '').replace('\r', '').replace('\n', ' ') \
-                                    .replace('\\', '\\\\').replace('"', '\\"')
+                                    .replace("'", "'\\''")
 
                 # Solid colour fill for intro duration
                 vf_filters.append(
@@ -3749,14 +3749,14 @@ class VideoComposer:
                 sub = _ic_esc(cs.get('introCardSubtext', ''))
                 if title:
                     vf_filters.append(
-                        f"drawtext=text=\"{title}\":expansion=none"
+                        f"drawtext=text='{title}':expansion=none"
                         f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize=72"
                         f":fontcolor={txt_col}:alpha='{alpha_expr}'"
                         f":enable='lt(t,{intro_dur})'"
                     )
                 if sub:
                     vf_filters.append(
-                        f"drawtext=text=\"{sub}\":expansion=none"
+                        f"drawtext=text='{sub}':expansion=none"
                         f":x=(w-text_w)/2:y=h*0.62:fontsize=36"
                         f":fontcolor={txt_col}:alpha='{alpha_expr}'"
                         f":enable='lt(t,{intro_dur})'"
@@ -6181,14 +6181,16 @@ class VideoComposer:
                 )
             else:
                 display_text = track_id
-            # Inline text= with double-quote wrapping — avoids Windows path escaping
-            # issues with textfile=, and handles apostrophes/colons in track names.
+            # Inline text= with single-quote wrapping and '\\'' apostrophe escaping.
+            # This avoids Windows path issues with textfile= and correctly handles
+            # apostrophes/colons in track names (unlike double-quote wrapping which
+            # FFmpeg's filter_complex parser does not recognise as a quote character).
             escaped_label = display_text.replace('\r', '').replace('\n', ' ') \
-                                        .replace('\\', '\\\\').replace('"', '\\"')
+                                        .replace("'", "'\\''")
             lc = self._hex_to_ffmpeg_color(label_color)
             next_label = f'v_lbl_{output_label[1:-1]}'
             filter_parts.append(
-                f"{current}drawtext=text=\"{escaped_label}\""
+                f"{current}drawtext=text='{escaped_label}'"
                 f":expansion=none"
                 f":x=6:y=h-{label_size + 6}:fontsize={label_size}"
                 f":fontcolor={lc}:alpha='1':box=1:boxcolor=0x000000@0.45:boxborderw=3[{next_label}]"
@@ -6262,28 +6264,39 @@ class VideoComposer:
         )
 
         def _esc(t):
-            """Escape text for double-quoted FFmpeg drawtext text= value.
+            """Escape text for single-quoted FFmpeg drawtext text= value.
 
-            Double-quoted FFmpeg strings: only \\ and \" need escaping.
-            Single quotes, colons, semicolons, brackets etc. are all literal
-            inside double quotes — so apostrophes in titles work correctly.
+            FFmpeg's filter_complex parser only recognises single-quotes '...'
+            for quoting. Double-quotes are NOT special — using "..." causes
+            an apostrophe (e.g. in "Ain't") to start a single-quoted segment
+            that swallows ':' option separators and ';' chain separators.
+
+            To include a literal apostrophe inside a single-quoted filter
+            value, use the '\\'' pattern: end the current quote, then use a
+            backslash-escaped apostrophe (outside quotes), then open a new
+            quote. This is the same backslash-escape mechanism used by
+            _escape_path_for_filter for ':' in Windows drive letters.
+
             expansion=none (added to each filter) prevents % format strings.
             Newlines are stripped — drawtext is single-line only.
             """
             return t.replace('\r', '').replace('\n', ' ') \
-                     .replace('\\', '\\\\').replace('"', '\\"')
+                     .replace("'", "'\\''")
 
         def add_drawtext(text, x_expr, y_expr, size, color_hex, alpha_expr='1', enabled='1'):
             nonlocal current_label, filter_parts
-            # Use inline text= (no file path) — avoids ALL Windows drive-letter
-            # colon escaping issues that break textfile= and fontfile= on Windows.
+            # Use inline text= with single-quote wrapping and '\\'' apostrophe
+            # escaping. FFmpeg's filter_complex parser uses single-quotes for
+            # quoting; double-quotes are NOT recognised — an apostrophe in the
+            # text value would start an errant single-quoted segment that
+            # swallows ';' chain separators, breaking all subsequent filters.
             # expansion=none prevents % format string expansion on user text.
             # No fontfile/font specified — FFmpeg uses its built-in fallback font.
             escaped = _esc(text)
             fc = self._hex_to_ffmpeg_color(color_hex)
             nxt = f'v_gt_{len(filter_parts)}'
             filter_parts.append(
-                f"[{current_label}]drawtext=text=\"{escaped}\""
+                f"[{current_label}]drawtext=text='{escaped}'"
                 f":expansion=none"
                 f":x={x_expr}:y={y_expr}:fontsize={size}"
                 f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'[{nxt}]"
