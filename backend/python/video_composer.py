@@ -6700,24 +6700,6 @@ class VideoComposer:
             logging.info(f"🎛️ Building FFmpeg filter complex...")
             logging.info(f"   Added bg placeholder ({bg_hex}, input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
 
-            # Pre-count empty cells so we can split the lavfi placeholder — FFmpeg does not
-            # allow the same input stream label (e.g. [0:v]) to appear more than once in a
-            # filter graph.  A split=N creates N distinct labels from the single source.
-            empty_cell_count = sum(
-                1 for r in range(grid_rows) for c in range(grid_cols)
-                if not (grid_cells[r][c] and os.path.exists(grid_cells[r][c].get('video_path', '')))
-            )
-            if empty_cell_count == 0:
-                bg_labels_iter = iter([])
-            elif empty_cell_count == 1:
-                bg_labels_iter = iter([f'[{black_video_input_idx}:v]'])
-            else:
-                split_outs = ''.join(f'[bg_{i}]' for i in range(empty_cell_count))
-                filter_parts.append(
-                    f'[{black_video_input_idx}:v]split={empty_cell_count}{split_outs}'
-                )
-                bg_labels_iter = iter(f'[bg_{i}]' for i in range(empty_cell_count))
-
             # Process each cell in the grid
             cells_processed = 0
             cells_with_content = 0
@@ -6754,8 +6736,9 @@ class VideoComposer:
                         logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB")
                         input_idx += 1
                     else:
-                        # Use a unique split label of the background placeholder per empty cell.
-                        video_inputs_for_stack.append(next(bg_labels_iter))
+                        # lavfi color sources can be referenced multiple times in a filter graph
+                        # (they are generated streams, not file streams), so direct reuse is safe.
+                        video_inputs_for_stack.append(f"[{black_video_input_idx}:v]")
                         logging.info(f"      Cell ({r},{c}): EMPTY (using bg placeholder)")
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
