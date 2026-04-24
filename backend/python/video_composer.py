@@ -3868,6 +3868,7 @@ class VideoComposer:
                     )
                     result = self._create_audio_first_composition(total_duration, total_chunks)
                     if result and os.path.exists(result):
+                        result = self._apply_text_overlays_inplace(str(result), total_duration)
                         elapsed = time.time() - start_time
                         logging.info(f"🎉 Audio-first composition complete! {elapsed:.2f}s")
                         return result
@@ -3878,10 +3879,14 @@ class VideoComposer:
             # Legacy chunk-based pipeline (fallback / preview mode)
             if total_chunks > 2 and self.max_workers > 1:
                 logging.info(f"Using parallel processing for {total_chunks} chunks")
-                return self.create_composition_with_parallel_processing()
+                result = self.create_composition_with_parallel_processing()
             else:
                 logging.info(f"Using sequential processing for {total_chunks} chunks")
-                return self._create_composition_sequential()
+                result = self._create_composition_sequential()
+
+            if result and os.path.exists(str(result)):
+                result = self._apply_text_overlays_inplace(str(result), total_duration)
+            return result
 
         except Exception as e:
             logging.error(f"❌ Enhanced composition error: {e}")
@@ -6276,7 +6281,9 @@ class VideoComposer:
                 corner_fill = self._hex_to_ffmpeg_color(comp_bg_color)
             else:
                 rx, ry, rw, rh = 0, 0, cell_w, cell_h
-                corner_fill = self._hex_to_ffmpeg_color(bg_color)
+                # Fall back to the composition background when no explicit clip bg is set
+                # so rounded corners blend into the canvas instead of going black.
+                corner_fill = self._hex_to_ffmpeg_color(bg_color or comp_bg_color)
             r = min(corner_radius, rw // 4, rh // 4)
             if r > 0:
                 next_label = f'v_rnd_{output_label[1:-1]}'
@@ -6370,78 +6377,10 @@ class VideoComposer:
             )
             current_label = nxt
 
-        # ── Title ────────────────────────────────────────────────────────────
-        if cs.get('titleEnabled') and cs.get('titleText', '').strip():
-            pos = cs.get('titlePosition', 'top-center')
-            size = int(cs.get('titleFontSize', 56))
-            color = cs.get('titleColor', '#ffffff')
-            animated = bool(cs.get('titleAnimated', True))
-            if animated:
-                # Fade-in then fade-out using comma-free abs-trick ramps.
-                # Commas inside alpha='...' break FFmpeg's filter_complex_script
-                # parser (splits chain on comma before honouring single-quotes).
-                #
-                # alpha_in(t)  = min(t, F_in) / F_in
-                #              = (t + F - abs(t - F)) / (2*F)
-                # alpha_out(t) = min(max(T_end - t, 0), F_out) / F_out
-                #   let pos_u  = ((T_end-t) + abs(T_end-t)) / 2   [= max(0, T_end-t)]
-                #   alpha_out  = (pos_u + F_out - abs(pos_u - F_out)) / (2*F_out)
-                # combined     = alpha_in * alpha_out
-                fin  = 2.0   # fade-in duration (seconds)
-                fout = 2.0   # fade-out duration (seconds)
-                hold = min(max(duration * 0.15, 3.0), 8.0)
-                T_end = min(fin + hold + fout, duration)
-                # Shrink hold if video is shorter than the full window
-                if T_end > duration:
-                    hold = max(0.0, duration - fin - fout)
-                    T_end = duration
-                F  = f'{fin:.3f}'
-                Te = f'{T_end:.3f}'
-                Fo = f'{fout:.3f}'
-                ai = f"(t+{F}-abs(t-{F}))/(2*{F})"
-                pu = f"(({Te}-t)+abs({Te}-t))/2"
-                ao = f"(({pu})+{Fo}-abs(({pu})-{Fo}))/(2*{Fo})"
-                alpha = f"({ai})*({ao})"
-                enabled = f"lte(t,{Te})"
-            else:
-                alpha = '1'
-                enabled = '1'
-            if pos == 'top-center':
-                y = str(max(20, size // 2))
-            elif pos == 'bottom-center':
-                y = f'h-{size * 2}'
-            else:
-                y = '(h-text_h)/2'
-            add_drawtext(cs['titleText'], '(w-text_w)/2', y, size, color,
-                         alpha_expr=alpha, enabled=enabled,
-                         font_key=cs.get('titleFont', 'default'))
-
-        # ── Tagline ──────────────────────────────────────────────────────────
-        if cs.get('taglineEnabled') and cs.get('taglineText', '').strip():
-            size = int(cs.get('taglineFontSize', 24))
-            color = cs.get('taglineColor', '#cccccc')
-            y = f'h-{size * 2 + 10}'
-            add_drawtext(cs['taglineText'], '(w-text_w)/2', y, size, color,
-                         font_key=cs.get('taglineFont', 'default'))
-
-        # ── Watermark ────────────────────────────────────────────────────────
-        if cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip():
-            size = int(cs.get('watermarkFontSize', 18))
-            color = cs.get('watermarkColor', '#ffffff')
-            opacity = float(cs.get('watermarkOpacity', 0.5))
-            wpos = cs.get('watermarkPosition', 'bottom-right')
-            padding = 16
-            if wpos == 'bottom-right':
-                x, y = f'w-text_w-{padding}', f'h-text_h-{padding}'
-            elif wpos == 'bottom-left':
-                x, y = str(padding), f'h-text_h-{padding}'
-            elif wpos == 'top-right':
-                x, y = f'w-text_w-{padding}', str(padding)
-            else:
-                x, y = str(padding), str(padding)
-            add_drawtext(cs['watermarkText'], x, y, size, color,
-                         alpha_expr=str(round(opacity, 2)),
-                         font_key=cs.get('watermarkFont', 'default'))
+        # Title, tagline, and watermark are intentionally NOT applied per-chunk.
+        # They are applied once to the full composed video in _apply_text_overlays_to_video
+        # so time expressions (fade-in/out alpha) reference global video time, not per-chunk
+        # time (which resets to 0 at every chunk boundary).
 
         # ── Waveform bar ─────────────────────────────────────────────────────
         if cs.get('waveformEnabled'):
@@ -6490,7 +6429,159 @@ class VideoComposer:
 
         return current_label, audio_label
 
-    def _create_ffmpeg_grid_layout_fixed(self, track_segments, output_path, duration):
+    def _apply_text_overlays_to_video(self, input_path: str, output_path: str,
+                                       total_duration: float) -> 'str | None':
+        """Post-processing pass: apply title, tagline, and watermark drawtext overlays
+        to the full composed video in one FFmpeg pass.
+
+        Must run AFTER chunk concatenation so alpha/enable expressions reference
+        global video time (not per-chunk time which resets to 0 at every boundary).
+        Returns output_path on success, None on failure.
+        """
+        cs = getattr(self, 'composition_style', {}) or {}
+        has_title     = bool(cs.get('titleEnabled')     and cs.get('titleText',     '').strip())
+        has_tagline   = bool(cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip())
+        has_watermark = bool(cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip())
+
+        if not (has_title or has_tagline or has_watermark):
+            import shutil as _sh
+            _sh.copy2(input_path, output_path)
+            return output_path
+
+        filter_parts: list = []
+        current_label = '0:v'
+
+        def _esc(t: str) -> str:
+            return t.replace('\r', '').replace('\n', ' ').replace('\u0027', '\u2019')
+
+        def add_drawtext(text, x_expr, y_expr, size, color_hex,
+                         alpha_expr='1', enabled='1', font_key=None):
+            nonlocal current_label
+            escaped = _esc(text)
+            fc = self._hex_to_ffmpeg_color(color_hex)
+            fp = self._get_windows_font_path(font_key) if font_key and font_key != 'default' else None
+            fontfile_part = f':fontfile={fp}' if fp else ''
+            nxt = f'v_to_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{current_label}]drawtext=text='{escaped}'"
+                f":expansion=none"
+                f":x={x_expr}:y={y_expr}:fontsize={size}"
+                f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'"
+                f"{fontfile_part}[{nxt}]"
+            )
+            current_label = nxt
+
+        # ── Title (fade-in at start, fade-out) ────────────────────────────────
+        if has_title:
+            pos  = cs.get('titlePosition', 'top-center')
+            size = int(cs.get('titleFontSize', 56))
+            color = cs.get('titleColor', '#ffffff')
+            animated = bool(cs.get('titleAnimated', True))
+            if animated:
+                fin  = 2.0
+                fout = 2.0
+                hold = min(max(total_duration * 0.15, 3.0), 8.0)
+                T_end = min(fin + hold + fout, total_duration)
+                if T_end > total_duration:
+                    hold = max(0.0, total_duration - fin - fout)
+                    T_end = total_duration
+                F  = f'{fin:.3f}'
+                Te = f'{T_end:.3f}'
+                Fo = f'{fout:.3f}'
+                ai = f"(t+{F}-abs(t-{F}))/(2*{F})"
+                pu = f"(({Te}-t)+abs({Te}-t))/2"
+                ao = f"(({pu})+{Fo}-abs(({pu})-{Fo}))/(2*{Fo})"
+                alpha   = f"({ai})*({ao})"
+                enabled = f"lte(t,{Te})"
+            else:
+                alpha, enabled = '1', '1'
+            y = (str(max(20, size // 2)) if pos == 'top-center'
+                 else f'h-{size * 2}'   if pos == 'bottom-center'
+                 else '(h-text_h)/2')
+            add_drawtext(cs['titleText'], '(w-text_w)/2', y, size, color,
+                         alpha_expr=alpha, enabled=enabled,
+                         font_key=cs.get('titleFont', 'default'))
+
+        # ── Tagline ───────────────────────────────────────────────────────────
+        if has_tagline:
+            size  = int(cs.get('taglineFontSize', 24))
+            color = cs.get('taglineColor', '#cccccc')
+            add_drawtext(cs['taglineText'], '(w-text_w)/2', f'h-{size * 2 + 10}',
+                         size, color, font_key=cs.get('taglineFont', 'default'))
+
+        # ── Watermark ─────────────────────────────────────────────────────────
+        if has_watermark:
+            size    = int(cs.get('watermarkFontSize', 18))
+            color   = cs.get('watermarkColor', '#ffffff')
+            opacity = float(cs.get('watermarkOpacity', 0.5))
+            wpos    = cs.get('watermarkPosition', 'bottom-right')
+            pad     = 16
+            x, y = {
+                'bottom-right': (f'w-text_w-{pad}', f'h-text_h-{pad}'),
+                'bottom-left':  (str(pad),           f'h-text_h-{pad}'),
+                'top-right':    (f'w-text_w-{pad}',  str(pad)),
+            }.get(wpos, (str(pad), str(pad)))
+            add_drawtext(cs['watermarkText'], x, y, size, color,
+                         alpha_expr=str(round(opacity, 2)),
+                         font_key=cs.get('watermarkFont', 'default'))
+
+        filter_parts.append(f"[{current_label}]null[text_out]")
+        fc_str = ';'.join(filter_parts)
+
+        fc_script_path = None
+        try:
+            fd, fc_script_path = tempfile.mkstemp(prefix='ats_to_', suffix='.txt')
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                fh.write(fc_str)
+            fc_arg = ['-filter_complex_script', fc_script_path]
+        except Exception:
+            fc_arg = ['-filter_complex', fc_str]
+
+        cmd = [
+            'ffmpeg', '-y', '-i', input_path,
+            *fc_arg,
+            '-map', '[text_out]', '-map', '0:a?',
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+            '-c:a', 'copy',
+            '-t', str(total_duration),
+            output_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding='utf-8', errors='replace')
+        if fc_script_path:
+            try: os.unlink(fc_script_path)
+            except Exception: pass
+
+        if result.returncode == 0 and os.path.exists(output_path):
+            logging.info(
+                f"✅ Text overlays applied to full video: {os.path.getsize(output_path):,} bytes"
+            )
+            return output_path
+        logging.error(f"❌ Text overlay pass failed: {result.stderr[-400:]}")
+        return None
+
+    def _apply_text_overlays_inplace(self, path: str, total_duration: float) -> str:
+        """Apply text overlays to a video file, replacing it in-place.
+        Returns the (possibly unchanged) path."""
+        cs = getattr(self, 'composition_style', {}) or {}
+        has_any = any([
+            cs.get('titleEnabled')     and cs.get('titleText',     '').strip(),
+            cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip(),
+            cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip(),
+        ])
+        if not has_any:
+            return path
+        tmp = path + '.text_tmp.mp4'
+        out = self._apply_text_overlays_to_video(path, tmp, total_duration)
+        if out and os.path.exists(out):
+            import shutil as _sh
+            _sh.move(out, path)
+            logging.info(f"✅ Text overlays applied in-place to {Path(path).name}")
+        else:
+            logging.warning("⚠️ Text overlay pass failed — returning original video unchanged")
+        return path
+
+
         """
         FIXED: Create grid with INTELLIGENT volume balancing for any instruments
         """
@@ -6609,6 +6700,24 @@ class VideoComposer:
             logging.info(f"🎛️ Building FFmpeg filter complex...")
             logging.info(f"   Added bg placeholder ({bg_hex}, input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
 
+            # Pre-count empty cells so we can split the lavfi placeholder — FFmpeg does not
+            # allow the same input stream label (e.g. [0:v]) to appear more than once in a
+            # filter graph.  A split=N creates N distinct labels from the single source.
+            empty_cell_count = sum(
+                1 for r in range(grid_rows) for c in range(grid_cols)
+                if not (grid_cells[r][c] and os.path.exists(grid_cells[r][c].get('video_path', '')))
+            )
+            if empty_cell_count == 0:
+                bg_labels_iter = iter([])
+            elif empty_cell_count == 1:
+                bg_labels_iter = iter([f'[{black_video_input_idx}:v]'])
+            else:
+                split_outs = ''.join(f'[bg_{i}]' for i in range(empty_cell_count))
+                filter_parts.append(
+                    f'[{black_video_input_idx}:v]split={empty_cell_count}{split_outs}'
+                )
+                bg_labels_iter = iter(f'[bg_{i}]' for i in range(empty_cell_count))
+
             # Process each cell in the grid
             cells_processed = 0
             cells_with_content = 0
@@ -6645,9 +6754,9 @@ class VideoComposer:
                         logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB")
                         input_idx += 1
                     else:
-                        # Use the black placeholder for empty cells
-                        video_inputs_for_stack.append(f"[{black_video_input_idx}:v]")
-                        logging.info(f"      Cell ({r},{c}): EMPTY (using placeholder)")
+                        # Use a unique split label of the background placeholder per empty cell.
+                        video_inputs_for_stack.append(next(bg_labels_iter))
+                        logging.info(f"      Cell ({r},{c}): EMPTY (using bg placeholder)")
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
 
