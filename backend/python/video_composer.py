@@ -3749,19 +3749,21 @@ class VideoComposer:
                 )
                 title = _ic_esc(cs.get('introCardText', ''))
                 sub = _ic_esc(cs.get('introCardSubtext', ''))
+                ic_font_path = self._get_windows_font_path(cs.get('introCardFont', 'default'))
+                ic_fontfile = f":fontfile={ic_font_path}" if ic_font_path else ''
                 if title:
                     vf_filters.append(
                         f"drawtext=text='{title}':expansion=none"
                         f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize=72"
                         f":fontcolor={txt_col}:alpha='{alpha_expr}'"
-                        f":enable='lt(t,{intro_dur})'"
+                        f":enable='lt(t,{intro_dur})'{ic_fontfile}"
                     )
                 if sub:
                     vf_filters.append(
                         f"drawtext=text='{sub}':expansion=none"
                         f":x=(w-text_w)/2:y=h*0.62:fontsize=36"
                         f":fontcolor={txt_col}:alpha='{alpha_expr}'"
-                        f":enable='lt(t,{intro_dur})'"
+                        f":enable='lt(t,{intro_dur})'{ic_fontfile}"
                     )
                 logging.info(f'🎬 Intro card: {intro_dur}s, bg={bg_col}, '
                              f'title={bool(title)}, subtitle={bool(sub)}')
@@ -6017,20 +6019,56 @@ class VideoComposer:
     #         logging.error(f"Error creating grid layout: {e}")
     #         return None
 
-    def _get_windows_font_path(self):
-        """Return a usable font path for FFmpeg drawtext on Windows."""
-        candidates = [
-            r'C:/Windows/Fonts/arial.ttf',
-            r'C:/Windows/Fonts/verdana.ttf',
-            r'C:/Windows/Fonts/segoeui.ttf',
-            r'C:/Windows/Fonts/calibri.ttf',
-            r'C:/Windows/Fonts/tahoma.ttf',
+    # Map of user-facing font keys (from styleDefaults.js FONT_OPTIONS) to
+    # Windows font file names.  Only keys whose file is present on disk are used;
+    # others fall back to FFmpeg's built-in font.
+    _FONT_FILES = {
+        'arial':     'arial.ttf',
+        'verdana':   'verdana.ttf',
+        'impact':    'impact.ttf',
+        'courier':   'cour.ttf',
+        'times':     'times.ttf',
+        'georgia':   'georgia.ttf',
+        'trebuchet': 'trebuc.ttf',
+        'comic':     'comic.ttf',
+    }
+
+    def _get_windows_font_path(self, font_key=None):
+        """Return the escaped font path for FFmpeg drawtext's fontfile= option.
+
+        font_key: one of the values from FONT_OPTIONS (e.g. 'arial', 'impact').
+        Returns an _escape_path_for_filter-escaped path string, or None to let
+        FFmpeg fall back to its built-in font.
+        """
+        base = r'C:/Windows/Fonts/'
+        candidates = []
+
+        if font_key and font_key != 'default':
+            fname = self._FONT_FILES.get(font_key)
+            if fname:
+                candidates.append(base + fname)
+
+        # Always append a safe fallback chain so some font is found
+        candidates += [
+            base + 'arial.ttf',
+            base + 'verdana.ttf',
+            base + 'segoeui.ttf',
+            base + 'calibri.ttf',
+            base + 'tahoma.ttf',
         ]
+
+        # Return only the requested font if it was explicitly requested;
+        # only fall back to system fonts when no key is given.
+        if font_key and font_key != 'default':
+            # Try the requested font only — no silent substitution
+            p = base + (self._FONT_FILES.get(font_key) or '')
+            if p and os.path.exists(p.replace('/', os.sep)):
+                return self._escape_path_for_filter(p)
+            return None  # font not found — caller uses no fontfile= (FFmpeg default)
+
         for p in candidates:
             if os.path.exists(p.replace('/', os.sep)):
-                # Return path with forward slashes — no colon escaping needed
-                # when the path is wrapped in single quotes in the filtergraph.
-                return p
+                return self._escape_path_for_filter(p)
         return None  # Let FFmpeg use its built-in font
 
     def _get_color_grade_filter(self, grade):
@@ -6046,7 +6084,9 @@ class VideoComposer:
         return grades.get(grade, '')
 
     def _hex_to_ffmpeg_color(self, hex_color):
-        """Convert #RRGGBB to 0xRRGGBB for FFmpeg."""
+        """Convert #RRGGBB to 0xRRGGBB for FFmpeg. Returns black for None/empty."""
+        if not hex_color:
+            return '0x000000'
         h = hex_color.lstrip('#')
         if len(h) == 6:
             return f'0x{h.upper()}'
@@ -6094,7 +6134,7 @@ class VideoComposer:
             f"effects={[k for k,v in style.items() if v and k.endswith('Enabled')]}"
         )
 
-        bg_color = style.get('bgColor', '#1a1a2e')
+        bg_color = style.get('bgColor') or None   # None = use composition background
         border_width = int(style.get('borderWidth', 0))
         border_color = style.get('borderColor', '#7c3aed')
         color_grade = style.get('colorGrade', 'none')
@@ -6104,22 +6144,26 @@ class VideoComposer:
         label_text = style.get('labelText', '') or ''
         label_color = style.get('labelColor', '#ffffff')
         label_size = int(style.get('labelFontSize', 14))
+        label_font = style.get('labelFont', 'default')
         beat_flash_enabled = bool(style.get('beatFlashEnabled', False))
         beat_flash_intensity = float(style.get('beatFlashIntensity', 0.4))
         fade_enabled = bool(style.get('fadeEnabled', False))
         fade_duration = float(style.get('fadeDuration', 0.15))
         transparent_bg = bool(style.get('transparentBg', False))
 
-        font_path = self._get_windows_font_path()
+        font_path = self._get_windows_font_path(label_font)
         current = input_label
 
         # ── 1. Scale to cell dimensions, letterbox ───────────────────────────
-        # When transparentBg is on: use the global composition background so the
-        # letterbox "padding" blends seamlessly with the canvas background.
+        # When bg_color is None (default) or transparentBg is on, use the global
+        # composition background so the letterbox padding blends into the canvas.
         comp_bg_color = getattr(self, 'composition_style', {}).get('backgroundColor', '#0a0a0f')
         if transparent_bg:
             pad_color = self._hex_to_ffmpeg_color(comp_bg_color)
             logging.info(f"[style] cell={track_id!r} transparentBg=True → pad color={comp_bg_color}")
+        elif not bg_color:
+            # Default: no explicit clip bg — letterbox with composition background
+            pad_color = self._hex_to_ffmpeg_color(comp_bg_color)
         else:
             pad_color = self._hex_to_ffmpeg_color(bg_color)
 
@@ -6191,11 +6235,13 @@ class VideoComposer:
                                         .replace('\u0027', '\u2019')
             lc = self._hex_to_ffmpeg_color(label_color)
             next_label = f'v_lbl_{output_label[1:-1]}'
+            fontfile_part = f":fontfile={font_path}" if font_path else ''
             filter_parts.append(
                 f"{current}drawtext=text='{escaped_label}'"
                 f":expansion=none"
                 f":x=6:y=h-{label_size + 6}:fontsize={label_size}"
-                f":fontcolor={lc}:alpha='1':box=1:boxcolor=0x000000@0.45:boxborderw=3[{next_label}]"
+                f":fontcolor={lc}:alpha='1':box=1:boxcolor=0x000000@0.45:boxborderw=3"
+                f"{fontfile_part}[{next_label}]"
             )
             current = f'[{next_label}]'
 
@@ -6304,23 +6350,23 @@ class VideoComposer:
             """
             return t.replace('\r', '').replace('\n', ' ') \
                      .replace('\u0027', '\u2019')
-        def add_drawtext(text, x_expr, y_expr, size, color_hex, alpha_expr='1', enabled='1'):
+        def add_drawtext(text, x_expr, y_expr, size, color_hex, alpha_expr='1', enabled='1', font_key=None):
             nonlocal current_label, filter_parts
-            # Use inline text= with single-quote wrapping and '\\'' apostrophe
-            # escaping. FFmpeg's filter_complex parser uses single-quotes for
-            # quoting; double-quotes are NOT recognised — an apostrophe in the
-            # text value would start an errant single-quoted segment that
-            # swallows ';' chain separators, breaking all subsequent filters.
+            # Use inline text= with single-quote wrapping. ASCII apostrophes are
+            # replaced with U+2019 (RIGHT SINGLE QUOTATION MARK) to avoid breaking
+            # the filter_complex_script single-quote parser.
             # expansion=none prevents % format string expansion on user text.
-            # No fontfile/font specified — FFmpeg uses its built-in fallback font.
             escaped = _esc(text)
             fc = self._hex_to_ffmpeg_color(color_hex)
+            fp = self._get_windows_font_path(font_key) if font_key and font_key != 'default' else None
+            fontfile_part = f":fontfile={fp}" if fp else ''
             nxt = f'v_gt_{len(filter_parts)}'
             filter_parts.append(
                 f"[{current_label}]drawtext=text='{escaped}'"
                 f":expansion=none"
                 f":x={x_expr}:y={y_expr}:fontsize={size}"
-                f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'[{nxt}]"
+                f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'"
+                f"{fontfile_part}[{nxt}]"
             )
             current_label = nxt
 
@@ -6330,25 +6376,53 @@ class VideoComposer:
             size = int(cs.get('titleFontSize', 56))
             color = cs.get('titleColor', '#ffffff')
             animated = bool(cs.get('titleAnimated', True))
-            # Use comma-free expression: equivalent to min(t,1) for t>=0.
-            # FFmpeg's filter_complex_script parser splits chains on ',' before
-            # honouring single-quote quoting, so expressions with commas inside
-            # alpha='...' break the filter graph.  This abs()-based form is safe.
-            alpha = 't-(t-1+abs(t-1))/2' if animated else '1'
+            if animated:
+                # Fade-in then fade-out using comma-free abs-trick ramps.
+                # Commas inside alpha='...' break FFmpeg's filter_complex_script
+                # parser (splits chain on comma before honouring single-quotes).
+                #
+                # alpha_in(t)  = min(t, F_in) / F_in
+                #              = (t + F - abs(t - F)) / (2*F)
+                # alpha_out(t) = min(max(T_end - t, 0), F_out) / F_out
+                #   let pos_u  = ((T_end-t) + abs(T_end-t)) / 2   [= max(0, T_end-t)]
+                #   alpha_out  = (pos_u + F_out - abs(pos_u - F_out)) / (2*F_out)
+                # combined     = alpha_in * alpha_out
+                fin  = 2.0   # fade-in duration (seconds)
+                fout = 2.0   # fade-out duration (seconds)
+                hold = min(max(duration * 0.15, 3.0), 8.0)
+                T_end = min(fin + hold + fout, duration)
+                # Shrink hold if video is shorter than the full window
+                if T_end > duration:
+                    hold = max(0.0, duration - fin - fout)
+                    T_end = duration
+                F  = f'{fin:.3f}'
+                Te = f'{T_end:.3f}'
+                Fo = f'{fout:.3f}'
+                ai = f"(t+{F}-abs(t-{F}))/(2*{F})"
+                pu = f"(({Te}-t)+abs({Te}-t))/2"
+                ao = f"(({pu})+{Fo}-abs(({pu})-{Fo}))/(2*{Fo})"
+                alpha = f"({ai})*({ao})"
+                enabled = f"lte(t,{Te})"
+            else:
+                alpha = '1'
+                enabled = '1'
             if pos == 'top-center':
                 y = str(max(20, size // 2))
             elif pos == 'bottom-center':
                 y = f'h-{size * 2}'
             else:
                 y = '(h-text_h)/2'
-            add_drawtext(cs['titleText'], '(w-text_w)/2', y, size, color, alpha_expr=alpha)
+            add_drawtext(cs['titleText'], '(w-text_w)/2', y, size, color,
+                         alpha_expr=alpha, enabled=enabled,
+                         font_key=cs.get('titleFont', 'default'))
 
         # ── Tagline ──────────────────────────────────────────────────────────
         if cs.get('taglineEnabled') and cs.get('taglineText', '').strip():
             size = int(cs.get('taglineFontSize', 24))
             color = cs.get('taglineColor', '#cccccc')
             y = f'h-{size * 2 + 10}'
-            add_drawtext(cs['taglineText'], '(w-text_w)/2', y, size, color)
+            add_drawtext(cs['taglineText'], '(w-text_w)/2', y, size, color,
+                         font_key=cs.get('taglineFont', 'default'))
 
         # ── Watermark ────────────────────────────────────────────────────────
         if cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip():
@@ -6365,7 +6439,9 @@ class VideoComposer:
                 x, y = f'w-text_w-{padding}', str(padding)
             else:
                 x, y = str(padding), str(padding)
-            add_drawtext(cs['watermarkText'], x, y, size, color, alpha_expr=str(round(opacity, 2)))
+            add_drawtext(cs['watermarkText'], x, y, size, color,
+                         alpha_expr=str(round(opacity, 2)),
+                         font_key=cs.get('watermarkFont', 'default'))
 
         # ── Waveform bar ─────────────────────────────────────────────────────
         if cs.get('waveformEnabled'):
@@ -7167,23 +7243,64 @@ class VideoComposer:
             return None
 
     def _find_drum_video_file_flexible(self, drum_name):
+        """Find the recorded video file for a specific drum sound.
+
+        Checks sources in priority order:
+          1. PathRegistry  — populated at startup from the session's uploaded files.
+          2. explicit_video_files dict — the videoFiles payload from the frontend.
+          3. Filesystem glob of self.uploads_dir (fallback for legacy layouts).
+
+        The drum_name argument comes from DRUM_NOTES, e.g. "Bass Drum", "Hi-Hat Closed".
+        Both PathRegistry and the explicit_video_files dict use a lower-snake_case key
+        (hyphens and spaces replaced with underscores), optionally prefixed with "drum_".
         """
-        FLEXIBLE drum video finding that works for any naming convention
-        """
-        # Try multiple naming patterns (works for any uploaded drums)
+        # Canonical form used by PathRegistry: lower-snake, no leading drum_ prefix.
+        # Both spaces AND hyphens must be normalised to underscore — the registry
+        # registration path does this (video_composer.py:1077) but get_drum_path's
+        # normalization only replaces spaces, leaving hyphens intact.
+        canonical = drum_name.lower().replace(' ', '_').replace('-', '_')
+
+        # 1. PathRegistry (fastest path — already populated at session start)
+        registry = PathRegistry.get_instance()
+        path = registry.get_drum_path(canonical)
+        if path and os.path.exists(path):
+            logging.debug(f"[drum] PathRegistry hit: {drum_name} → {path}")
+            return path
+
+        # 2. explicit_video_files dict (key may be prefixed with "drum_")
+        for key_variant in (f'drum_{canonical}', canonical):
+            info = self.explicit_video_files.get(key_variant)
+            if isinstance(info, dict):
+                p = info.get('path', '')
+            elif info:
+                p = str(info)
+            else:
+                # Also try hyphen variant (Node.js may send drum_hi-hat_closed)
+                hyphen_key = key_variant.replace('_', '-', 1) if key_variant.startswith('drum_') else None
+                info2 = self.explicit_video_files.get(hyphen_key) if hyphen_key else None
+                if isinstance(info2, dict):
+                    p = info2.get('path', '')
+                elif info2:
+                    p = str(info2)
+                else:
+                    continue
+            if p and os.path.exists(p):
+                logging.debug(f"[drum] explicit_video_files hit: {key_variant} → {p}")
+                return p
+
+        # 3. Glob fallback (legacy layout — searches self.uploads_dir)
         search_patterns = [
             f"*{drum_name.lower()}*",
-            f"*{drum_name.replace(' ', '_').lower()}*",
+            f"*{canonical}*",
             f"*{drum_name.replace(' ', '').lower()}*",
-            f"*drum*{drum_name.lower()}*",
-            f"*{drum_name.split()[0].lower()}*",  # First word only
+            f"*drum*{canonical}*",
+            f"*{drum_name.split()[0].lower()}*",
         ]
-        
         for pattern in search_patterns:
             for video_file in self.uploads_dir.glob(f"{pattern}.mp4"):
                 if video_file.exists():
                     return str(video_file)
-        
+
         return None
     
     def _find_drum_video_file(self, drum_name):

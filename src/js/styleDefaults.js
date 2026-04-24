@@ -4,6 +4,19 @@
  * clipStyle = per-track settings (border, color grade, label, etc.)
  */
 
+/** Font options available for all text overlays. */
+export const FONT_OPTIONS = [
+  { value: 'default',   label: 'Default (FFmpeg)' },
+  { value: 'arial',     label: 'Arial' },
+  { value: 'verdana',   label: 'Verdana' },
+  { value: 'impact',    label: 'Impact' },
+  { value: 'courier',   label: 'Courier New' },
+  { value: 'times',     label: 'Times New Roman' },
+  { value: 'georgia',   label: 'Georgia' },
+  { value: 'trebuchet', label: 'Trebuchet MS' },
+  { value: 'comic',     label: 'Comic Sans MS' },
+];
+
 export const DEFAULT_COMPOSITION_STYLE = {
   colorTheme: 'dark', // 'dark' | 'neon' | 'vintage' | 'cyberpunk' | 'minimal' | 'custom'
   backgroundColor: '#0a0a0f',
@@ -13,6 +26,7 @@ export const DEFAULT_COMPOSITION_STYLE = {
   titleText: '',
   titleFontSize: 56,
   titleColor: '#ffffff',
+  titleFont: 'default',
   titlePosition: 'top-center', // 'top-center' | 'bottom-center' | 'center'
   titleAnimated: true,
 
@@ -21,6 +35,7 @@ export const DEFAULT_COMPOSITION_STYLE = {
   taglineText: '',
   taglineFontSize: 24,
   taglineColor: '#cccccc',
+  taglineFont: 'default',
   taglinePosition: 'bottom-center',
 
   // Watermark
@@ -28,6 +43,7 @@ export const DEFAULT_COMPOSITION_STYLE = {
   watermarkText: '',
   watermarkFontSize: 18,
   watermarkColor: '#ffffff',
+  watermarkFont: 'default',
   watermarkOpacity: 0.5,
   watermarkPosition: 'bottom-right', // 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
 
@@ -51,6 +67,7 @@ export const DEFAULT_COMPOSITION_STYLE = {
   introCardText: '',
   introCardSubtext: '',
   introCardTextColor: '#ffffff',
+  introCardFont: 'default',
   introCardAnimated: true,
 };
 
@@ -58,7 +75,9 @@ export const DEFAULT_CLIP_STYLE = {
   borderColor: '#7c3aed',
   borderWidth: 0, // 0 = no border
 
-  bgColor: '#1a1a2e', // gap-fill color shown behind/around clip
+  // null = use composition background (seamlessly transparent);
+  // set a hex color to give the clip its own distinct background.
+  bgColor: null,
 
   roundedCorners: false,
   cornerRadius: 12,
@@ -68,6 +87,7 @@ export const DEFAULT_CLIP_STYLE = {
   labelEnabled: false,
   labelText: '', // empty = use instrument name
   labelColor: '#ffffff',
+  labelFont: 'default',
   labelFontSize: 14,
 
   beatFlashEnabled: false,
@@ -77,7 +97,7 @@ export const DEFAULT_CLIP_STYLE = {
   fadeEnabled: false,
   fadeDuration: 0.15, // seconds for fade-in/out on note trigger
 
-  transparentBg: false, // use global composition background instead of bgColor for letterbox padding
+  transparentBg: false, // zoom-to-fill (crop) instead of letterbox
 };
 
 export const COLOR_THEMES = {
