@@ -3736,9 +3736,11 @@ class VideoComposer:
 
                 def _ic_esc(t):
                     """Escape text for single-quoted FFmpeg drawtext text= value.
-                    Use '\\'' to include apostrophes (backslash-escape outside quotes)."""
+                    Replace ASCII apostrophe U+0027 with Unicode U+2019 (RIGHT
+                    SINGLE QUOTATION MARK) — visually identical but not a special
+                    FFmpeg parser character, so it never breaks quote parsing."""
                     return (t or '').replace('\r', '').replace('\n', ' ') \
-                                    .replace("'", "'\\''")
+                                    .replace('\u0027', '\u2019')
 
                 # Solid colour fill for intro duration
                 vf_filters.append(
@@ -6186,7 +6188,7 @@ class VideoComposer:
             # apostrophes/colons in track names (unlike double-quote wrapping which
             # FFmpeg's filter_complex parser does not recognise as a quote character).
             escaped_label = display_text.replace('\r', '').replace('\n', ' ') \
-                                        .replace("'", "'\\''")
+                                        .replace('\u0027', '\u2019')
             lc = self._hex_to_ffmpeg_color(label_color)
             next_label = f'v_lbl_{output_label[1:-1]}'
             filter_parts.append(
@@ -6219,7 +6221,7 @@ class VideoComposer:
             )
             current = f'[{next_label}]'
 
-        # ── 7. Rounded corners (paint corner-fill color over corners) ────────
+        # ── 7. Rounded corners (staircase drawbox approximation of curve) ───────
         if rounded_corners and corner_radius > 0:
             # When transparent bg is on, round the actual video content corners;
             # corner fill uses the global bg so they blend into the canvas.
@@ -6232,15 +6234,36 @@ class VideoComposer:
             r = min(corner_radius, rw // 4, rh // 4)
             if r > 0:
                 next_label = f'v_rnd_{output_label[1:-1]}'
-                filter_parts.append(
-                    f"{current}"
-                    f"drawbox=x={rx}:y={ry}:w={r}:h={r}:color={corner_fill}@1:t=fill,"
-                    f"drawbox=x={rx + rw - r}:y={ry}:w={r}:h={r}:color={corner_fill}@1:t=fill,"
-                    f"drawbox=x={rx}:y={ry + rh - r}:w={r}:h={r}:color={corner_fill}@1:t=fill,"
-                    f"drawbox=x={rx + rw - r}:y={ry + rh - r}:w={r}:h={r}:color={corner_fill}@1:t=fill"
-                    f"[{next_label}]"
-                )
-                current = f'[{next_label}]'
+                # Staircase approximation: divide radius into N horizontal strips.
+                # For each strip at vertical offset y0-y1, compute the x-width of
+                # the corner cutout using the circle equation x = r - sqrt(r²-(r-y)²).
+                # More steps → smoother curve (8 is a good balance of quality/speed).
+                n_steps = min(r, 8)
+                boxes = []
+                for step in range(n_steps):
+                    y0 = int(step * r / n_steps)
+                    y1 = int((step + 1) * r / n_steps)
+                    hs = y1 - y0
+                    if hs <= 0:
+                        continue
+                    y_mid = (y0 + y1) / 2.0
+                    inner_sq = max(0.0, float(r) ** 2 - (float(r) - y_mid) ** 2)
+                    xw = min(rw // 2, int(float(r) - math.sqrt(inner_sq)) + 1)
+                    if xw <= 0:
+                        continue
+                    # top-left
+                    boxes.append(f"drawbox=x={rx}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    # top-right
+                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    # bottom-left  (mirror: rows ry+rh-y1 to ry+rh-y0)
+                    boxes.append(f"drawbox=x={rx}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    # bottom-right
+                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                if boxes:
+                    filter_parts.append(
+                        f"{current}" + ','.join(boxes) + f"[{next_label}]"
+                    )
+                    current = f'[{next_label}]'
 
         # Terminate chain at the output_label expected by the caller
         filter_parts.append(f"{current}null{output_label}")
@@ -6266,23 +6289,21 @@ class VideoComposer:
         def _esc(t):
             """Escape text for single-quoted FFmpeg drawtext text= value.
 
-            FFmpeg's filter_complex parser only recognises single-quotes '...'
-            for quoting. Double-quotes are NOT special — using "..." causes
-            an apostrophe (e.g. in "Ain't") to start a single-quoted segment
-            that swallows ':' option separators and ';' chain separators.
+            FFmpeg's filter_complex parser uses single-quotes '...' for quoting.
+            An ASCII apostrophe (U+0027) inside a single-quoted segment would
+            prematurely close the quote, and backslash-escaping outside quotes
+            (the '\\'' pattern) is silently dropped in this FFmpeg build.
 
-            To include a literal apostrophe inside a single-quoted filter
-            value, use the '\\'' pattern: end the current quote, then use a
-            backslash-escaped apostrophe (outside quotes), then open a new
-            quote. This is the same backslash-escape mechanism used by
-            _escape_path_for_filter for ':' in Windows drive letters.
+            Solution: replace ASCII APOSTROPHE (U+0027) with Unicode RIGHT SINGLE
+            QUOTATION MARK (U+2019). The two characters are visually identical in
+            every common font, but U+2019 is a multi-byte UTF-8 sequence that the
+            FFmpeg filter parser never treats as a quote delimiter.
 
             expansion=none (added to each filter) prevents % format strings.
             Newlines are stripped — drawtext is single-line only.
             """
             return t.replace('\r', '').replace('\n', ' ') \
-                     .replace("'", "'\\''")
-
+                     .replace('\u0027', '\u2019')
         def add_drawtext(text, x_expr, y_expr, size, color_hex, alpha_expr='1', enabled='1'):
             nonlocal current_label, filter_parts
             # Use inline text= with single-quote wrapping and '\\'' apostrophe
