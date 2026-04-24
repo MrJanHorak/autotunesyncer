@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import PropTypes from 'prop-types';
-import { COLOR_THEMES, COLOR_GRADE_LABELS, DEFAULT_COMPOSITION_STYLE } from '../../js/styleDefaults';
+import { COLOR_THEMES, COLOR_GRADE_LABELS, DEFAULT_COMPOSITION_STYLE, FONT_OPTIONS } from '../../js/styleDefaults';
 import './CompositionStylePanel.css';
 
 const Section = ({ title, icon, children, defaultOpen = false }) => {
@@ -41,7 +41,16 @@ const Toggle = ({ checked, onChange }) => (
 );
 Toggle.propTypes = { checked: PropTypes.bool.isRequired, onChange: PropTypes.func.isRequired };
 
-const CompositionStylePanel = ({ style, onChange }) => {
+const FontSelect = ({ value, onChange }) => (
+  <select className='csp-select' value={value || 'default'} onChange={(e) => onChange(e.target.value)}>
+    {FONT_OPTIONS.map((f) => (
+      <option key={f.value} value={f.value}>{f.label}</option>
+    ))}
+  </select>
+);
+FontSelect.propTypes = { value: PropTypes.string, onChange: PropTypes.func.isRequired };
+
+
   const set = (key, val) => onChange({ ...style, [key]: val });
 
   const applyTheme = (theme) => {
@@ -110,6 +119,9 @@ const CompositionStylePanel = ({ style, onChange }) => {
               <input className='csp-range' type='range' min={24} max={96} value={style.titleFontSize} onChange={(e) => set('titleFontSize', +e.target.value)} />
               <span className='csp-range-val'>{style.titleFontSize}px</span>
             </Field>
+            <Field label='Font'>
+              <FontSelect value={style.titleFont} onChange={(v) => set('titleFont', v)} />
+            </Field>
             <Field label='Color'>
               <input type='color' value={style.titleColor} onChange={(e) => set('titleColor', e.target.value)} />
               <span className='csp-color-hex'>{style.titleColor}</span>
@@ -134,6 +146,9 @@ const CompositionStylePanel = ({ style, onChange }) => {
             <Field label='Font Size'>
               <input className='csp-range' type='range' min={14} max={48} value={style.taglineFontSize} onChange={(e) => set('taglineFontSize', +e.target.value)} />
               <span className='csp-range-val'>{style.taglineFontSize}px</span>
+            </Field>
+            <Field label='Font'>
+              <FontSelect value={style.taglineFont} onChange={(v) => set('taglineFont', v)} />
             </Field>
             <Field label='Color'>
               <input type='color' value={style.taglineColor} onChange={(e) => set('taglineColor', e.target.value)} />
@@ -167,6 +182,9 @@ const CompositionStylePanel = ({ style, onChange }) => {
             <Field label='Font Size'>
               <input className='csp-range' type='range' min={10} max={36} value={style.watermarkFontSize} onChange={(e) => set('watermarkFontSize', +e.target.value)} />
               <span className='csp-range-val'>{style.watermarkFontSize}px</span>
+            </Field>
+            <Field label='Font'>
+              <FontSelect value={style.watermarkFont} onChange={(v) => set('watermarkFont', v)} />
             </Field>
             <Field label='Color'>
               <input type='color' value={style.watermarkColor} onChange={(e) => set('watermarkColor', e.target.value)} />
@@ -215,6 +233,9 @@ const CompositionStylePanel = ({ style, onChange }) => {
             </Field>
             <Field label='Text Color'>
               <input type='color' value={style.introCardTextColor} onChange={(e) => set('introCardTextColor', e.target.value)} />
+            </Field>
+            <Field label='Font'>
+              <FontSelect value={style.introCardFont} onChange={(v) => set('introCardFont', v)} />
             </Field>
             <Field label='Animated'>
               <Toggle checked={style.introCardAnimated} onChange={(v) => set('introCardAnimated', v)} />
