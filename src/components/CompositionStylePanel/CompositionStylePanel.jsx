@@ -50,7 +50,7 @@ const FontSelect = ({ value, onChange }) => (
 );
 FontSelect.propTypes = { value: PropTypes.string, onChange: PropTypes.func.isRequired };
 
-
+const CompositionStylePanel = ({ style, onChange }) => {
   const set = (key, val) => onChange({ ...style, [key]: val });
 
   const applyTheme = (theme) => {
