@@ -3735,8 +3735,10 @@ class VideoComposer:
                              if animated else '1'
 
                 def _ic_esc(t):
+                    """Escape text for double-quoted FFmpeg drawtext text= value.
+                    Only \\ and \" need escaping; apostrophes are safe in double quotes."""
                     return (t or '').replace('\r', '').replace('\n', ' ') \
-                                    .replace('\\', '\\\\').replace("'", "\\'")
+                                    .replace('\\', '\\\\').replace('"', '\\"')
 
                 # Solid colour fill for intro duration
                 vf_filters.append(
@@ -3747,14 +3749,14 @@ class VideoComposer:
                 sub = _ic_esc(cs.get('introCardSubtext', ''))
                 if title:
                     vf_filters.append(
-                        f"drawtext=text='{title}':expansion=none"
+                        f"drawtext=text=\"{title}\":expansion=none"
                         f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize=72"
                         f":fontcolor={txt_col}:alpha='{alpha_expr}'"
                         f":enable='lt(t,{intro_dur})'"
                     )
                 if sub:
                     vf_filters.append(
-                        f"drawtext=text='{sub}':expansion=none"
+                        f"drawtext=text=\"{sub}\":expansion=none"
                         f":x=(w-text_w)/2:y=h*0.62:fontsize=36"
                         f":fontcolor={txt_col}:alpha='{alpha_expr}'"
                         f":enable='lt(t,{intro_dur})'"
@@ -6179,13 +6181,14 @@ class VideoComposer:
                 )
             else:
                 display_text = track_id
-            # Inline text= — avoids Windows path escaping issues with textfile=
+            # Inline text= with double-quote wrapping — avoids Windows path escaping
+            # issues with textfile=, and handles apostrophes/colons in track names.
             escaped_label = display_text.replace('\r', '').replace('\n', ' ') \
-                                        .replace('\\', '\\\\').replace("'", "\\'")
+                                        .replace('\\', '\\\\').replace('"', '\\"')
             lc = self._hex_to_ffmpeg_color(label_color)
             next_label = f'v_lbl_{output_label[1:-1]}'
             filter_parts.append(
-                f"{current}drawtext=text='{escaped_label}'"
+                f"{current}drawtext=text=\"{escaped_label}\""
                 f":expansion=none"
                 f":x=6:y=h-{label_size + 6}:fontsize={label_size}"
                 f":fontcolor={lc}:alpha='1':box=1:boxcolor=0x000000@0.45:boxborderw=3[{next_label}]"
@@ -6259,14 +6262,16 @@ class VideoComposer:
         )
 
         def _esc(t):
-            """Escape text for single-quoted FFmpeg drawtext text= value.
+            """Escape text for double-quoted FFmpeg drawtext text= value.
 
-            Inside single quotes, only backslash and single-quote are special.
+            Double-quoted FFmpeg strings: only \\ and \" need escaping.
+            Single quotes, colons, semicolons, brackets etc. are all literal
+            inside double quotes — so apostrophes in titles work correctly.
             expansion=none (added to each filter) prevents % format strings.
             Newlines are stripped — drawtext is single-line only.
             """
             return t.replace('\r', '').replace('\n', ' ') \
-                     .replace('\\', '\\\\').replace("'", "\\'")
+                     .replace('\\', '\\\\').replace('"', '\\"')
 
         def add_drawtext(text, x_expr, y_expr, size, color_hex, alpha_expr='1', enabled='1'):
             nonlocal current_label, filter_parts
@@ -6278,7 +6283,7 @@ class VideoComposer:
             fc = self._hex_to_ffmpeg_color(color_hex)
             nxt = f'v_gt_{len(filter_parts)}'
             filter_parts.append(
-                f"[{current_label}]drawtext=text='{escaped}'"
+                f"[{current_label}]drawtext=text=\"{escaped}\""
                 f":expansion=none"
                 f":x={x_expr}:y={y_expr}:fontsize={size}"
                 f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'[{nxt}]"
@@ -6291,7 +6296,11 @@ class VideoComposer:
             size = int(cs.get('titleFontSize', 56))
             color = cs.get('titleColor', '#ffffff')
             animated = bool(cs.get('titleAnimated', True))
-            alpha = 'min(t/1.0,1)' if animated else '1'
+            # Use comma-free expression: equivalent to min(t,1) for t>=0.
+            # FFmpeg's filter_complex_script parser splits chains on ',' before
+            # honouring single-quote quoting, so expressions with commas inside
+            # alpha='...' break the filter graph.  This abs()-based form is safe.
+            alpha = 't-(t-1+abs(t-1))/2' if animated else '1'
             if pos == 'top-center':
                 y = str(max(20, size // 2))
             elif pos == 'bottom-center':
@@ -6360,10 +6369,13 @@ class VideoComposer:
         if cs.get('glitchEnabled'):
             intensity_map = {'subtle': 8, 'medium': 20, 'heavy': 40}
             noise_level = intensity_map.get(cs.get('glitchIntensity', 'subtle'), 8)
+            # Split into two separate filter_parts (joined by ';') rather than a
+            # comma-chained pair, so the ',' chain separator never appears in the
+            # filter-complex string and can't be misread as an option delimiter.
+            noise_mid = f'v_gnoise_{len(filter_parts)}'
+            filter_parts.append(f"[{current_label}]noise=alls={noise_level}:allf=t[{noise_mid}]")
             nxt = f'v_glitch_{len(filter_parts)}'
-            filter_parts.append(
-                f"[{current_label}]noise=alls={noise_level}:allf=t,eq=saturation=0.85[{nxt}]"
-            )
+            filter_parts.append(f"[{noise_mid}]eq=saturation=0.85[{nxt}]")
             current_label = nxt
 
         return current_label, audio_label
@@ -6578,7 +6590,9 @@ class VideoComposer:
                 logging.info(f"🎯 Solo mode: rendering at {solo_w}x{solo_h} (full canvas, no xstack)")
                 encoding_args = self._get_encoding_settings()
                 fc_str = ';'.join(filter_parts)
-                # Use filter_complex_script on Windows to avoid command-line length limit
+                # Use filter_complex_script on Windows to avoid the 32k cmd-line length limit.
+                # (-/filter_complex is the non-deprecated form but has parsing issues in this
+                # FFmpeg build — keep using -filter_complex_script until that is resolved.)
                 fc_script_path = None
                 try:
                     fd, fc_script_path = tempfile.mkstemp(prefix='ats_fc_', suffix='.txt')
@@ -6646,7 +6660,9 @@ class VideoComposer:
             logging.info(f"   Filter complex parts: {len(filter_parts)}")
             logging.info(f"   Grid layout: {layout_string}")
 
-            # Use filter_complex_script to avoid Windows 32k command-line length limit
+            # Use filter_complex_script on Windows to avoid the 32k cmd-line length limit.
+            # (-/filter_complex is the non-deprecated form but has parsing issues in this
+            # FFmpeg build — keep using -filter_complex_script until that is resolved.)
             fc_str = ';'.join(filter_parts)
             fc_script_path = None
             try:
@@ -6692,6 +6708,7 @@ class VideoComposer:
                 logging.error(f"   STDERR: {result.stderr}")
                 if result.stdout:
                     logging.error(f"   STDOUT: {result.stdout}")
+                logging.info(f"   Filter complex dump:\n{fc_str}")
                 logging.info(f"🎞️ === FFMPEG GRID CREATION END (FAILED) ===\n")
                 return None
         except Exception as e:
