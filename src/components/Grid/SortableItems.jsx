@@ -1,24 +1,46 @@
 /* eslint-disable react/prop-types */
-import { useState, useRef, useEffect, memo } from 'react';import { useSortable } from '@dnd-kit/sortable';
+import { useState, useRef, useEffect, memo } from 'react';
+import { createPortal } from 'react-dom';
+import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { DEFAULT_CLIP_STYLE, COLOR_GRADE_LABELS } from '../../js/styleDefaults';
 
-const ClipStylePopover = ({ style, onChange, onClose, instrumentName }) => {
+const ClipStylePopover = ({ style, onChange, onClose, instrumentName, anchorRef }) => {
   const set = (k, v) => onChange({ ...style, [k]: v });
   const popoverRef = useRef(null);
+  const [pos, setPos] = useState(null);
+
+  // Compute fixed position from the anchor button's screen coordinates
+  useEffect(() => {
+    if (anchorRef?.current) {
+      const rect = anchorRef.current.getBoundingClientRect();
+      const popoverWidth = 260;
+      const left = Math.max(8, Math.min(rect.right - popoverWidth, window.innerWidth - popoverWidth - 8));
+      setPos({ top: rect.bottom + 4, left });
+    }
+  }, [anchorRef]);
 
   useEffect(() => {
     const handler = (e) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target)) onClose();
+      if (
+        popoverRef.current &&
+        !popoverRef.current.contains(e.target) &&
+        !anchorRef?.current?.contains(e.target)
+      ) {
+        onClose();
+      }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [onClose]);
+  }, [onClose, anchorRef]);
 
-  return (
+  if (!pos) return null;
+
+  return createPortal(
     <div
       ref={popoverRef}
       className='clip-style-popover'
+      style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 9999 }}
       onMouseDown={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
     >
@@ -41,8 +63,23 @@ const ClipStylePopover = ({ style, onChange, onClose, instrumentName }) => {
       <div className='clip-style-row'>
         <label>Gap Fill</label>
         <div className='clip-style-row__controls'>
-          <input type='color' value={style.bgColor} onChange={(e) => set('bgColor', e.target.value)} title='Background color when clip is idle' />
-          <span className='clip-style-hint' style={{ color: 'var(--color-text-muted)', fontSize: '0.72rem' }}>when idle</span>
+          <label className='csp-toggle' style={{ marginRight: '0.5rem' }}>
+            <input
+              type='checkbox'
+              checked={style.bgColor != null}
+              onChange={(e) => set('bgColor', e.target.checked ? '#1a1a2e' : null)}
+              title='Enable custom idle background color'
+            />
+            <span className='csp-toggle__slider' />
+          </label>
+          {style.bgColor != null ? (
+            <>
+              <input type='color' value={style.bgColor} onChange={(e) => set('bgColor', e.target.value)} title='Background color when clip is idle' />
+              <span className='clip-style-hint' style={{ color: 'var(--color-text-muted)', fontSize: '0.72rem' }}>when idle</span>
+            </>
+          ) : (
+            <span className='clip-style-hint' style={{ color: 'var(--color-text-muted)', fontSize: '0.72rem' }}>transparent (global bg)</span>
+          )}
         </div>
       </div>
 
@@ -141,7 +178,8 @@ const ClipStylePopover = ({ style, onChange, onClose, instrumentName }) => {
       >
         ↺ Reset clip style
       </button>
-    </div>
+    </div>,
+    document.body
   );
 };
 
@@ -160,6 +198,7 @@ export const SortableItem = memo(function SortableItem({
   const [showStylePicker, setShowStylePicker] = useState(false);
   const videoRef = useRef(null);
   const wasActiveRef = useRef(false);
+  const btnRef = useRef(null);
 
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id });
@@ -280,6 +319,7 @@ export const SortableItem = memo(function SortableItem({
 
           {/* Palette button — stops drag propagation */}
           <button
+            ref={btnRef}
             className='cell-style-btn'
             title='Style this clip'
             style={{ position: 'relative', zIndex: 2 }}
@@ -295,6 +335,7 @@ export const SortableItem = memo(function SortableItem({
               onChange={onClipStyleChange}
               onClose={() => setShowStylePicker(false)}
               instrumentName={item.name}
+              anchorRef={btnRef}
             />
           )}
         </>

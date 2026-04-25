@@ -219,15 +219,12 @@
 
 /* ── Clip Style Popover ────────────────────────────────────────────────── */
 .clip-style-popover {
-  position: absolute;
-  top: 36px;
-  right: 6px;
-  z-index: 100;
+  z-index: 9999;
   background: #1e1b3a;
   border: 1px solid rgba(192, 132, 252, 0.3);
   border-radius: 10px;
   padding: 0.625rem;
-  min-width: 240px;
+  min-width: 260px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
   font-size: 0.78rem;
 }
