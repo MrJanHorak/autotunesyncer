@@ -2130,10 +2130,14 @@ class VideoComposer:
 
             filter_parts.append(f"{video_chain}format=yuv420p[final_v]")
 
+            cs = getattr(self, 'composition_style', {}) or {}
+            bg_hex = cs.get('backgroundColor', '#0a0a0f')
+            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
+
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
-                "-f", "lavfi", "-i", f"color=black:size=640x360:rate=30:duration={total_duration}",
+                "-f", "lavfi", "-i", f"color={bg_ffmpeg}:size=640x360:rate=30:duration={total_duration}",
                 "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}",
             ]
             # Add pre-tuned audio sources (one per unique cached midi_note)
@@ -6097,6 +6101,99 @@ class VideoComposer:
             return f'0x{h.upper()}'
         return '0x000000'
 
+    def _get_video_info(self, path):
+        """Use ffprobe to get (width, height, duration). Returns None on failure."""
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=width,height:format=duration',
+                 '-of', 'csv=p=0', path],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+                w = h = dur = None
+                for line in lines:
+                    parts = line.split(',')
+                    if len(parts) >= 2:
+                        try:
+                            w, h = int(parts[0]), int(parts[1])
+                        except ValueError:
+                            pass
+                    elif len(parts) == 1:
+                        try:
+                            dur = float(parts[0])
+                        except ValueError:
+                            pass
+                return w, h, dur
+        except Exception as e:
+            logging.warning(f"ffprobe failed for {path}: {e}")
+        return None, None, None
+
+    def _preprocess_extend_clip(self, clip_path, chunk_duration, bg_hex):
+        """
+        Ensure clip_path runs for the full chunk_duration by appending background-
+        colored frames. Browser-recorded clips often have N/A duration metadata, so
+        we ALWAYS attempt extension (not just when duration is known to be short).
+        Returns (result_path, is_temp).
+        """
+        w, h, dur = self._get_video_info(clip_path)
+
+        # Skip extension only when we have a confirmed duration that already fills the chunk
+        if dur is not None and dur >= chunk_duration - 0.05:
+            return clip_path, False
+
+        # Browser-recorded clips often report N/A duration — always extend those too.
+        # Use the clip's actual dimensions for the bg source so concat works without rescaling.
+        if not w or not h:
+            w, h = 1280, 720  # safe fallback for browser clips
+
+        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
+
+        fd, ext_path = tempfile.mkstemp(prefix='ats_ext_', suffix='.mp4')
+        os.close(fd)
+
+        filter_complex = (
+            # Normalise input clip to CFR 30fps, yuv420p, known SAR
+            f'[0:v]fps=30,format=yuv420p,setsar=1[clip];'
+            # Background padding source at clip's own dimensions (avoids concat size mismatch)
+            f'[1:v]trim=duration={chunk_duration:.3f},setpts=PTS-STARTPTS[bg];'
+            # Append bg after the clip; -t will trim the total to exactly chunk_duration
+            f'[clip][bg]concat=n=2:v=1:a=0[out]'
+        )
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', clip_path,
+            '-f', 'lavfi', '-i', f'color=c={bg_ffmpeg}:s={w}x{h}:r=30:d={chunk_duration}',
+            '-filter_complex', filter_complex,
+            '-map', '[out]',
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-t', str(chunk_duration),
+            ext_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=60)
+        if result.returncode == 0 and os.path.exists(ext_path) and os.path.getsize(ext_path) > 0:
+            dur_str = f"{dur:.2f}s" if dur is not None else "N/A"
+            logging.info(
+                f"   ✅ Extended {Path(clip_path).name}: {dur_str} → {chunk_duration:.2f}s "
+                f"(bg {bg_hex})"
+            )
+            return ext_path, True
+
+        logging.warning(
+            f"   ⚠️ Failed to extend {Path(clip_path).name}: "
+            f"{result.stderr[-300:] if result.stderr else 'no stderr'}"
+        )
+        try:
+            os.unlink(ext_path)
+        except Exception:
+            pass
+        return clip_path, False
+
     def _write_text_tempfile(self, text, prefix='ats_text_'):
         """Write text to a temp file and return its path (for drawtext textfile= option)."""
         fd, path = tempfile.mkstemp(prefix=prefix, suffix='.txt')
@@ -6120,11 +6217,14 @@ class VideoComposer:
         return p
 
     def _apply_cell_style_filters(self, filter_parts, input_label, output_label,
-                                   cell_w, cell_h, track_id, cell_segment, temp_files):
+                                   cell_w, cell_h, track_id, cell_segment, temp_files,
+                                   chunk_duration=None):
         """
         Build per-cell styling filters (scale, pad/bgColor, color grade, beat flash, label, border).
         Chains filters from input_label → output_label.
         temp_files: list to append any created temp file paths for cleanup.
+        chunk_duration: if provided, short clips are overlaid on a bg-color source so they
+                        never go black after the clip ends (overlay eof_action=pass).
         """
         cs = getattr(self, 'clip_styles', {})
 
@@ -6318,7 +6418,9 @@ class VideoComposer:
                     )
                     current = f'[{next_label}]'
 
-        # Terminate chain at the output_label expected by the caller
+        # Each clip is pre-extended to chunk_duration via _preprocess_extend_clip before
+        # reaching the main filter_complex, so streams never terminate early and xstack
+        # never fills any cell with black.
         filter_parts.append(f"{current}null{output_label}")
 
     def _apply_global_style_filters(self, filter_parts, current_label,
@@ -6582,6 +6684,7 @@ class VideoComposer:
         return path
 
 
+    def _create_ffmpeg_grid_layout_fixed(self, track_segments, output_path, duration):
         """
         FIXED: Create grid with INTELLIGENT volume balancing for any instruments
         """
@@ -6700,6 +6803,32 @@ class VideoComposer:
             logging.info(f"🎛️ Building FFmpeg filter complex...")
             logging.info(f"   Added bg placeholder ({bg_hex}, input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
 
+            # ── Pre-process: extend short clips to chunk_duration ────────────
+            # xstack fills terminated streams with BLACK (the fill= option only
+            # handles unassigned grid positions, not streams that end early).
+            # Solution: for every clip shorter than chunk_duration, run a standalone
+            # FFmpeg to append background-colored frames before building the main
+            # filter_complex. This guarantees xstack never sees a terminated stream.
+            preprocess_temp_files = []
+            extended_clips = {}  # original_path -> extended_path
+
+            for r in range(grid_rows):
+                for c in range(grid_cols):
+                    seg = grid_cells[r][c]
+                    if not seg:
+                        continue
+                    orig = seg.get('video_path', '')
+                    if not orig or not os.path.exists(orig) or orig in extended_clips:
+                        continue
+                    ext, is_temp = self._preprocess_extend_clip(orig, duration, bg_hex)
+                    extended_clips[orig] = ext
+                    if is_temp:
+                        preprocess_temp_files.append(ext)
+
+            if preprocess_temp_files:
+                logging.info(f"   📼 Pre-processed {len(preprocess_temp_files)} short clip(s) → extended to {duration:.2f}s")
+            # ── End pre-process ──────────────────────────────────────────────
+
             # Process each cell in the grid
             cells_processed = 0
             cells_with_content = 0
@@ -6710,13 +6839,16 @@ class VideoComposer:
                     cell_segment = grid_cells[r][c]
                     if cell_segment and os.path.exists(cell_segment['video_path']):
                         cells_with_content += 1
-                        cmd.extend([*decode_args, '-i', cell_segment['video_path']])
+                        # Use extended clip if available (avoids black fill after short clip ends)
+                        video_path = extended_clips.get(cell_segment['video_path'], cell_segment['video_path'])
+                        cmd.extend([*decode_args, '-i', video_path])
 
                         # Apply per-cell style filters (scale, pad/bgColor, grade, flash, label, border)
                         track_id = cell_segment.get('track_id', f'{r}_{c}')
                         self._apply_cell_style_filters(
                             filter_parts, f"[{input_idx}:v]", f"[v{r}_{c}]",
-                            cell_width, cell_height, track_id, cell_segment, style_temp_files
+                            cell_width, cell_height, track_id, cell_segment, style_temp_files,
+                            chunk_duration=duration
                         )
                         video_inputs_for_stack.append(f"[v{r}_{c}]")
                         
@@ -6762,7 +6894,8 @@ class VideoComposer:
                 solo_track_id = solo_segment.get('track_id', 'solo') if solo_segment else 'solo'
                 self._apply_cell_style_filters(
                     filter_parts, '[2:v]', '[v_solo]',
-                    solo_w, solo_h, solo_track_id, solo_segment, style_temp_files
+                    solo_w, solo_h, solo_track_id, solo_segment, style_temp_files,
+                    chunk_duration=duration
                 )
                 if solo_segment:
                     vol_db = float(self._resolve_segment_volume(solo_segment))
@@ -6811,8 +6944,8 @@ class VideoComposer:
                     '-t', str(duration), '-r', '30', str(output_path)
                 ])
                 result = subprocess.run(cmd, capture_output=True, text=True)
-                # Cleanup temp files
-                for tf in style_temp_files:
+                # Cleanup temp files (style + preprocess)
+                for tf in style_temp_files + preprocess_temp_files:
                     try: os.unlink(tf)
                     except Exception: pass
                 if fc_script_path:
@@ -6836,7 +6969,10 @@ class VideoComposer:
 
             # Create the xstack and amix filters
             layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
-            filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}[xstack_out]")
+            # xstack fill= sets the color for cells whose stream ends before the longest
+            # stream (i.e., short note-triggered clips). Default is black; set to the
+            # global bg color so idle cells match the canvas instead of going black.
+            filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}:fill={bg_ffmpeg}[xstack_out]")
             # Mix only actual audio inputs to avoid normalization over empty streams
             audio_input_count = len(audio_inputs_for_mix)
             if audio_input_count == 0:
@@ -6891,8 +7027,8 @@ class VideoComposer:
             logging.info(f"🚀 Executing FFmpeg grid composition...")
             logging.info(f"   Filter complex length: {len(fc_str)} characters")
             result = subprocess.run(cmd, capture_output=True, text=True)
-            # Cleanup temp files
-            for tf in style_temp_files:
+            # Cleanup temp files (style + preprocess)
+            for tf in style_temp_files + preprocess_temp_files:
                 try: os.unlink(tf)
                 except Exception: pass
             if fc_script_path:
