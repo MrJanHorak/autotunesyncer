@@ -20,7 +20,7 @@ const KEY_SIGNATURES = {
   '-7': 'Cb',
 };
 
-const MidiParser = ({ file, onParsed }) => {
+const MidiParser = ({ file, onParsed, onError }) => {
 
   const lastProcessedFile = useMemo(() => ({
     fingerprint: null
@@ -50,38 +50,45 @@ const MidiParser = ({ file, onParsed }) => {
   }, []);
 
   const parseMidi = useCallback(async () => {
-    const midi = await parseMidiFile(file);
-    
-    const duration = calculateDuration(midi);
-    const keySignature = midi.header.keySignatures[0];
-    const key = keySignature ? {
-      note: KEY_SIGNATURES[keySignature.key] || 'Unknown',
-      scale: keySignature.scale === 0 ? 'major' : 'minor',
-      sharpsFlats: keySignature.key,
-    } : null;
+    try {
+      const midi = await parseMidiFile(file);
+      
+      const duration = calculateDuration(midi);
+      const keySignature = midi.header.keySignatures[0];
+      const key = keySignature ? {
+        note: KEY_SIGNATURES[keySignature.key] || 'Unknown',
+        scale: keySignature.scale === 0 ? 'major' : 'minor',
+        sharpsFlats: keySignature.key,
+      } : null;
 
-    const totalNotes = midi.tracks.reduce(
-      (sum, track) => sum + (track.notes?.length || 0),
-      0
-    );
+      const totalNotes = midi.tracks.reduce(
+        (sum, track) => sum + (track.notes?.length || 0),
+        0
+      );
 
-    const midiInfo = {
-      tracks: midi.tracks,
-      duration,
-      header: {
-        format: midi.header.format,
-        timeSignature: `${midi.header.timeSignatures[0]?.timeSignature[0]}/${midi.header.timeSignatures[0]?.timeSignature[1]}`,
-        key: key ? `${key.note} ${key.scale}` : 'Unknown',
-        tempo: midi.header.tempos[0]?.bpm || 120
-      },
-      summary: {
-        name: file.name,
-        totalTracks: midi.tracks.length,
-        totalNotes
-      }
-    };
-    onParsed(midiInfo);
-  }, [file, onParsed, calculateDuration]);
+      const midiInfo = {
+        tracks: midi.tracks,
+        duration,
+        header: {
+          format: midi.header.format,
+          timeSignature: `${midi.header.timeSignatures[0]?.timeSignature[0]}/${midi.header.timeSignatures[0]?.timeSignature[1]}`,
+          key: key ? `${key.note} ${key.scale}` : 'Unknown',
+          tempo: midi.header.tempos[0]?.bpm || 120
+        },
+        summary: {
+          name: file.name,
+          totalTracks: midi.tracks.length,
+          totalNotes
+        }
+      };
+      onParsed(midiInfo);
+    } catch (err) {
+      // Reset fingerprint so the user can retry after fixing the file
+      lastProcessedFile.fingerprint = null;
+      const error = err instanceof Error ? err : new Error(String(err));
+      onError?.(error);
+    }
+  }, [file, onParsed, onError, calculateDuration, lastProcessedFile]);
 
    useEffect(() => {
     if (!file) return;
@@ -89,7 +96,7 @@ const MidiParser = ({ file, onParsed }) => {
 
     if (lastProcessedFile.fingerprint !== fileFingerprint) {
       lastProcessedFile.fingerprint = fileFingerprint;
-      parseMidi().catch(console.error);
+      parseMidi();
     }
   }, [file, parseMidi, lastProcessedFile]);
 

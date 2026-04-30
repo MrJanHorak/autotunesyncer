@@ -32,6 +32,8 @@ const VideoComposer = ({
   // Track the current blob URL in a ref so cleanup is always unmount-only (not
   // triggered by every state change) and the old URL is revoked before replacement.
   const composedVideoUrlRef = useRef(null);
+  // Preserved across finally so Retry knows which mode was last used.
+  const lastModeRef = useRef(false);
 
   const validationErrors = useMemo(() => {
     const errors = [];
@@ -117,6 +119,11 @@ const VideoComposer = ({
       return;
     }
 
+    // Create AbortController immediately so Cancel works during upload too.
+    const abort = new AbortController();
+    abortRef.current = abort;
+    lastModeRef.current = isPreview;
+
     console.log('Grid arrangement:', gridArrangement);
     onStart?.();
     setIsProcessing(true);
@@ -189,11 +196,10 @@ const VideoComposer = ({
       // ── Async job: upload → get jobId → poll → download ──────────────────
       const jobId = await startCompositionJob(formData, {
         onUploadProgress: (pct) => setUploadProgress(pct),
+        signal: abort.signal,
       });
       console.log('Composition job started:', jobId);
 
-      const abort = new AbortController();
-      abortRef.current = abort;
       const blob = await trackCompositionJob(jobId, (pct) => {
         setRenderProgress(pct);
         onProgress?.(pct);
@@ -206,6 +212,8 @@ const VideoComposer = ({
       setComposedVideoUrl(url);
       onComplete?.();
     } catch (err) {
+      // AbortError = user hit Cancel; don't surface as an error
+      if (err?.name === 'AbortError') return;
       console.error('Composition failed:', err);
       const normalizedErr = err instanceof Error ? err : new Error(String(err));
       setError(normalizedErr.message);
@@ -238,14 +246,14 @@ const VideoComposer = ({
           onShared={() => setShowShareModal(false)}
         />
       )}
-      <div className='flex gap-4 mb-4'>
+      <div className='flex gap-4 mb-4 flex-wrap'>
         <button
           onClick={() => startComposition(true)}
           disabled={isProcessing || !canCompose}
           className='px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 disabled:opacity-50 font-medium'
         >
           {isProcessing && processingMode === 'preview'
-            ? 'Generating Preview...'
+            ? 'Generating Preview…'
             : 'Generate Preview (Fast)'}
         </button>
         <button
@@ -254,13 +262,22 @@ const VideoComposer = ({
           className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 font-medium'
         >
           {isProcessing && processingMode === 'full'
-            ? 'Processing Full Video...'
+            ? 'Processing Full Video…'
             : 'Start Full Composition'}
         </button>
+        {isProcessing && (
+          <button
+            onClick={() => abortRef.current?.abort()}
+            className='px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 font-medium'
+            aria-label='Cancel composition'
+          >
+            ✕ Cancel
+          </button>
+        )}
       </div>
 
       {isProcessing && (
-        <div className='mt-4'>
+        <div className='mt-4' aria-live='polite' aria-label='Composition progress'>
           {/* Upload phase */}
           {uploadProgress < 100 ? (
             <>
@@ -273,7 +290,8 @@ const VideoComposer = ({
                 />
               </div>
               <p className='text-sm text-gray-600 mt-1'>
-                Uploading videos… {uploadProgress}%
+                <span className='font-medium text-blue-600'>📤 Uploading</span>
+                {' — '}{uploadProgress}%
               </p>
             </>
           ) : renderProgress > 0 ? (
@@ -288,10 +306,16 @@ const VideoComposer = ({
                 />
               </div>
               <p className='text-sm text-gray-600 mt-1'>
-                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
-                rendering… {renderProgress}%
-                {' — '}{elapsedSeconds}s elapsed
-                {renderProgress > 0 && elapsedSeconds > 2 && (() => {
+                <span className='font-medium'>
+                  {renderProgress <= 25
+                    ? '🔬 Preprocessing'
+                    : renderProgress <= 85
+                    ? `${processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'} Rendering`
+                    : '✨ Finalizing'}
+                </span>
+                {' — '}{renderProgress}%
+                {' · '}{elapsedSeconds}s elapsed
+                {elapsedSeconds > 2 && (() => {
                   const etaSec = Math.round(elapsedSeconds * (100 - renderProgress) / renderProgress);
                   return etaSec > 0 ? `, ~${etaSec}s remaining` : null;
                 })()}
@@ -312,8 +336,8 @@ const VideoComposer = ({
                 />
               </div>
               <p className='text-sm text-gray-600 mt-1'>
-                {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
-                rendering… {elapsedSeconds}s elapsed
+                <span className='font-medium text-gray-500'>⚙️ Queued</span>
+                {' — '}{elapsedSeconds}s elapsed
               </p>
             </>
           )}
@@ -321,7 +345,15 @@ const VideoComposer = ({
       )}
 
       {error && (
-        <div className='mt-4 p-4 bg-red-100 text-red-700 rounded'>{error}</div>
+        <div className='mt-4 p-4 bg-red-100 text-red-700 rounded flex items-start gap-3' role='alert'>
+          <span className='flex-1'>{error}</span>
+          <button
+            onClick={() => { setError(null); startComposition(lastModeRef.current); }}
+            className='shrink-0 px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700 font-medium'
+          >
+            ↺ Retry
+          </button>
+        </div>
       )}
 
       {!canCompose && !error && (

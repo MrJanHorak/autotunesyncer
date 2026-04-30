@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import PropTypes from 'prop-types';
 import VideoRecorder from '../VideoRecorder/VideoRecorder';
@@ -29,6 +29,7 @@ function RecordingModalContent({
   onClose,
 }) {
   const [rerecording, setRerecording] = useState(false);
+  const panelRef = useRef(null);
 
   const clipKey = toClipKey(instrument);
   const hasVideo = !!instrumentVideos?.[clipKey];
@@ -51,14 +52,60 @@ function RecordingModalContent({
     onClose();
   };
 
-  // Close on Escape — only when not in recording view
+  // ── Focus management ──────────────────────────────────────────────────────
+  // Save the element that had focus before the modal opened so we can restore it.
+  useLayoutEffect(() => {
+    const previousFocus = document.activeElement;
+
+    // Focus the first tabbable element inside the panel
+    const panel = panelRef.current;
+    if (panel) {
+      const tabbable = panel.querySelectorAll(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      tabbable[0]?.focus();
+    }
+
+    return () => {
+      // Restore focus only if the opener element is still in the DOM
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+
+  // Close on Escape; trap Tab within the panel
   useEffect(() => {
     const handleKey = (e) => {
-      if (e.key === 'Escape') safeClose();
+      if (e.key === 'Escape') {
+        safeClose();
+        return;
+      }
+      if (e.key === 'Tab') {
+        const panel = panelRef.current;
+        if (!panel) return;
+        const tabbable = Array.from(
+          panel.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (!tabbable.length) return;
+        const first = tabbable[0];
+        const last = tabbable[tabbable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
     };
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showRecorder]);
 
   const handleRecordingComplete = (blob) => {
@@ -70,6 +117,7 @@ function RecordingModalContent({
     <div className='recording-modal__overlay' onClick={safeClose}>
       <div
         className='recording-modal__panel'
+        ref={panelRef}
         onClick={(e) => e.stopPropagation()}
         role='dialog'
         aria-modal='true'

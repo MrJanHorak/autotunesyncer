@@ -401,6 +401,7 @@ function MainApp({ onChangeProject, onLogout }) {
     instrumentTrackMap,
     longestNotes,
     onMidiProcessed: processMidiData,
+    clearMidiState,
   } = useMidiProcessing();
   const {
     videoFiles,
@@ -418,6 +419,7 @@ function MainApp({ onChangeProject, onLogout }) {
   } = useVideoRecording(instruments);
 
   const [parsedMidiData, setParsedMidiData] = useState(null);
+  const [midiParseError, setMidiParseError] = useState(null);
   const [midiFile, setMidiFile] = useState(null);
   const [gridArrangement, setGridArrangement] = useState({});
   const [trackVolumes, setTrackVolumes] = useState({});
@@ -699,7 +701,7 @@ function MainApp({ onChangeProject, onLogout }) {
 
   const handleParsedMidi = useCallback(
     (midiInfo) => {
-      console.log('Parsed MIDI info:', midiInfo);
+      setMidiParseError(null);
 
       // Clear all in-memory clips so stale clips from a previous MIDI don't bleed through.
       // The instruments effect will re-populate from clipBlobCache for matching instruments.
@@ -720,6 +722,18 @@ function MainApp({ onChangeProject, onLogout }) {
       processMidiData(midiInfo);
     },
     [processMidiData],
+  );
+
+  const handleMidiParseError = useCallback(
+    (err) => {
+      console.error('[MidiParser] Parse error:', err);
+      // Clear all MIDI-derived state so stale data can't be used for composition
+      setParsedMidiData(null);
+      setMidiFile(null);
+      clearMidiState();
+      setMidiParseError(err.message || 'Failed to parse MIDI file');
+    },
+    [clearMidiState],
   );
 
   // Add handleRecordingComplete function
@@ -783,7 +797,22 @@ function MainApp({ onChangeProject, onLogout }) {
   return (
     <div className='editor-shell'>
       {/* Non-rendering helpers always present */}
-      {midiFile && <MidiParser file={midiFile} onParsed={handleParsedMidi} />}
+      {midiFile && <MidiParser file={midiFile} onParsed={handleParsedMidi} onError={handleMidiParseError} />}
+      {midiParseError && (
+        <div
+          role='alert'
+          className='mx-4 mt-2 p-3 bg-red-100 border border-red-300 text-red-800 rounded flex items-start gap-2 text-sm'
+        >
+          <span className='flex-1'>⚠️ MIDI parse error: {midiParseError}</span>
+          <button
+            onClick={() => setMidiParseError(null)}
+            className='shrink-0 text-red-600 hover:text-red-900 font-bold'
+            aria-label='Dismiss MIDI error'
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* ── Top bar ──────────────────────────────────────────────── */}
       <div className='editor-topbar'>

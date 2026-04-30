@@ -1,18 +1,24 @@
-import { useState } from 'react';
+import { useState, useId, cloneElement, isValidElement } from 'react';
 import PropTypes from 'prop-types';
 import { COLOR_THEMES, COLOR_GRADE_LABELS, DEFAULT_COMPOSITION_STYLE, FONT_OPTIONS } from '../../js/styleDefaults';
 import './CompositionStylePanel.css';
 
 const Section = ({ title, icon, children, defaultOpen = false }) => {
   const [open, setOpen] = useState(defaultOpen);
+  const bodyId = `csp-section-${title.toLowerCase().replace(/\s+/g, '-')}`;
   return (
     <div className='csp-section'>
-      <button className='csp-section__header' onClick={() => setOpen((o) => !o)}>
+      <button
+        className='csp-section__header'
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={bodyId}
+      >
         <span className='csp-section__icon'>{icon}</span>
         <span className='csp-section__title'>{title}</span>
         <span className='csp-section__chevron'>{open ? '▾' : '▸'}</span>
       </button>
-      {open && <div className='csp-section__body'>{children}</div>}
+      {open && <div id={bodyId} className='csp-section__body'>{children}</div>}
     </div>
   );
 };
@@ -24,31 +30,39 @@ Section.propTypes = {
   defaultOpen: PropTypes.bool,
 };
 
-const Field = ({ label, children }) => (
-  <div className='csp-field'>
-    <label className='csp-field__label'>{label}</label>
-    <div className='csp-field__control'>{children}</div>
-  </div>
-);
+const Field = ({ label, children }) => {
+  const id = useId();
+  // Pass the generated id down to the single child control (Toggle, FontSelect,
+  // <select>, <input>) so the <label htmlFor> association is always correct.
+  const control = isValidElement(children)
+    ? cloneElement(children, { id })
+    : children;
+  return (
+    <div className='csp-field'>
+      <label className='csp-field__label' htmlFor={id}>{label}</label>
+      <div className='csp-field__control'>{control}</div>
+    </div>
+  );
+};
 
 Field.propTypes = { label: PropTypes.string.isRequired, children: PropTypes.node.isRequired };
 
-const Toggle = ({ checked, onChange }) => (
+const Toggle = ({ id, checked, onChange }) => (
   <label className='csp-toggle'>
-    <input type='checkbox' checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    <input id={id} type='checkbox' checked={checked} onChange={(e) => onChange(e.target.checked)} />
     <span className='csp-toggle__slider' />
   </label>
 );
-Toggle.propTypes = { checked: PropTypes.bool.isRequired, onChange: PropTypes.func.isRequired };
+Toggle.propTypes = { id: PropTypes.string, checked: PropTypes.bool.isRequired, onChange: PropTypes.func.isRequired };
 
-const FontSelect = ({ value, onChange }) => (
-  <select className='csp-select' value={value || 'default'} onChange={(e) => onChange(e.target.value)}>
+const FontSelect = ({ id, value, onChange }) => (
+  <select id={id} className='csp-select' value={value || 'default'} onChange={(e) => onChange(e.target.value)}>
     {FONT_OPTIONS.map((f) => (
       <option key={f.value} value={f.value}>{f.label}</option>
     ))}
   </select>
 );
-FontSelect.propTypes = { value: PropTypes.string, onChange: PropTypes.func.isRequired };
+FontSelect.propTypes = { id: PropTypes.string, value: PropTypes.string, onChange: PropTypes.func.isRequired };
 
 const CompositionStylePanel = ({ style, onChange }) => {
   const set = (key, val) => onChange({ ...style, [key]: val });

@@ -213,9 +213,17 @@ export const startCompositionJob = (formData, progressCallbacks = {}) => {
     return Promise.reject(new Error('Invalid compose request payload'));
   }
 
-  const { onUploadProgress } = progressCallbacks;
+  const { onUploadProgress, signal } = progressCallbacks;
 
   return new Promise((resolve, reject) => {
+    // Guard against double-settlement (abort + error can both fire)
+    let settled = false;
+    const settle = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      fn(val);
+    };
+
     const xhr = new XMLHttpRequest();
     const xhrUrl = withProjectId(`${API_BASE_URL}/process-videos`);
     xhr.open('POST', xhrUrl);
@@ -235,22 +243,33 @@ export const startCompositionJob = (formData, progressCallbacks = {}) => {
       if (xhr.status === 202) {
         try {
           const data = JSON.parse(xhr.responseText);
-          resolve(data.jobId);
+          settle(resolve, data.jobId);
         } catch {
-          reject(new Error('Invalid server response: expected { jobId }'));
+          settle(reject, new Error('Invalid server response: expected { jobId }'));
         }
       } else {
         try {
           const errData = JSON.parse(xhr.responseText);
-          reject(new Error(errData.details || errData.error || `Server error ${xhr.status}`));
+          settle(reject, new Error(errData.details || errData.error || `Server error ${xhr.status}`));
         } catch {
-          reject(new Error(`Server error ${xhr.status}`));
+          settle(reject, new Error(`Server error ${xhr.status}`));
         }
       }
     };
 
-    xhr.onerror = () => reject(new Error('Network error during video composition'));
-    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    xhr.onabort = () => settle(reject, new DOMException('Upload cancelled', 'AbortError'));
+    xhr.onerror = () => settle(reject, new Error('Network error during video composition'));
+    xhr.ontimeout = () => settle(reject, new Error('Upload timed out'));
+
+    // Wire AbortSignal → XHR abort
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort();
+        return;
+      }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true });
+    }
+
     xhr.send(formData);
   });
 };
@@ -391,7 +410,12 @@ export const trackCompositionJob = (jobId, onProgress, signal) => {
         }
       })
       .catch((err) => {
-        if (settled || signal?.aborted) return;
+        if (settled) return;
+        // Re-throw abort errors so the caller's catch/finally runs cleanly
+        if (err?.name === 'AbortError' || signal?.aborted) {
+          settle(reject, new DOMException('Composition cancelled', 'AbortError'));
+          return;
+        }
         // SSE failed — fall back to polling
         console.warn('[videoServices] SSE unavailable, falling back to poll:', err.message);
         pollCompositionJob(jobId, onProgress).then(

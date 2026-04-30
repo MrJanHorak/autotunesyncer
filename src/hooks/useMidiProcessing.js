@@ -109,11 +109,19 @@ export const useMidiProcessing = (midiFile) => {
     }
   }, [midiFile]);
 
+  const clearMidiState = useCallback(() => {
+    setParsedMidiData(null);
+    setInstruments([]);
+    setInstrumentTrackMap({});
+    setLongestNotes({});
+  }, []);
+
   return {
     parsedMidiData,
     instruments,
     instrumentTrackMap,
     longestNotes,
     onMidiProcessed,
+    clearMidiState,
   };
 };
