@@ -156,6 +156,8 @@ const upload = multer({
 // ── Background composition job ─────────────────────────────────────────────
 async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
   const tempFiles = []; // paths to clean up on failure
+  // Hoisted so the catch block can unlink it if the job fails after creation
+  let permanentOutputPath = null;
 
   try {
     updateJob(jobId, { status: 'processing', progress: 0 });
@@ -368,7 +370,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     if (cfgIdx !== -1) tempFiles.splice(cfgIdx, 1);
 
     // ── 6. Move output to permanent location ─────────────────────────────
-    const permanentOutputPath = path.join(
+    permanentOutputPath = path.join(
       jobUploadsDir,
       `final_output_${jobId}.mp4`,
     );
@@ -389,6 +391,10 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     console.log(`[Job ${jobId}] ✅ Done: ${permanentOutputPath}`);
   } catch (err) {
     console.error(`[Job ${jobId}] ❌ Failed:`, err.message);
+    // Remove any partial output so a failed job never serves a broken file
+    if (permanentOutputPath) {
+      try { if (fs.existsSync(permanentOutputPath)) fs.unlinkSync(permanentOutputPath); } catch { /* ignore */ }
+    }
     updateJob(jobId, { status: 'failed', error: err.message, completedAt: Date.now() });
   } finally {
     // Clean up any remaining temp files

@@ -831,6 +831,15 @@ class VideoComposer:
             )
             self._register_explicit_video_files(registry)
         else:
+            # No explicit video files supplied — this should only happen when VideoComposer
+            # is used directly (tests, CLI) rather than through the Node.js wrapper.
+            # Scanning the shared uploads dir can pick up videos from prior sessions, so
+            # emit a prominent WARNING to make contamination visible in logs.
+            logging.warning(
+                "⚠️  explicit_video_files is empty — falling back to shared uploads scan. "
+                "This is expected only for direct/test usage; in production the Node.js "
+                "wrapper must always supply videoFiles in the composition payload."
+            )
             logging.info(f"Scanning uploads directory for videos: {self.uploads_dir}")
             success = registry.register_from_uploads_directory(self.uploads_dir)
             if not success:

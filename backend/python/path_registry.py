@@ -114,89 +114,119 @@ class PathRegistry:
             self._cache.set(f"track:{track_id}", directory_path)
             return True
         
-    def get_drum_path(self, drum_key: str) -> Optional[str]:
-        """Get path for drum video with improved matching and caching"""
+    def get_drum_path(self, drum_key: str, strict: bool = False) -> Optional[str]:
+        """Get path for drum video with improved matching and caching.
+
+        Args:
+            drum_key: Drum name to look up.
+            strict: When True, only exact (normalized) matches are returned.
+                    Fuzzy fallback is skipped and the LRU cache is bypassed to
+                    avoid polluting it with speculative entries.
+        """
         with self._lock:
             self._stats['lookups'] += 1
             norm_name = drum_key.lower().replace(' ', '_').replace('drum_', '')
-            
-            # Check cache first
-            cache_key = f"drum:{norm_name}"
-            cached_path = self._cache.get(cache_key)
-            if cached_path:
-                self._stats['cache_hits'] += 1
-                return cached_path
-            
+
+            if not strict:
+                # Check cache first
+                cache_key = f"drum:{norm_name}"
+                cached_path = self._cache.get(cache_key)
+                if cached_path:
+                    self._stats['cache_hits'] += 1
+                    return cached_path
+
             self._stats['cache_misses'] += 1
-            
-            # Direct lookup
+
+            # Direct lookup (always attempted)
             if norm_name in self.drum_paths:
                 path = self.drum_paths[norm_name]
-                self._cache.set(cache_key, path)
+                if not strict:
+                    self._cache.set(f"drum:{norm_name}", path)
                 return path
-                
-            # Check for partial matches - more comprehensive matching
+
+            if strict:
+                logging.warning(f"[strict] No exact drum path found for: {drum_key} (normalized: {norm_name})")
+                return None
+
+            # Fuzzy fallback (non-strict only)
+            cache_key = f"drum:{norm_name}"
             for key in self.drum_paths:
-                # Check if norm_name is contained in key or vice versa
-                if (norm_name in key or key in norm_name or 
-                    self._fuzzy_match(norm_name, key)):
+                if (norm_name in key or key in norm_name or
+                        self._fuzzy_match(norm_name, key)):
                     path = self.drum_paths[key]
                     self._cache.set(cache_key, path)
                     logging.info(f"Drum path found via fuzzy match: {norm_name} -> {key} -> {path}")
                     return path
-            
+
             logging.warning(f"No drum path found for: {drum_key} (normalized: {norm_name})")
             logging.debug(f"Available drum paths: {list(self.drum_paths.keys())}")
             return None
     
-    def get_instrument_path(self, instrument_name: str, note: str) -> Optional[str]:
-        """Get path for instrument video by note with improved fallback and caching"""
+    def get_instrument_path(self, instrument_name: str, note: str, strict: bool = False) -> Optional[str]:
+        """Get path for instrument video by note with improved fallback and caching.
+
+        Args:
+            instrument_name: Instrument to look up.
+            note: MIDI note number or name.
+            strict: When True, only exact (normalized) name + note matches are
+                    returned.  Fuzzy fallback is skipped and the LRU cache is
+                    bypassed so strict misses never shadow later correct entries.
+        """
         with self._lock:
             self._stats['lookups'] += 1
             norm_name = instrument_name.lower().replace(' ', '_')
             note_str = str(note)
-            
-            # Check cache first
-            cache_key = f"instrument:{norm_name}:{note_str}"
-            cached_path = self._cache.get(cache_key)
-            if cached_path:
-                self._stats['cache_hits'] += 1
-                return cached_path
-            
+
+            if not strict:
+                # Check cache first
+                cache_key = f"instrument:{norm_name}:{note_str}"
+                cached_path = self._cache.get(cache_key)
+                if cached_path:
+                    self._stats['cache_hits'] += 1
+                    return cached_path
+
             self._stats['cache_misses'] += 1
-            
+
             # Try exact instrument name match first
             if norm_name in self.instrument_paths:
                 # Try exact note match
                 if note_str in self.instrument_paths[norm_name]:
                     path = self.instrument_paths[norm_name][note_str]
-                    self._cache.set(cache_key, path)
+                    if not strict:
+                        self._cache.set(f"instrument:{norm_name}:{note_str}", path)
                     return path
-                
-                # Fall back to any note for this exact instrument
+
+                if strict:
+                    logging.warning(f"[strict] No exact note match for: {instrument_name}:{note} (normalized: {norm_name}:{note_str})")
+                    return None
+
+                # Fall back to any note for this exact instrument (non-strict only)
                 if self.instrument_paths[norm_name]:
                     path = next(iter(self.instrument_paths[norm_name].values()))
-                    self._cache.set(cache_key, path)
+                    self._cache.set(f"instrument:{norm_name}:{note_str}", path)
                     logging.info(f"Instrument fallback used: {norm_name}:{note_str} -> {path}")
                     return path
-            
-            # Try fuzzy matching on instrument names
+
+            if strict:
+                logging.warning(f"[strict] No instrument path found for: {instrument_name}:{note} (normalized: {norm_name}:{note_str})")
+                return None
+
+            # Fuzzy matching on instrument names (non-strict only)
+            cache_key = f"instrument:{norm_name}:{note_str}"
             for key in self.instrument_paths:
                 if self._fuzzy_match(norm_name, key):
-                    # Try exact note match first
                     if note_str in self.instrument_paths[key]:
                         path = self.instrument_paths[key][note_str]
                         self._cache.set(cache_key, path)
                         logging.info(f"Instrument found via fuzzy match: {norm_name} -> {key}:{note_str} -> {path}")
                         return path
-                    
-                    # Fall back to any note for fuzzy-matched instrument
+
                     if self.instrument_paths[key]:
                         path = next(iter(self.instrument_paths[key].values()))
                         self._cache.set(cache_key, path)
                         logging.info(f"Instrument fuzzy fallback: {norm_name} -> {key}:{note_str} -> {path}")
                         return path
-            
+
             logging.warning(f"No instrument path found for: {instrument_name}:{note} (normalized: {norm_name}:{note_str})")
             logging.debug(f"Available instruments: {list(self.instrument_paths.keys())}")
             return None

@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import crypto from 'crypto';
 import { existsSync, readdirSync, statSync, unlinkSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -16,6 +17,9 @@ import socialRoutes from './routes/socialRoutes.js';
 
 const app = express();
 
+// Attach a unique ID to every request for log correlation
+app.use((req, _, next) => { req.id = crypto.randomUUID(); next(); });
+
 // Body parser: keep a modest global limit (all large payloads use multipart/FormData, not JSON).
 // 10 MB is plenty for MIDI metadata and API calls.
 app.use(express.json({ limit: '10mb' }));
@@ -24,7 +28,6 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 // Configure timeout
 app.use((req, res, next) => {
   res.setTimeout(900000, () => {
-    console.log('Request has timed out.');
     console.log('Request has timed out.');
     res.status(408).json({ error: 'Request timeout' });
   });
@@ -60,6 +63,12 @@ const publishedDir = join(__dirnameServer, 'published');
 mkdirSync(publishedDir, { recursive: true });
 app.use('/published', express.static(publishedDir));
 
+// Health check — load-balancers and Docker HEALTHCHECK use this
+app.get('/healthz', (req, res) => {
+  if (isShuttingDown) return res.status(503).json({ status: 'shutting_down' });
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: Date.now() });
+});
+
 // Use routes
 app.use('/api/auth', authRoutes);
 app.use('/api/projects', projectRoutes);
@@ -89,8 +98,11 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(3000, () => {
-  console.log('Server running on port 3000');
+import cacheService from './services/cacheService.js';
+
+let isShuttingDown = false;
+
+const server = app.listen(3000, () => {
   console.log('Server running on port 3000');
 });
 
@@ -130,3 +142,28 @@ function cleanUploads() {
 
 cleanUploads();
 setInterval(cleanUploads, 24 * 60 * 60 * 1000);
+
+// Graceful shutdown — stop accepting new connections, drain in-flight requests,
+// then close caches/Redis.  10-second hard deadline before force-exit.
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`[shutdown] ${signal} received — shutting down gracefully`);
+  const deadline = setTimeout(() => {
+    console.error('[shutdown] Grace period exceeded, forcing exit');
+    process.exit(1);
+  }, 10_000).unref();
+  server.close(async () => {
+    try {
+      await cacheService.close();
+    } catch (err) {
+      console.error('[shutdown] cacheService.close error:', err.message);
+    }
+    clearTimeout(deadline);
+    console.log('[shutdown] Clean exit');
+    process.exit(0);
+  });
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));

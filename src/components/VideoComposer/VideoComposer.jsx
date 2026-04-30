@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types */
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { startCompositionJob, pollCompositionJob, trackCompositionJob } from '../../../services/videoServices.js';
+import { startCompositionJob, trackCompositionJob } from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 
 const VideoComposer = ({
@@ -93,10 +93,6 @@ const VideoComposer = ({
   }, [midiData, instrumentTrackMap, gridArrangement, videoFiles]);
 
   const canCompose = validationErrors.length === 0;
-
-  useEffect(() => {
-    console.log('VideoFiles received:', videoFiles);
-  }, [videoFiles]);
 
   // Compute effective volumes applying mute/solo logic
   const effectiveVolumes = useMemo(() => {
