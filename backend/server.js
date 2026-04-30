@@ -16,9 +16,10 @@ import socialRoutes from './routes/socialRoutes.js';
 
 const app = express();
 
-// Increase payload size limits significantly
-app.use(express.json({ limit: '1000mb' }));
-app.use(express.urlencoded({ limit: '1000mb', extended: true }));
+// Body parser: keep a modest global limit (all large payloads use multipart/FormData, not JSON).
+// 10 MB is plenty for MIDI metadata and API calls.
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Configure timeout
 app.use((req, res, next) => {
@@ -30,12 +31,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Enable CORS with specific options
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://localhost:8080',
-  'http://localhost:4173',
-];
+// Enable CORS — origins are loaded from ALLOWED_ORIGINS env var (comma-separated).
+// Falls back to the standard local dev ports if the var is not set.
+const defaultOrigins = ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:4173'];
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+  : defaultOrigins;
 app.use(
   cors({
     origin: (origin, callback) => {

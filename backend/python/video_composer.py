@@ -122,11 +122,18 @@ import mmap
 
 from tqdm import tqdm
 
+from logging.handlers import RotatingFileHandler
+
+# Log to an absolute path in the backend/ directory (next to this file's parent)
+_LOG_FILE = os.path.join(os.path.dirname(__file__), '..', 'video_processing.log')
+_LOG_FILE = os.path.abspath(_LOG_FILE)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('video_processing.log', mode='w', encoding='utf-8'),
+        # Rotate at 10 MB, keep last 5 files — prevents unbounded log growth.
+        RotatingFileHandler(_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ],
     force=True
