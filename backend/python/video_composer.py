@@ -4882,11 +4882,18 @@ class VideoComposer:
                 return None  # or fallback already handled
 
             if triggered_video and os.path.exists(triggered_video):
+                # Add chunk_time (chunk-relative) alongside absolute time so that
+                # _apply_cell_style_filters can build correct FFmpeg enable expressions.
+                chunk_notes_with_rel = []
+                for note in chunk_notes:
+                    note_copy = note.copy()
+                    note_copy['chunk_time'] = float(note_copy.get('time', 0)) - chunk_start_time
+                    chunk_notes_with_rel.append(note_copy)
                 return {
                     'video_path': triggered_video,
                     'track_id': str(track_id),  # Use original track ID (string) for grid positioning
                     'track_name': track_name,
-                    'notes': chunk_notes,
+                    'notes': chunk_notes_with_rel,
                     'type': 'instrument'
                 }
             else:
@@ -6024,15 +6031,40 @@ class VideoComposer:
             )
         current = f'[{next_label}]'
 
-        # ── 2. Color grade ───────────────────────────────────────────────────
+        # ── 2. Color grade (note-active windows only) ────────────────────────
+        # Apply colorGrade only when notes are playing so gap/background frames
+        # show the composition background without per-clip colour tinting.
         grade_filter = self._get_color_grade_filter(color_grade)
         if grade_filter:
-            next_label = f'v_gr_{output_label[1:-1]}'
-            filter_parts.append(f"{current}{grade_filter}[{next_label}]")
-            current = f'[{next_label}]'
+            _grade_notes = cell_segment.get('notes', []) if cell_segment else []
+            _grade_windows = []
+            for _n in _grade_notes:
+                _t = float(_n.get('chunk_time', _n.get('time', 0)))
+                _dur = float(_n.get('duration', 0.3))
+                if _t >= 0 and _dur > 0:
+                    _grade_windows.append((round(_t, 3), round(_t + _dur, 3)))
+            _grade_windows.sort()
+            _grade_merged: list = []
+            for _s, _e in _grade_windows:
+                if _grade_merged and _s <= _grade_merged[-1][1]:
+                    _grade_merged[-1] = (_grade_merged[-1][0], max(_grade_merged[-1][1], _e))
+                else:
+                    _grade_merged.append((_s, _e))
+            if len(_grade_merged) > 60:
+                _grade_merged = _grade_merged[:60]
+
+            if _grade_merged:
+                _grade_enable = '+'.join(f'between(t,{_s},{_e})' for _s, _e in _grade_merged)
+                # Split multi-filter chains (e.g. 'cyberpunk' = 'eq=...,colorchannelmixer=...')
+                _grade_sub_filters = [f.strip() for f in grade_filter.split(',')]
+                for _j, _sub in enumerate(_grade_sub_filters):
+                    _gl = f'v_gr_{_j}_{output_label[1:-1]}'
+                    filter_parts.append(f"{current}{_sub}:enable='{_grade_enable}'[{_gl}]")
+                    current = f'[{_gl}]'
+            # else: no active note windows — skip colorGrade (would only affect background)
 
         # ── 3. Beat flash (colored overlay) ─────────────────────────────────
-        # Onset flash: colored burst at clip start AND on each note onset.
+        # Onset flash: colored burst at each note onset.
         # Uses drawbox with the user's chosen beatFlashColor at the specified
         # intensity (opacity).  Adjacent flashes (<60ms apart) are merged so
         # dense drum chunks aren't truncated.  Cap at 60 merged windows.
@@ -6042,10 +6074,10 @@ class VideoComposer:
             FLASH_DUR = 0.10
             MERGE_GAP = 0.06
             MAX_WINDOWS = 60
-            raw = [(0.0, FLASH_DUR)]  # always flash at clip start
+            raw = []
             for note in notes:
                 t = float(note.get('chunk_time', note.get('time', 0)))
-                if t > 0.05:
+                if t >= 0:  # valid chunk-relative onset
                     raw.append((round(t, 3), round(t + FLASH_DUR, 3)))
             raw.sort(key=lambda w: w[0])
             merged: list = []
@@ -6057,17 +6089,18 @@ class VideoComposer:
             if len(merged) > MAX_WINDOWS:
                 logging.debug(f"[style] beat-flash: {len(merged)} → {MAX_WINDOWS} windows (truncated)")
                 merged = merged[:MAX_WINDOWS]
-            enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged)
-            # Apply colored flash via semi-transparent drawbox overlay
-            flash_ffmpeg_color = self._hex_to_ffmpeg_color(beat_flash_color)
-            opacity = min(max(beat_flash_intensity, 0.0), 1.0)
-            next_label = f'v_fl_{output_label[1:-1]}'
-            filter_parts.append(
-                f"{current}drawbox=x=0:y=0:w=iw:h=ih"
-                f":color={flash_ffmpeg_color}@{opacity:.2f}:t=fill"
-                f":enable='{enable_expr}'[{next_label}]"
-            )
-            current = f'[{next_label}]'
+            if merged:
+                enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged)
+                # Apply colored flash via semi-transparent drawbox overlay
+                flash_ffmpeg_color = self._hex_to_ffmpeg_color(beat_flash_color)
+                opacity = min(max(beat_flash_intensity, 0.0), 1.0)
+                next_label = f'v_fl_{output_label[1:-1]}'
+                filter_parts.append(
+                    f"{current}drawbox=x=0:y=0:w=iw:h=ih"
+                    f":color={flash_ffmpeg_color}@{opacity:.2f}:t=fill"
+                    f":enable='{enable_expr}'[{next_label}]"
+                )
+                current = f'[{next_label}]'
 
         # ── 4. Instrument label ──────────────────────────────────────────────
         if label_enabled:
