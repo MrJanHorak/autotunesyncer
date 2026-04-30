@@ -6250,7 +6250,9 @@ class VideoComposer:
         logging.info(
             f"[style] cell={track_id!r}  candidates={candidates}  "
             f"matched={'yes ('+next((k for k in candidates if k in cs), 'none')+')'}  "
-            f"effects={[k for k,v in style.items() if v and k.endswith('Enabled')]}"
+            f"effects={[k for k,v in style.items() if v and k.endswith('Enabled')]}  "
+            f"roundedCorners={style.get('roundedCorners', False)}  "
+            f"beatFlashColor={style.get('beatFlashColor', 'N/A')}"
         )
 
         bg_color = style.get('bgColor') or None   # None = use composition background
@@ -6316,13 +6318,13 @@ class VideoComposer:
             filter_parts.append(f"{current}{grade_filter}[{next_label}]")
             current = f'[{next_label}]'
 
-        # ── 3. Beat flash ────────────────────────────────────────────────────
-        # Onset flash: bright burst at clip start AND on each note onset.
-        # Adjacent flashes (<60ms apart) are merged so dense drum chunks
-        # (hi-hats, snare rolls) don't get silently truncated.  Cap at 60
-        # merged windows per chunk so the FFmpeg enable= expression stays
-        # well under parser limits (~1.5KB worst case).
+        # ── 3. Beat flash (colored overlay) ─────────────────────────────────
+        # Onset flash: colored burst at clip start AND on each note onset.
+        # Uses drawbox with the user's chosen beatFlashColor at the specified
+        # intensity (opacity).  Adjacent flashes (<60ms apart) are merged so
+        # dense drum chunks aren't truncated.  Cap at 60 merged windows.
         if beat_flash_enabled:
+            beat_flash_color = style.get('beatFlashColor', '#ffffff')
             notes = cell_segment.get('notes', []) if cell_segment else []
             FLASH_DUR = 0.10
             MERGE_GAP = 0.06
@@ -6343,9 +6345,14 @@ class VideoComposer:
                 logging.debug(f"[style] beat-flash: {len(merged)} → {MAX_WINDOWS} windows (truncated)")
                 merged = merged[:MAX_WINDOWS]
             enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged)
+            # Apply colored flash via semi-transparent drawbox overlay
+            flash_ffmpeg_color = self._hex_to_ffmpeg_color(beat_flash_color)
+            opacity = min(max(beat_flash_intensity, 0.0), 1.0)
             next_label = f'v_fl_{output_label[1:-1]}'
             filter_parts.append(
-                f"{current}eq=brightness={beat_flash_intensity:.2f}:enable='{enable_expr}'[{next_label}]"
+                f"{current}drawbox=x=0:y=0:w=iw:h=ih"
+                f":color={flash_ffmpeg_color}@{opacity:.2f}:t=fill"
+                f":enable='{enable_expr}'[{next_label}]"
             )
             current = f'[{next_label}]'
 
@@ -6380,33 +6387,58 @@ class VideoComposer:
             )
             current = f'[{next_label}]'
 
-        # ── 5. Clip fade-in (per-note triggered, applied before border) ──────
+        # ── 5. Clip fade (note-triggered brightness gating) ────────────────
         # Matches the styleDefaults UI label "fade-in/out on note trigger":
-        # darkens the clip between notes and brightens at each onset.
-        # Implementation: chained fade=in filters at every note onset (luminance
-        # only — no alpha channel needed).  Without notes, falls back to the
-        # legacy single fade-in at chunk start.
+        # dims the clip between notes and shows full brightness during notes.
+        #
+        # Implementation:
+        #   1. Single fade=t=in at chunk start (smooth opening fade-in)
+        #   2. eq=brightness=<dim> with enable='not(NOTE_WINDOWS)' to darken
+        #      between note onsets — the clip is visible (not black) but
+        #      noticeably dimmed, then pops to full brightness when a note
+        #      plays.
+        #
+        # NOTE: The previous chained-fade approach (fade=t=in:st=X for each
+        # onset) was fundamentally broken — each later fade blacks out all
+        # frames before its st, so only the last one matters.
         if fade_enabled and fade_duration > 0:
-            fd = max(fade_duration, 0.001)
+            fd = max(fade_duration, 0.05)
             notes = cell_segment.get('notes', []) if cell_segment else []
-            onsets = sorted({
-                round(max(0.0, float(n.get('chunk_time', n.get('time', 0)))), 3)
-                for n in notes
-            })
-            # Cap chain length so the filter graph stays parseable on dense chunks.
-            MAX_FADES = 30
-            if len(onsets) > MAX_FADES:
-                # Subsample evenly across the chunk.
-                step = len(onsets) / MAX_FADES
-                onsets = [onsets[int(i * step)] for i in range(MAX_FADES)]
-            # Always include t=0 so the clip fades in at chunk start.
-            if not onsets or onsets[0] > 0.01:
-                onsets = [0.0] + onsets
-            chain = ','.join(
-                f"fade=t=in:st={t:.3f}:d={fd:.3f}" for t in onsets
-            )
+            # Build note-active windows (onset → onset+duration)
+            MAX_WINDOWS = 50
+            windows = []
+            for n in notes:
+                t = float(n.get('chunk_time', n.get('time', 0)))
+                dur = float(n.get('duration', 0.3))
+                windows.append((round(max(0.0, t), 3), round(t + dur, 3)))
+            windows.sort(key=lambda w: w[0])
+            # Merge overlapping windows
+            merged_w: list = []
+            for s, e in windows:
+                if merged_w and s <= merged_w[-1][1] + 0.01:
+                    merged_w[-1] = (merged_w[-1][0], max(merged_w[-1][1], e))
+                else:
+                    merged_w.append((s, e))
+            if len(merged_w) > MAX_WINDOWS:
+                step = len(merged_w) / MAX_WINDOWS
+                merged_w = [merged_w[int(i * step)] for i in range(MAX_WINDOWS)]
+
+            # Step 1: Smooth fade-in from black at chunk start
             next_label = f'v_fade_{output_label[1:-1]}'
-            filter_parts.append(f"{current}{chain}[{next_label}]")
+            if merged_w:
+                # Dim between notes using eq brightness gating
+                active_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged_w)
+                # eq brightness=-0.4 dims when NOT in any note window AND after
+                # the initial fade-in completes (avoids double-dark startup).
+                filter_parts.append(
+                    f"{current}fade=t=in:st=0:d={fd:.3f},"
+                    f"eq=brightness=-0.4:enable='gte(t,{fd:.3f})*not({active_expr})'[{next_label}]"
+                )
+            else:
+                # No notes — just fade in at chunk start (legacy behavior)
+                filter_parts.append(
+                    f"{current}fade=t=in:st=0:d={fd:.3f}[{next_label}]"
+                )
             current = f'[{next_label}]'
 
         # ── 6. Border ────────────────────────────────────────────────────────
