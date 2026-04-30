@@ -6,9 +6,35 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Hard timeouts — long enough for real compositions, short enough to prevent infinite hangs.
+const COMPOSITION_TIMEOUT_MS = 15 * 60 * 1000;  // 15 min
+const PREPROCESS_TIMEOUT_MS  =  5 * 60 * 1000;  // 5 min
+
+/**
+ * Kill a process and its entire child process tree.
+ * On Windows `process.kill()` only terminates the direct Python parent; FFmpeg
+ * grandchildren keep running.  `taskkill /T` terminates the full tree.
+ */
+function killProcessTree(proc) {
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      proc.kill('SIGKILL');
+    }
+  } catch (_) {
+    // best-effort — process may already be gone
+  }
+}
+
 export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
   return new Promise((resolve, reject) => {
     let midiJsonPath, videoJsonPath, outputPath;
+
+    const cleanup = () => {
+      try { if (midiJsonPath && fs.existsSync(midiJsonPath)) fs.unlinkSync(midiJsonPath); } catch (_) {}
+      try { if (videoJsonPath && fs.existsSync(videoJsonPath)) fs.unlinkSync(videoJsonPath); } catch (_) {}
+    };
 
     try {
       // Read the config file
@@ -20,13 +46,12 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
 
       midiJsonPath = path.join(tempDir, `${baseName}-midi.json`);
       videoJsonPath = path.join(tempDir, `${baseName}-videos.json`);
-      outputPath = path.join(tempDir, `${baseName}-output.mp4`); // Write MIDI data - ensure proper format with tracks wrapper and grid arrangement
+      outputPath = path.join(tempDir, `${baseName}-output.mp4`);
+
       const midiData = {
         tracks: config.tracks || [],
         gridArrangement: config.gridArrangement || {},
-        // Include track volumes from config so Python can apply them
         trackVolumes: config.trackVolumes || {},
-        // Visual styling settings
         compositionStyle: config.compositionStyle || {},
         clipStyles: config.clipStyles || {},
       };
@@ -44,55 +69,55 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
         return;
       }
 
-      console.log(
-        'Python Bridge - Grid arrangement being sent:',
-        JSON.stringify(config.gridArrangement, null, 2)
-      );
-      console.log(
-        'Python Bridge - MIDI data structure:',
-        Object.keys(midiData)
-      );
-      console.log(
-        'Python Bridge - Grid arrangement validation passed:',
-        Object.keys(config.gridArrangement).length,
-        'positions'
-      );
+      console.log('Python Bridge - Grid arrangement being sent:', JSON.stringify(config.gridArrangement, null, 2));
+      console.log('Python Bridge - MIDI data structure:', Object.keys(midiData));
+      console.log('Python Bridge - Grid arrangement validation passed:', Object.keys(config.gridArrangement).length, 'positions');
 
       fs.writeFileSync(midiJsonPath, JSON.stringify(midiData));
-
-      // Write video files data - ensure proper format
-      const videoFiles = config.videos || {};
-      fs.writeFileSync(videoJsonPath, JSON.stringify(videoFiles));
+      fs.writeFileSync(videoJsonPath, JSON.stringify(config.videos || {}));
 
       // Use the enhanced video processor
       const pythonScript = path.join(__dirname, '../utils/video_processor.py');
       const pythonArgs = [
         pythonScript,
-        '--midi-json',
-        midiJsonPath,
-        '--video-files-json',
-        videoJsonPath,
-        '--output-path',
-        outputPath,
+        '--midi-json', midiJsonPath,
+        '--video-files-json', videoJsonPath,
+        '--output-path', outputPath,
         '--performance-mode',
-        '--memory-limit',
-        '4',
+        '--memory-limit', '4',
       ];
 
-      // Add preview flag if requested
       if (config.preview === true) {
-        console.log(
-          'Python Bridge - Adding --preview flag for faster processing'
-        );
+        console.log('Python Bridge - Adding --preview flag for faster processing');
         pythonArgs.push('--preview');
       }
 
-      const process = spawn('python', pythonArgs);
-
+      const pythonProcess = spawn('python', pythonArgs);
       let output = '';
       let errorOutput = '';
+      let settled = false;
 
-      process.stdout.on('data', (data) => {
+      const finish = (resolveFn, rejectFn, value, isError) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutHandle);
+        cleanup();
+        if (isError) rejectFn(value);
+        else resolveFn(value);
+      };
+
+      // Hard timeout — kill the entire process tree (not just the Python parent,
+      // which would leave FFmpeg grandchildren running on Windows).
+      const timeoutHandle = setTimeout(() => {
+        console.error(`Python Bridge - composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes`);
+        killProcessTree(pythonProcess);
+        finish(resolve, reject,
+          new Error(`Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${errorOutput.slice(-2000)}`),
+          true
+        );
+      }, COMPOSITION_TIMEOUT_MS);
+
+      pythonProcess.stdout.on('data', (data) => {
         const message = data.toString();
         console.log(`Python output: ${message}`);
         output += message;
@@ -102,54 +127,35 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
         }
       });
 
-      process.stderr.on('data', (data) => {
+      pythonProcess.stderr.on('data', (data) => {
         const message = data.toString();
         console.error(`Python error: ${message}`);
         errorOutput += message;
       });
 
-      process.on('close', (code) => {
-        // Cleanup temporary files
-        try {
-          if (fs.existsSync(midiJsonPath)) fs.unlinkSync(midiJsonPath);
-          if (fs.existsSync(videoJsonPath)) fs.unlinkSync(videoJsonPath);
-        } catch (cleanupError) {
-          console.warn('Cleanup error:', cleanupError.message);
-        }
+      pythonProcess.once('error', (err) => {
+        finish(resolve, reject,
+          new Error(`Failed to spawn Python process: ${err.message}\n${errorOutput.slice(-2000)}`),
+          true
+        );
+      });
 
+      pythonProcess.on('close', (code) => {
         if (code !== 0) {
-          reject(
-            new Error(
-              `Python process failed with code ${code}\nError: ${errorOutput}`
-            )
+          finish(resolve, reject,
+            new Error(`Python process failed (code ${code})\n${errorOutput.slice(-2000)}`),
+            true
           );
         } else {
-          try {
-            // Return the output path instead of parsing JSON
-            resolve({
-              success: true,
-              outputPath: outputPath,
-              message: output.trim(),
-            });
-          } catch (e) {
-            reject(
-              new Error(
-                `Failed to process Python output: ${e.message}\nOutput: ${output}`
-              )
-            );
-          }
+          finish(resolve, reject,
+            { success: true, outputPath, message: output.trim() },
+            false
+          );
         }
       });
+
     } catch (error) {
-      // Cleanup on error
-      try {
-        if (midiJsonPath && fs.existsSync(midiJsonPath))
-          fs.unlinkSync(midiJsonPath);
-        if (videoJsonPath && fs.existsSync(videoJsonPath))
-          fs.unlinkSync(videoJsonPath);
-      } catch (cleanupError) {
-        console.warn('Cleanup error:', cleanupError.message);
-      }
+      cleanup();
       reject(new Error(`Failed to setup Python processor: ${error.message}`));
     }
   });
@@ -169,33 +175,33 @@ export const preprocessVideo = async (
       targetSize || '',
     ];
 
-    // Add performance optimization flags
-    if (options.performanceMode !== false) {
-      args.push('--performance-mode');
-    }
-
-    if (options.parallelTracks) {
-      args.push('--parallel-tracks', options.parallelTracks.toString());
-    }
-
-    if (options.memoryLimit) {
-      args.push('--memory-limit', options.memoryLimit.toString());
-    }
-
-    if (options.quality) {
-      args.push('--quality', options.quality);
-    }
+    if (options.performanceMode !== false) args.push('--performance-mode');
+    if (options.parallelTracks)  args.push('--parallel-tracks', options.parallelTracks.toString());
+    if (options.memoryLimit)     args.push('--memory-limit', options.memoryLimit.toString());
+    if (options.quality)         args.push('--quality', options.quality);
 
     const pythonProcess = spawn('python', args);
-
     let stdout = '';
     let stderr = '';
+    let settled = false;
+
+    const finish = (value, isError) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      if (isError) reject(value);
+      else resolve(value);
+    };
+
+    const timeoutHandle = setTimeout(() => {
+      console.error(`Python Bridge - preprocessVideo timed out after ${PREPROCESS_TIMEOUT_MS / 60000} minutes`);
+      killProcessTree(pythonProcess);
+      finish(new Error(`Preprocessing timed out after ${PREPROCESS_TIMEOUT_MS / 60000} minutes`), true);
+    }, PREPROCESS_TIMEOUT_MS);
 
     pythonProcess.stdout.on('data', (data) => {
       const message = data.toString();
       stdout += message;
-
-      // Check for progress updates
       if (message.includes('PROGRESS:')) {
         const progressMatch = message.match(/PROGRESS:(\d+)/);
         if (progressMatch && options.onProgress) {
@@ -210,17 +216,18 @@ export const preprocessVideo = async (
       console.error(`Python preprocessing error: ${message}`);
     });
 
+    pythonProcess.once('error', (err) => {
+      finish(new Error(`Failed to spawn preprocess: ${err.message}`), true);
+    });
+
     pythonProcess.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(`Preprocessing failed with code ${code}: ${stderr}`));
+        finish(new Error(`Preprocessing failed (code ${code}): ${stderr}`), true);
       } else {
         try {
-          // Try to parse JSON output for enhanced results
-          const result = JSON.parse(stdout);
-          resolve(result);
+          finish(JSON.parse(stdout), false);
         } catch {
-          // Fallback to simple success for legacy compatibility
-          resolve({ success: true, output: outputPath });
+          finish({ success: true, output: outputPath }, false);
         }
       }
     });
@@ -233,55 +240,49 @@ export const preprocessVideoBatch = async (
   options = {}
 ) => {
   return new Promise((resolve, reject) => {
-    // Create batch configuration file
-    const batchConfig = {
-      videos: videoList,
-      output_dir: outputDir,
+    const batchConfig = { videos: videoList, output_dir: outputDir };
+    const tempConfigPath = path.join(__dirname, '../temp', `batch_config_${Date.now()}.json`);
+
+    const cleanupConfig = () => {
+      try { fs.unlinkSync(tempConfigPath); } catch (_) {}
     };
 
-    const tempConfigPath = path.join(
-      __dirname,
-      '../temp',
-      `batch_config_${Date.now()}.json`
-    );
-
     try {
-      // Write batch configuration
       fs.writeFileSync(tempConfigPath, JSON.stringify(batchConfig, null, 2));
 
       const args = [
         path.join(__dirname, '../python/preprocess_videos.py'),
-        '--batch-file',
-        tempConfigPath,
+        '--batch-file', tempConfigPath,
       ];
 
-      // Add performance optimization flags
-      if (options.performanceMode !== false) {
-        args.push('--performance-mode');
-      }
-
-      if (options.parallelTracks) {
-        args.push('--parallel-tracks', options.parallelTracks.toString());
-      }
-
-      if (options.memoryLimit) {
-        args.push('--memory-limit', options.memoryLimit.toString());
-      }
-
-      if (options.quality) {
-        args.push('--quality', options.quality);
-      }
+      if (options.performanceMode !== false) args.push('--performance-mode');
+      if (options.parallelTracks)  args.push('--parallel-tracks', options.parallelTracks.toString());
+      if (options.memoryLimit)     args.push('--memory-limit', options.memoryLimit.toString());
+      if (options.quality)         args.push('--quality', options.quality);
 
       const pythonProcess = spawn('python', args);
-
       let stdout = '';
       let stderr = '';
+      let settled = false;
+
+      const finish = (value, isError) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutHandle);
+        cleanupConfig();
+        if (isError) reject(value);
+        else resolve(value);
+      };
+
+      const timeoutHandle = setTimeout(() => {
+        console.error(`Python Bridge - preprocessVideoBatch timed out after ${PREPROCESS_TIMEOUT_MS / 60000} minutes`);
+        killProcessTree(pythonProcess);
+        finish(new Error(`Batch preprocessing timed out after ${PREPROCESS_TIMEOUT_MS / 60000} minutes`), true);
+      }, PREPROCESS_TIMEOUT_MS);
 
       pythonProcess.stdout.on('data', (data) => {
         const message = data.toString();
         stdout += message;
-
-        // Check for progress updates
         if (message.includes('PROGRESS:')) {
           const progressMatch = message.match(/PROGRESS:(\d+)/);
           if (progressMatch && options.onProgress) {
@@ -296,37 +297,25 @@ export const preprocessVideoBatch = async (
         console.error(`Python batch preprocessing error: ${message}`);
       });
 
-      pythonProcess.on('close', (code) => {
-        // Cleanup temp config file
-        try {
-          fs.unlinkSync(tempConfigPath);
-        } catch (cleanupError) {
-          console.warn(
-            `Failed to cleanup temp config file: ${cleanupError.message}`
-          );
-        }
+      pythonProcess.once('error', (err) => {
+        finish(new Error(`Failed to spawn batch preprocess: ${err.message}`), true);
+      });
 
+      pythonProcess.on('close', (code) => {
         if (code !== 0) {
-          reject(
-            new Error(`Batch preprocessing failed with code ${code}: ${stderr}`)
-          );
+          finish(new Error(`Batch preprocessing failed (code ${code}): ${stderr}`), true);
         } else {
           try {
-            const result = JSON.parse(stdout);
-            resolve(result);
+            finish(JSON.parse(stdout), false);
           } catch (e) {
-            reject(
-              new Error(
-                `Failed to parse batch processing results: ${e.message}`
-              )
-            );
+            finish(new Error(`Failed to parse batch results: ${e.message}`), true);
           }
         }
       });
+
     } catch (error) {
-      reject(
-        new Error(`Failed to create batch configuration: ${error.message}`)
-      );
+      cleanupConfig();
+      reject(new Error(`Failed to create batch configuration: ${error.message}`));
     }
   });
 };

@@ -13,6 +13,10 @@ const VideoComposer = ({
   soloTrack = null,
   compositionStyle = null,
   clipStyles = null,
+  onProgress = null,
+  onError = null,
+  onStart = null,
+  onComplete = null,
 }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingMode, setProcessingMode] = useState(null);
@@ -104,12 +108,14 @@ const VideoComposer = ({
   }, [trackVolumes, muteStates, soloTrack]);
 
   const startComposition = async (isPreview = false) => {
+    if (isProcessing) return;
     if (!canCompose) {
       setError(validationErrors.join(' '));
       return;
     }
 
     console.log('Grid arrangement:', gridArrangement);
+    onStart?.();
     setIsProcessing(true);
     setProcessingMode(isPreview ? 'preview' : 'full');
     setUploadProgress(0);
@@ -186,14 +192,18 @@ const VideoComposer = ({
       abortRef.current = abort;
       const blob = await trackCompositionJob(jobId, (pct) => {
         setRenderProgress(pct);
+        onProgress?.(pct);
       }, abort.signal);
 
       setComposedBlob(blob);
       const url = URL.createObjectURL(blob);
       setComposedVideoUrl(url);
+      onComplete?.();
     } catch (err) {
       console.error('Composition failed:', err);
-      setError(err.message || 'Failed to compose video');
+      const normalizedErr = err instanceof Error ? err : new Error(String(err));
+      setError(normalizedErr.message);
+      onError?.(normalizedErr);
     } finally {
       clearInterval(timerRef.current);
       timerRef.current = null;

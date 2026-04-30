@@ -32,7 +32,9 @@ class VideoComposerWrapper:
         self.logger = logging.getLogger(__name__)
         self.temp_dir = None
         self.composer = None
-        self.gpu_enabled = False  # Disable GPU acceleration by default for safety
+        self.gpu_enabled = False  # Controls the gpu_note_synchronizer branch only.
+        # VideoComposer handles GPU (h264_nvenc/CUDA) detection internally with
+        # automatic CPU fallback — no flag needed here for that.
         self.preview_mode = preview_mode
         
     def _transform_midi_data(self, midi_data: dict) -> dict:

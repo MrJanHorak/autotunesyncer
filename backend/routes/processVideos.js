@@ -30,7 +30,9 @@ const storage = multer.diskStorage({
 // Keyed by jobId. Fields: status, progress, outputPath, error, createdAt, completedAt, userId, projectId
 const jobs = new Map();
 const jobEmitter = new EventEmitter();
-jobEmitter.setMaxListeners(200); // allow many concurrent SSE connections
+// Per-job event names (job:${jobId}) mean each event typically has 1-2 listeners.
+// Keep the limit modest so genuine leaks still warn at reasonable scale.
+jobEmitter.setMaxListeners(50);
 
 /** Atomic job update — also pushes to any open SSE streams for this job. */
 function updateJob(jobId, patch) {
@@ -493,10 +495,8 @@ router.get('/progress/:jobId', authenticateToken, (req, res) => {
   }
 
   jobEmitter.on(`job:${jobId}`, onUpdate);
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    jobEmitter.off(`job:${jobId}`, onUpdate);
-  });
+  // Use shared cleanup() on client disconnect so the heartbeat is always cleared.
+  req.on('close', cleanup);
 });
 
 // GET /status/:jobId — poll for job progress (auth required)
