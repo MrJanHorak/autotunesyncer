@@ -1,6 +1,7 @@
 import os
 import re
 import gc
+import hashlib
 import threading
 import subprocess
 import sys
@@ -98,6 +99,11 @@ from composer_utils import (
 
 # Log to an absolute path in the backend/ directory (next to this file's parent)
 _LOG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'video_processing.log'))
+
+# Persistent disk cache for per-clip onset offsets so the expensive librosa
+# onset-detection pass is skipped on subsequent renders of the same source clips.
+_ONSET_CACHE_PATH = Path.home() / '.autotunesyncer' / 'onset_offsets.json'
+_ONSET_CACHE_MAX_ENTRIES = 1000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -257,6 +263,9 @@ class VideoComposer:
             # Onset offset cache for non-destructive alignment — protected by per-path locks
             self.onset_offset_cache = {}
             self._onset_path_locks: dict = defaultdict(threading.Lock)  # one Lock per clip path
+            # Cross-run disk cache for onset offsets (loaded once, flushed on composition end)
+            self._onset_disk_cache: dict = self._load_onset_disk_cache()
+            self._onset_disk_cache_dirty: bool = False
             # Media duration cache — avoids duplicate ffprobe calls from parallel stem threads
             self._duration_cache: dict = {}
             self._duration_cache_lock = threading.RLock()
@@ -340,12 +349,14 @@ class VideoComposer:
         config = self.render_config
 
         if self.ffmpeg_hwaccel == 'cuda':
+            # Production preset is env-configurable; preview always uses p1 (fastest).
+            _prod_preset = os.environ.get('ATS_NVENC_PRESET', 'fast')
             return [
                 '-c:v', 'h264_nvenc',
-                '-preset', 'fast' if not self.preview_mode else 'p1',  # p1 for preview (fastest), fast for production
-                '-rc', 'vbr',  # Variable bitrate mode
-                '-cq', config['crf'],  # Use config CRF
-                '-b:v', config['video_bitrate'],  # Use config bitrate
+                '-preset', 'p1' if self.preview_mode else _prod_preset,
+                '-rc', 'vbr',
+                '-cq', config['crf'],
+                '-b:v', config['video_bitrate'],
             ]
         if self.ffmpeg_hwaccel == 'videotoolbox':
             return [
@@ -536,6 +547,62 @@ class VideoComposer:
             logging.debug(f"Onset align error: {e}")
             return video_path
 
+    # ── Onset disk-cache helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _load_onset_disk_cache() -> dict:
+        """Load persisted onset-offset map from disk; returns {} on any failure."""
+        try:
+            if _ONSET_CACHE_PATH.exists():
+                with open(_ONSET_CACHE_PATH, 'r', encoding='utf-8') as fh:
+                    data = json.load(fh)
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def _flush_onset_disk_cache(self) -> None:
+        """Atomically write the in-memory onset-offset map to disk, pruning to the
+        most-recently-added *_ONSET_CACHE_MAX_ENTRIES* entries when over the cap.
+        Silently no-ops if the map is unchanged or the write fails."""
+        if not self._onset_disk_cache_dirty:
+            return
+        try:
+            cache = self._onset_disk_cache
+            if len(cache) > _ONSET_CACHE_MAX_ENTRIES:
+                # Keep the last N entries (most recently added; dict preserves insertion order)
+                entries = list(cache.items())[-_ONSET_CACHE_MAX_ENTRIES:]
+                cache = dict(entries)
+                self._onset_disk_cache = cache
+            _ONSET_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = str(_ONSET_CACHE_PATH) + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as fh:
+                json.dump(cache, fh)
+            os.replace(tmp_path, str(_ONSET_CACHE_PATH))
+            self._onset_disk_cache_dirty = False
+            logging.debug(f"[onset-cache] flushed {len(cache)} entries to disk")
+        except Exception as exc:
+            logging.warning(f"[onset-cache] flush failed: {exc}")
+
+    @staticmethod
+    def _onset_content_key(path: str) -> 'str | None':
+        """Stable content fingerprint for a video file: sha256 of first+last 1 KB
+        bytes concatenated with the file size.  Returns None on I/O error."""
+        try:
+            size = os.path.getsize(path)
+            with open(path, 'rb') as fh:
+                head = fh.read(1024)
+                if size > 2048:
+                    fh.seek(-1024, 2)
+                    tail = fh.read(1024)
+                else:
+                    tail = b''
+            digest = hashlib.sha256(head + tail + str(size).encode()).hexdigest()[:24]
+            return digest
+        except Exception:
+            return None
+
     def _extract_temp_audio(self, video_path):
         """Extract mono 44.1kHz WAV to temp for onset analysis."""
         try:
@@ -546,7 +613,6 @@ class VideoComposer:
                 self.temp_dir = Path(tempfile.mkdtemp(prefix='composer_tmp_'))
             # Use MD5 of the full path so concurrent threads never share a temp file,
             # even when two clips happen to have the same basename.
-            import hashlib
             path_hash = hashlib.md5(str(video_path).encode()).hexdigest()[:12]
             out_wav = Path(self.temp_dir) / f"onset_{path_hash}.wav"
             cmd = [
@@ -566,11 +632,13 @@ class VideoComposer:
         Detect first audible onset time (seconds) using librosa; fallback to RMS.
         Cached per video_path with per-path locking so parallel stem threads never
         race to compute the same clip's onset or write the same temp WAV.
+        A cross-run disk cache (keyed by file content fingerprint) avoids re-running
+        the expensive librosa pipeline when the same source file is used across renders.
         """
         try:
             if not video_path or not os.path.exists(video_path):
                 return 0.0
-            # Fast path: already cached (pure read, GIL-safe for dict lookup)
+            # Fast path: in-memory cache (pure read, GIL-safe for dict lookup)
             if video_path in self.onset_offset_cache:
                 return self.onset_offset_cache[video_path]
 
@@ -580,6 +648,14 @@ class VideoComposer:
                 # Re-check: another thread may have populated while we waited.
                 if video_path in self.onset_offset_cache:
                     return self.onset_offset_cache[video_path]
+
+                # Check cross-run disk cache before invoking librosa
+                content_key = self._onset_content_key(video_path)
+                if content_key and content_key in self._onset_disk_cache:
+                    cached_offset = self._onset_disk_cache[content_key]
+                    self.onset_offset_cache[video_path] = cached_offset
+                    logging.debug(f"[onset-cache] disk hit {content_key[:8]}… → {cached_offset:.3f}s for {Path(video_path).name}")
+                    return cached_offset
 
                 wav_path = self._extract_temp_audio(video_path)
                 if not wav_path:
@@ -597,6 +673,9 @@ class VideoComposer:
                         offset = float(onsets[1])
                     offset = max(0.0, min(offset, 5.0))
                     self.onset_offset_cache[video_path] = offset
+                    if content_key:
+                        self._onset_disk_cache[content_key] = offset
+                        self._onset_disk_cache_dirty = True
                     logging.info(f"Detected onset offset {offset:.3f}s for {Path(video_path).name}")
                     return offset
 
@@ -609,6 +688,9 @@ class VideoComposer:
                         offset = float(times[i])
                         offset = max(0.0, min(offset, 5.0))
                         self.onset_offset_cache[video_path] = offset
+                        if content_key:
+                            self._onset_disk_cache[content_key] = offset
+                            self._onset_disk_cache_dirty = True
                         logging.info(f"Fallback onset offset {offset:.3f}s for {Path(video_path).name}")
                         return offset
 
@@ -2656,7 +2738,11 @@ class VideoComposer:
 
             def _build_cmd(use_gpu: bool) -> list:
                 if use_gpu:
-                    video_enc = ['-c:v', 'h264_nvenc', '-preset', 'p5', '-b:v', '2M', '-maxrate', '4M']
+                    _final_preset = os.environ.get('ATS_NVENC_FINAL_PRESET', 'p5')
+                    _final_bitrate = os.environ.get('ATS_NVENC_FINAL_BITRATE', '2M')
+                    _final_maxrate = os.environ.get('ATS_NVENC_FINAL_MAXRATE', '4M')
+                    video_enc = ['-c:v', 'h264_nvenc', '-preset', _final_preset,
+                                 '-b:v', _final_bitrate, '-maxrate', _final_maxrate]
                 else:
                     video_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '28']
                 cmd = ['ffmpeg', '-y', '-i', input_path]
@@ -2800,6 +2886,7 @@ class VideoComposer:
                         # in the same ffmpeg run as compression — no third pass.
                         elapsed = time.time() - start_time
                         logging.info(f"🎉 Audio-first composition complete! {elapsed:.2f}s")
+                        self._flush_onset_disk_cache()
                         return result
                     logging.warning("⚠️ Audio-first returned no output — falling back to legacy")
                 except Exception as e:
@@ -2815,10 +2902,12 @@ class VideoComposer:
 
             if result and os.path.exists(str(result)):
                 result = self._apply_text_overlays_inplace(str(result), total_duration)
+            self._flush_onset_disk_cache()
             return result
 
         except Exception as e:
             logging.error(f"❌ Enhanced composition error: {e}")
+            self._flush_onset_disk_cache()
             return None
 
     def _create_composition_sequential(self):

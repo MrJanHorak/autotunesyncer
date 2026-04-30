@@ -19,8 +19,15 @@ const videoProcessingQueue = new Queue('video processing', {
   },
 });
 
+// Concurrency: default 4, clamped to [1, 32] and validated to guard against
+// non-numeric values like "auto" or empty strings.
+const _rawConcurrency = parseInt(process.env.QUEUE_CONCURRENCY || '', 10);
+const QUEUE_CONCURRENCY = (Number.isFinite(_rawConcurrency) && _rawConcurrency >= 1)
+  ? Math.min(_rawConcurrency, 32)
+  : 4;
+
 // Process video composition jobs with enhanced error handling and progress tracking
-videoProcessingQueue.process('compose', 4, async (job) => {
+videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
   const {
     midiData,
     processedTracks,
