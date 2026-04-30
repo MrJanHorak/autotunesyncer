@@ -41,3 +41,35 @@ backend/uploads/
 public/soundfonts/*.sf2
 published
 /published
+
+# User-uploaded / generated media (must not be checked in)
+backend/published/
+backend/temp/
+backend/temp_test/
+uploads/
+/uploads
+backend/uploads/**
+
+# Test / debug output artefacts (root-level scratch)
+/test_*.mp4
+/test_*.png
+/test_*.json
+/debug_*.mp4
+/debug_*.py
+backend/test_*.mp4
+backend/test_*.png
+backend/test_gpu_*
+backend/test_frame.png
+
+# Python build / cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Backup files (never commit)
+*.backup
+*_backup.py
+*_corrupted_backup.py
+*_problematic_backup.py

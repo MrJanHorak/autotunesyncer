@@ -106,13 +106,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
 # Removed unresolved import; GPU encode is imported lazily from utils.ffmpeg_gpu where used
 
-# Import CUDA compositing if available
-try:
-    from cuda_compositing import CudaVideoProcessor
-except ImportError:
-    CudaVideoProcessor = None
-    logging.warning("CUDA compositing not available")
-
 # Import GPU pipeline processor if available
 try:
     from gpu_pipeline import GPUPipelineProcessor
