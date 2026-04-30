@@ -2688,9 +2688,11 @@ class VideoComposer:
                 orig_size = os.path.getsize(input_path)
                 new_size = os.path.getsize(tmp)
                 os.replace(tmp, output_path)
+                delta_pct = 100 * (new_size - orig_size) / orig_size
+                size_note = (f'{abs(delta_pct):.0f}% smaller'
+                             if delta_pct < 0 else f'{delta_pct:.0f}% larger (quality pass)')
                 logging.info(
-                    f'✅ {label} complete: {orig_size:,} → {new_size:,} bytes '
-                    f'({100*(1-new_size/orig_size):.0f}% reduction)'
+                    f'✅ {label} complete: {orig_size:,} → {new_size:,} bytes ({size_note})'
                 )
                 return output_path
             logging.warning(f'⚠️  {label} pass failed, keeping original: {r.stderr[-1500:]}')

@@ -281,7 +281,12 @@ const VideoComposer = ({
               </div>
               <p className='text-sm text-gray-600 mt-1'>
                 {processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'}{' '}
-                rendering… {renderProgress}% — {elapsedSeconds}s elapsed
+                rendering… {renderProgress}%
+                {' — '}{elapsedSeconds}s elapsed
+                {renderProgress > 0 && elapsedSeconds > 2 && (() => {
+                  const etaSec = Math.round(elapsedSeconds * (100 - renderProgress) / renderProgress);
+                  return etaSec > 0 ? `, ~${etaSec}s remaining` : null;
+                })()}
               </p>
             </>
           ) : (
