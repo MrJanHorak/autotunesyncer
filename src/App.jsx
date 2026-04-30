@@ -452,13 +452,25 @@ function MainApp({ onChangeProject, onLogout }) {
 
   // On project change: load saved clip list from server + restore MIDI from state.
   useEffect(() => {
+    // Always increment version first so any in-flight fetches from the previous
+    // project are discarded, even when the new value is null.
+    const version = ++clipsLoadingVersion.current;
+
+    // Revoke stale blob URLs and clear clip state from the previous project.
+    setInstrumentVideos((prev) => {
+      Object.values(prev).forEach((url) => {
+        try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+      });
+      return {};
+    });
+    setVideoFiles({});
+    precachedKeysRef.current = new Set();
+
     if (!currentProject) {
       setSavedClipKeys(new Set());
       clipBlobCache.current = {};
       return;
     }
-
-    const version = ++clipsLoadingVersion.current;
 
     apiFetch(`/projects/${currentProject.id}/clips`)
       .then((r) => r.json())
@@ -717,9 +729,7 @@ function MainApp({ onChangeProject, onLogout }) {
         console.error('Invalid blob:', blob);
         return;
       }
-      if (instrument.isDrum) {
-        instrument.name = instrument.group;
-      }
+      // toInstrumentKey already reads instrument.group for drums — no mutation needed
       const key = toInstrumentKey(instrument);
 
       console.log(
@@ -745,15 +755,16 @@ function MainApp({ onChangeProject, onLogout }) {
     [currentProject?.id],
   );
 
-  // Add handleVideoReady function
   const handleVideoReady = useCallback((videoUrl, instrument) => {
-    if (instrument.isDrum) instrument.name = instrument.group;
     const instrumentKey = toInstrumentKey(instrument);
 
-    setInstrumentVideos((prev) => ({
-      ...prev,
-      [instrumentKey]: videoUrl,
-    }));
+    setInstrumentVideos((prev) => {
+      // Revoke the old URL for this key before overwriting
+      if (prev[instrumentKey] && prev[instrumentKey] !== videoUrl) {
+        try { URL.revokeObjectURL(prev[instrumentKey]); } catch { /* ignore */ }
+      }
+      return { ...prev, [instrumentKey]: videoUrl };
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

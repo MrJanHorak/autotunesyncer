@@ -710,6 +710,11 @@ class VideoComposer:
     @staticmethod
     def normalize_midi_timing(midi_data):
         """Adjust all note timings to start at the same point"""
+        # Guard: if no track has notes, nothing to normalize
+        any_notes = any(track.get('notes') for track in midi_data.get('tracks', []))
+        if not any_notes:
+            logging.warning("normalize_midi_timing: no notes in any track; skipping")
+            return midi_data
         # Find earliest note time across all tracks
         min_time = float('inf')
         for track in midi_data['tracks']:

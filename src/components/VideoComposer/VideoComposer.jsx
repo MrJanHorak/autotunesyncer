@@ -29,6 +29,9 @@ const VideoComposer = ({
   const [error, setError] = useState(null);
   const timerRef = useRef(null);
   const abortRef = useRef(null);
+  // Track the current blob URL in a ref so cleanup is always unmount-only (not
+  // triggered by every state change) and the old URL is revoked before replacement.
+  const composedVideoUrlRef = useRef(null);
 
   const validationErrors = useMemo(() => {
     const errors = [];
@@ -122,8 +125,9 @@ const VideoComposer = ({
     setRenderProgress(0);
     setElapsedSeconds(0);
     setError(null);
-    if (composedVideoUrl) {
-      URL.revokeObjectURL(composedVideoUrl);
+    if (composedVideoUrlRef.current) {
+      URL.revokeObjectURL(composedVideoUrlRef.current);
+      composedVideoUrlRef.current = null;
       setComposedVideoUrl(null);
     }
 
@@ -196,7 +200,9 @@ const VideoComposer = ({
       }, abort.signal);
 
       setComposedBlob(blob);
+      if (composedVideoUrlRef.current) URL.revokeObjectURL(composedVideoUrlRef.current);
       const url = URL.createObjectURL(blob);
+      composedVideoUrlRef.current = url;
       setComposedVideoUrl(url);
       onComplete?.();
     } catch (err) {
@@ -212,14 +218,16 @@ const VideoComposer = ({
     }
   };
 
-  // Cleanup timer, SSE stream, and URL on unmount
+  // Cleanup timer, SSE stream, and URL on unmount only.
+  // Using [] dep array (not [composedVideoUrl]) prevents abortRef from
+  // firing mid-composition whenever the URL state changes.
   useEffect(() => {
     return () => {
       clearInterval(timerRef.current);
       abortRef.current?.abort();
-      if (composedVideoUrl) URL.revokeObjectURL(composedVideoUrl);
+      if (composedVideoUrlRef.current) URL.revokeObjectURL(composedVideoUrlRef.current);
     };
-  }, [composedVideoUrl]);
+  }, []);
 
   return (
     <div className='video-composer'>

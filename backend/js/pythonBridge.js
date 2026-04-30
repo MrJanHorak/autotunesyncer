@@ -11,6 +11,22 @@ const COMPOSITION_TIMEOUT_MS = 15 * 60 * 1000;  // 15 min
 const PREPROCESS_TIMEOUT_MS  =  5 * 60 * 1000;  // 5 min
 
 /**
+ * A fixed-size ring buffer for stderr.  Keeps the most recent `maxChars`
+ * characters so memory doesn't grow unboundedly on noisy Python jobs while
+ * still capturing the tail of any error output for rejection messages.
+ */
+function makeRingBuffer(maxChars = 64 * 1024) {
+  let buf = '';
+  return {
+    push(s) {
+      buf += s;
+      if (buf.length > maxChars) buf = buf.slice(buf.length - maxChars);
+    },
+    get() { return buf; },
+  };
+}
+
+/**
  * Kill a process and its entire child process tree.
  * On Windows `process.kill()` only terminates the direct Python parent; FFmpeg
  * grandchildren keep running.  `taskkill /T` terminates the full tree.
@@ -94,7 +110,7 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
 
       const pythonProcess = spawn('python', pythonArgs);
       let output = '';
-      let errorOutput = '';
+      const stderrRing = makeRingBuffer();
       let settled = false;
 
       const finish = (resolveFn, rejectFn, value, isError) => {
@@ -112,7 +128,7 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
         console.error(`Python Bridge - composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes`);
         killProcessTree(pythonProcess);
         finish(resolve, reject,
-          new Error(`Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${errorOutput.slice(-2000)}`),
+          new Error(`Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${stderrRing.get()}`),
           true
         );
       }, COMPOSITION_TIMEOUT_MS);
@@ -130,12 +146,12 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
       pythonProcess.stderr.on('data', (data) => {
         const message = data.toString();
         console.error(`Python error: ${message}`);
-        errorOutput += message;
+        stderrRing.push(message);
       });
 
       pythonProcess.once('error', (err) => {
         finish(resolve, reject,
-          new Error(`Failed to spawn Python process: ${err.message}\n${errorOutput.slice(-2000)}`),
+          new Error(`Failed to spawn Python process: ${err.message}\n${stderrRing.get()}`),
           true
         );
       });
@@ -143,7 +159,7 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
       pythonProcess.on('close', (code) => {
         if (code !== 0) {
           finish(resolve, reject,
-            new Error(`Python process failed (code ${code})\n${errorOutput.slice(-2000)}`),
+            new Error(`Python process failed (code ${code})\n${stderrRing.get()}`),
             true
           );
         } else {
@@ -182,7 +198,7 @@ export const preprocessVideo = async (
 
     const pythonProcess = spawn('python', args);
     let stdout = '';
-    let stderr = '';
+    const stderrRing = makeRingBuffer();
     let settled = false;
 
     const finish = (value, isError) => {
@@ -212,7 +228,7 @@ export const preprocessVideo = async (
 
     pythonProcess.stderr.on('data', (data) => {
       const message = data.toString();
-      stderr += message;
+      stderrRing.push(message);
       console.error(`Python preprocessing error: ${message}`);
     });
 
@@ -222,7 +238,7 @@ export const preprocessVideo = async (
 
     pythonProcess.on('close', (code) => {
       if (code !== 0) {
-        finish(new Error(`Preprocessing failed (code ${code}): ${stderr}`), true);
+        finish(new Error(`Preprocessing failed (code ${code}): ${stderrRing.get()}`), true);
       } else {
         try {
           finish(JSON.parse(stdout), false);
@@ -262,7 +278,7 @@ export const preprocessVideoBatch = async (
 
       const pythonProcess = spawn('python', args);
       let stdout = '';
-      let stderr = '';
+      const stderrRing = makeRingBuffer();
       let settled = false;
 
       const finish = (value, isError) => {
@@ -293,7 +309,7 @@ export const preprocessVideoBatch = async (
 
       pythonProcess.stderr.on('data', (data) => {
         const message = data.toString();
-        stderr += message;
+        stderrRing.push(message);
         console.error(`Python batch preprocessing error: ${message}`);
       });
 
@@ -303,7 +319,7 @@ export const preprocessVideoBatch = async (
 
       pythonProcess.on('close', (code) => {
         if (code !== 0) {
-          finish(new Error(`Batch preprocessing failed (code ${code}): ${stderr}`), true);
+          finish(new Error(`Batch preprocessing failed (code ${code}): ${stderrRing.get()}`), true);
         } else {
           try {
             finish(JSON.parse(stdout), false);

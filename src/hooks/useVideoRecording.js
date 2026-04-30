@@ -15,27 +15,19 @@ export const useVideoRecording = (instruments) => {
     if (!instruments?.length) return;
 
     const requiredRecordings = instruments.map((instrument) => {
-      console.log(' required recordings Instrument:', instrument);
-      if (instrument.isDrum) {
-        console.log(' inside isDrum:', instrument.isDrum);
-        instrument.name = instrument.group;
-      }
-      console.log('after and outside of isDrum Instrument:', instrument);
+      const effectiveName = instrument.isDrum
+        ? (instrument.group || instrument.name || '')
+        : (instrument.name || '');
       return instrument.isDrum
-        ? `drum_${instrument.name.toLowerCase().replace(/\s+/g, '_')}`
-        : normalizeInstrumentName(instrument.name);
+        ? `drum_${effectiveName.toLowerCase().replace(/\s+/g, '_')}`
+        : normalizeInstrumentName(effectiveName);
     });
 
     const hasAllRecordings = requiredRecordings.every(
       (instrumentName) => !!videoFiles[instrumentName]
     );
-    console.log('hasAllRecordings:', hasAllRecordings);
     setIsReadyToCompose(hasAllRecordings);
     setRecordedVideosCount(Object.keys(videoFiles).length);
-
-    console.log('Required recordings:', requiredRecordings);
-    console.log('Current videos:', Object.keys(videoFiles));
-    console.log('Ready to compose:', hasAllRecordings);
   }, [instruments, videoFiles]);
 
   const startAudioContext = async () => {
