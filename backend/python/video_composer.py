@@ -3712,77 +3712,41 @@ class VideoComposer:
 
     def _compress_final_output(self, input_path: str, output_path: str) -> 'str | None':
         """
-        Final re-encode pass: compress the muxed output and apply any global
-        post-processing (intro card overlay) in a single FFmpeg pass.
-        Falls back to a stream-copy rename if re-encode fails.
+        Final re-encode pass: compress the muxed output with GPU acceleration
+        when available, falling back to CPU (libx264) on encoder failure.
+        Intro card overlay is handled separately by _apply_text_overlays_to_video.
+        Always writes the result to output_path (moves input_path if all encoders fail).
         """
         tmp = output_path + '.tmp_compress.mp4'
         try:
             enc = self._get_encoding_settings()
-            if '-c:v' in enc and enc[enc.index('-c:v') + 1] == 'h264_nvenc':
-                final_enc = [
-                    '-c:v', 'h264_nvenc', '-preset', 'p5',
-                    '-rc', 'vbr', '-cq', '28', '-b:v', '2M', '-maxrate', '4M',
+            use_nvenc = '-c:v' in enc and enc[enc.index('-c:v') + 1] == 'h264_nvenc'
+
+            def _build_cmd(use_gpu: bool) -> list:
+                if use_gpu:
+                    video_enc = ['-c:v', 'h264_nvenc', '-preset', 'p5', '-b:v', '2M', '-maxrate', '4M']
+                else:
+                    video_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '28']
+                return [
+                    'ffmpeg', '-y', '-i', input_path,
+                    *video_enc,
+                    '-c:a', 'aac', '-b:a', '192k',
+                    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                    tmp,
                 ]
-            else:
-                final_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '28']
 
-            # ── Intro card overlay (applied as vf filter during compression) ──
-            cs = getattr(self, 'composition_style', {}) or {}
-            vf_filters = []
-            if cs.get('introCardEnabled'):
-                intro_dur = max(1.0, float(cs.get('introCardDuration', 3)))
-                bg_col = self._hex_to_ffmpeg_color(cs.get('introCardBg', '#000000'))
-                txt_col = self._hex_to_ffmpeg_color(cs.get('introCardTextColor', '#ffffff'))
-                animated = bool(cs.get('introCardAnimated', True))
-                alpha_expr = f'min(t/0.5,1)*gt(t,0)*lt(t,{intro_dur-0.3})+max(0,1-(t-({intro_dur-0.3}))/0.3)*lt(t,{intro_dur})' \
-                             if animated else '1'
-
-                def _ic_esc(t):
-                    """Escape text for single-quoted FFmpeg drawtext text= value.
-                    Replace ASCII apostrophe U+0027 with Unicode U+2019 (RIGHT
-                    SINGLE QUOTATION MARK) — visually identical but not a special
-                    FFmpeg parser character, so it never breaks quote parsing."""
-                    return (t or '').replace('\r', '').replace('\n', ' ') \
-                                    .replace('\u0027', '\u2019')
-
-                # Solid colour fill for intro duration
-                vf_filters.append(
-                    f"drawbox=x=0:y=0:w=iw:h=ih:color={bg_col}@1:t=fill"
-                    f":enable='lt(t,{intro_dur})'"
-                )
-                title = _ic_esc(cs.get('introCardText', ''))
-                sub = _ic_esc(cs.get('introCardSubtext', ''))
-                ic_font_path = self._get_windows_font_path(cs.get('introCardFont', 'default'))
-                ic_fontfile = f":fontfile={ic_font_path}" if ic_font_path else ''
-                if title:
-                    vf_filters.append(
-                        f"drawtext=text='{title}':expansion=none"
-                        f":x=(w-text_w)/2:y=(h-text_h)/2:fontsize=72"
-                        f":fontcolor={txt_col}:alpha='{alpha_expr}'"
-                        f":enable='lt(t,{intro_dur})'{ic_fontfile}"
-                    )
-                if sub:
-                    vf_filters.append(
-                        f"drawtext=text='{sub}':expansion=none"
-                        f":x=(w-text_w)/2:y=h*0.62:fontsize=36"
-                        f":fontcolor={txt_col}:alpha='{alpha_expr}'"
-                        f":enable='lt(t,{intro_dur})'{ic_fontfile}"
-                    )
-                logging.info(f'🎬 Intro card: {intro_dur}s, bg={bg_col}, '
-                             f'title={bool(title)}, subtitle={bool(sub)}')
-
-            cmd = ['ffmpeg', '-y', '-i', input_path]
-            if vf_filters:
-                cmd.extend(['-vf', ','.join(vf_filters)])
-            cmd.extend([
-                *final_enc,
-                '-c:a', 'aac', '-b:a', '192k',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                tmp,
-            ])
             logging.info('🗜️  Final compression pass (CRF 28 / medium)…')
+            cmd = _build_cmd(use_nvenc)
             r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+            if r.returncode != 0 and use_nvenc:
+                logging.warning('⚠️  NVENC compression failed, retrying with CPU (libx264)…')
+                if os.path.exists(tmp):
+                    try: os.unlink(tmp)
+                    except Exception: pass
+                r = subprocess.run(_build_cmd(False), capture_output=True, text=True,
+                                   encoding='utf-8', errors='replace')
+
             if r.returncode == 0 and os.path.exists(tmp):
                 orig_size = os.path.getsize(input_path)
                 new_size = os.path.getsize(tmp)
@@ -3799,7 +3763,16 @@ class VideoComposer:
             if os.path.exists(tmp):
                 try: os.unlink(tmp)
                 except Exception: pass
-        return input_path  # fall back to uncompressed mux
+
+        # All encoders failed — move the uncompressed mux to the expected output path
+        try:
+            import shutil as _sh
+            _sh.move(input_path, output_path)
+            logging.info(f'↩️  Kept uncompressed mux at output path: {Path(output_path).name}')
+        except Exception as mv_err:
+            logging.error(f'❌ Could not move mux to output path: {mv_err}')
+            return None
+        return output_path
 
     def _create_audio_first_composition(self, total_duration: float,
                                          total_chunks: int) -> 'str | None':
@@ -6533,8 +6506,8 @@ class VideoComposer:
 
     def _apply_text_overlays_to_video(self, input_path: str, output_path: str,
                                        total_duration: float) -> 'str | None':
-        """Post-processing pass: apply title, tagline, and watermark drawtext overlays
-        to the full composed video in one FFmpeg pass.
+        """Post-processing pass: apply intro card, title, tagline, and watermark
+        drawtext overlays to the full composed video in one FFmpeg pass.
 
         Must run AFTER chunk concatenation so alpha/enable expressions reference
         global video time (not per-chunk time which resets to 0 at every boundary).
@@ -6544,8 +6517,9 @@ class VideoComposer:
         has_title     = bool(cs.get('titleEnabled')     and cs.get('titleText',     '').strip())
         has_tagline   = bool(cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip())
         has_watermark = bool(cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip())
+        has_intro     = bool(cs.get('introCardEnabled'))
 
-        if not (has_title or has_tagline or has_watermark):
+        if not (has_title or has_tagline or has_watermark or has_intro):
             import shutil as _sh
             _sh.copy2(input_path, output_path)
             return output_path
@@ -6554,7 +6528,15 @@ class VideoComposer:
         current_label = '0:v'
 
         def _esc(t: str) -> str:
-            return t.replace('\r', '').replace('\n', ' ').replace('\u0027', '\u2019')
+            """Escape text for FFmpeg drawtext text= in filter_complex.
+            Order matters: escape backslash first, then colon (option separator),
+            percent (strftime trigger), and replace apostrophe with a Unicode
+            curly quote that FFmpeg never treats as a quoting character."""
+            return (t or '').replace('\r', '').replace('\n', ' ') \
+                            .replace('\\', '\\\\') \
+                            .replace(':', '\\:') \
+                            .replace('%', '%%') \
+                            .replace('\u0027', '\u2019')
 
         def add_drawtext(text, x_expr, y_expr, size, color_hex,
                          alpha_expr='1', enabled='1', font_key=None):
@@ -6572,6 +6554,40 @@ class VideoComposer:
                 f"{fontfile_part}[{nxt}]"
             )
             current_label = nxt
+
+        # ── Intro card (solid background fill + title + subtitle at video start) ──
+        if has_intro:
+            intro_dur  = max(1.0, float(cs.get('introCardDuration', 3)))
+            bg_col     = self._hex_to_ffmpeg_color(cs.get('introCardBg', '#000000'))
+            txt_col    = cs.get('introCardTextColor', '#ffffff')
+            animated   = bool(cs.get('introCardAnimated', True))
+            ic_font    = cs.get('introCardFont', 'default')
+            d          = f'{intro_dur:.3f}'
+            fade_out   = f'{intro_dur - 0.3:.3f}'
+            alpha_expr = (
+                f'min(t/0.5,1)*gt(t,0)*lt(t,{fade_out})'
+                f'+max(0,1-(t-{fade_out})/0.3)*lt(t,{d})'
+                if animated else '1'
+            )
+            # Solid colour background overlay for the intro duration
+            nxt = f'v_to_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{current_label}]drawbox=x=0:y=0:w=iw:h=ih"
+                f":color={bg_col}@1.0:t=fill:enable='lt(t,{d})'[{nxt}]"
+            )
+            current_label = nxt
+            ic_title = cs.get('introCardText', '')
+            if ic_title:
+                add_drawtext(ic_title, '(w-text_w)/2', '(h-text_h)/2', 72, txt_col,
+                             alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
+                             font_key=ic_font)
+            ic_sub = cs.get('introCardSubtext', '')
+            if ic_sub:
+                add_drawtext(ic_sub, '(w-text_w)/2', 'h*0.62', 36, txt_col,
+                             alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
+                             font_key=ic_font)
+            logging.info(f'🎬 Intro card overlay: {intro_dur}s, bg={bg_col}, '
+                         f'title={bool(ic_title)}, subtitle={bool(ic_sub)}')
 
         # ── Title (fade-in at start, fade-out) ────────────────────────────────
         if has_title:
@@ -6663,10 +6679,11 @@ class VideoComposer:
         return None
 
     def _apply_text_overlays_inplace(self, path: str, total_duration: float) -> str:
-        """Apply text overlays to a video file, replacing it in-place.
+        """Apply intro card and text overlays to a video file, replacing it in-place.
         Returns the (possibly unchanged) path."""
         cs = getattr(self, 'composition_style', {}) or {}
         has_any = any([
+            cs.get('introCardEnabled'),
             cs.get('titleEnabled')     and cs.get('titleText',     '').strip(),
             cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip(),
             cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip(),
