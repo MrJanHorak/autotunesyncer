@@ -6387,20 +6387,15 @@ class VideoComposer:
             )
             current = f'[{next_label}]'
 
-        # ── 5. Clip fade (note-triggered brightness gating) ────────────────
-        # Matches the styleDefaults UI label "fade-in/out on note trigger":
-        # dims the clip between notes and shows full brightness during notes.
+        # ── 5. Clip fade (note-triggered brightness boost) ───────────────────
+        # "Fade-in/out on note trigger" effect:
+        #   1. Single fade=t=in at chunk start (smooth opening)
+        #   2. Subtle brightness BOOST during note-active windows so clips
+        #      "pop" when notes play. Clips stay at normal brightness between
+        #      notes — never dimmed/dark.
         #
-        # Implementation:
-        #   1. Single fade=t=in at chunk start (smooth opening fade-in)
-        #   2. eq=brightness=<dim> with enable='not(NOTE_WINDOWS)' to darken
-        #      between note onsets — the clip is visible (not black) but
-        #      noticeably dimmed, then pops to full brightness when a note
-        #      plays.
-        #
-        # NOTE: The previous chained-fade approach (fade=t=in:st=X for each
-        # onset) was fundamentally broken — each later fade blacks out all
-        # frames before its st, so only the last one matters.
+        # This avoids the old approach of dimming between notes which made
+        # clips with sparse notes appear too dark.
         if fade_enabled and fade_duration > 0:
             fd = max(fade_duration, 0.05)
             notes = cell_segment.get('notes', []) if cell_segment else []
@@ -6423,16 +6418,14 @@ class VideoComposer:
                 step = len(merged_w) / MAX_WINDOWS
                 merged_w = [merged_w[int(i * step)] for i in range(MAX_WINDOWS)]
 
-            # Step 1: Smooth fade-in from black at chunk start
             next_label = f'v_fade_{output_label[1:-1]}'
             if merged_w:
-                # Dim between notes using eq brightness gating
                 active_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged_w)
-                # eq brightness=-0.4 dims when NOT in any note window AND after
-                # the initial fade-in completes (avoids double-dark startup).
+                # Brightness boost during notes (+0.12) — visible pop without
+                # over-exposing.  Clip is at normal brightness between notes.
                 filter_parts.append(
                     f"{current}fade=t=in:st=0:d={fd:.3f},"
-                    f"eq=brightness=-0.4:enable='gte(t,{fd:.3f})*not({active_expr})'[{next_label}]"
+                    f"eq=brightness=0.12:enable='{active_expr}'[{next_label}]"
                 )
             else:
                 # No notes — just fade in at chunk start (legacy behavior)
