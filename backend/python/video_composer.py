@@ -3671,7 +3671,7 @@ class VideoComposer:
             if r.returncode == 0 and os.path.exists(silent_path):
                 logging.info(f"✅ Silent video: {os.path.getsize(silent_path):,} bytes")
                 return str(silent_path)
-            logging.error(f"❌ Audio strip failed: {r.stderr[-200:]}")
+            logging.error(f"❌ Audio strip failed: {r.stderr[-1500:]}")
             return None
         except Exception as e:
             logging.error(f"❌ _build_silent_video: {e}")
@@ -3704,20 +3704,40 @@ class VideoComposer:
             if r.returncode == 0 and os.path.exists(output_path):
                 logging.info(f"✅ Mux complete: {os.path.getsize(output_path):,} bytes")
                 return str(output_path)
-            logging.error(f"❌ Mux failed: {r.stderr[-300:]}")
+            logging.error(f"❌ Mux failed: {r.stderr[-1500:]}")
             return None
         except Exception as e:
             logging.error(f"❌ _mux_video_audio: {e}")
             return None
 
-    def _compress_final_output(self, input_path: str, output_path: str) -> 'str | None':
+    def _compress_final_output(self, input_path: str, output_path: str,
+                                total_duration: 'float | None' = None) -> 'str | None':
         """
         Final re-encode pass: compress the muxed output with GPU acceleration
         when available, falling back to CPU (libx264) on encoder failure.
-        Intro card overlay is handled separately by _apply_text_overlays_to_video.
+
+        When ``total_duration`` is provided AND any text overlay (intro card /
+        title / tagline / watermark) is enabled, the overlay drawtext chain is
+        applied IN THIS SAME PASS — eliminating a third re-encode (was previously:
+        chunk-encode → mux copy → compress → overlay re-encode = 3 video encodes).
+
         Always writes the result to output_path (moves input_path if all encoders fail).
         """
         tmp = output_path + '.tmp_compress.mp4'
+        # Build overlay chain ONCE so we can reuse it across encoder retries.
+        overlay_chain = (
+            self._build_overlay_filter_chain(total_duration)
+            if total_duration is not None else None
+        )
+        fc_script_path = None
+        if overlay_chain:
+            try:
+                fd, fc_script_path = tempfile.mkstemp(prefix='ats_finalize_', suffix='.txt')
+                with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                    fh.write(overlay_chain)
+            except Exception:
+                fc_script_path = None  # fall back to inline -filter_complex below
+
         try:
             enc = self._get_encoding_settings()
             use_nvenc = '-c:v' in enc and enc[enc.index('-c:v') + 1] == 'h264_nvenc'
@@ -3727,20 +3747,30 @@ class VideoComposer:
                     video_enc = ['-c:v', 'h264_nvenc', '-preset', 'p5', '-b:v', '2M', '-maxrate', '4M']
                 else:
                     video_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '28']
-                return [
-                    'ffmpeg', '-y', '-i', input_path,
+                cmd = ['ffmpeg', '-y', '-i', input_path]
+                if overlay_chain:
+                    if fc_script_path:
+                        cmd += ['-filter_complex_script', fc_script_path]
+                    else:
+                        cmd += ['-filter_complex', overlay_chain]
+                    cmd += ['-map', '[text_out]', '-map', '0:a?']
+                cmd += [
                     *video_enc,
                     '-c:a', 'aac', '-b:a', '192k',
                     '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                    tmp,
                 ]
+                if total_duration is not None:
+                    cmd += ['-t', str(total_duration)]
+                cmd += [tmp]
+                return cmd
 
-            logging.info('🗜️  Final compression pass (CRF 28 / medium)…')
+            label = 'Final compression + overlays' if overlay_chain else 'Final compression'
+            logging.info(f'🗜️  {label} pass…')
             cmd = _build_cmd(use_nvenc)
             r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
 
             if r.returncode != 0 and use_nvenc:
-                logging.warning('⚠️  NVENC compression failed, retrying with CPU (libx264)…')
+                logging.warning('⚠️  NVENC pass failed, retrying with CPU (libx264)…')
                 if os.path.exists(tmp):
                     try: os.unlink(tmp)
                     except Exception: pass
@@ -3752,16 +3782,19 @@ class VideoComposer:
                 new_size = os.path.getsize(tmp)
                 os.replace(tmp, output_path)
                 logging.info(
-                    f'✅ Compression complete: {orig_size:,} → {new_size:,} bytes '
+                    f'✅ {label} complete: {orig_size:,} → {new_size:,} bytes '
                     f'({100*(1-new_size/orig_size):.0f}% reduction)'
                 )
                 return output_path
-            logging.warning(f'⚠️  Compression pass failed, keeping original: {r.stderr[-400:]}')
+            logging.warning(f'⚠️  {label} pass failed, keeping original: {r.stderr[-1500:]}')
         except Exception as e:
             logging.warning(f'⚠️  Compression pass error: {e}')
         finally:
             if os.path.exists(tmp):
                 try: os.unlink(tmp)
+                except Exception: pass
+            if fc_script_path:
+                try: os.unlink(fc_script_path)
                 except Exception: pass
 
         # All encoders failed — move the uncompressed mux to the expected output path
@@ -3806,8 +3839,12 @@ class VideoComposer:
             return None
 
         if not self.preview_mode:
-            logging.info("🗜️  Phase 4: final compression pass…")
-            result = self._compress_final_output(mux_path, str(self.output_path))
+            logging.info("🗜️  Phase 4: final compression + overlays pass…")
+            # Pass total_duration so overlays (intro card / title / tagline /
+            # watermark) are applied in the SAME ffmpeg run as compression —
+            # eliminates a third re-encode and avoids dropping back to libx264.
+            result = self._compress_final_output(mux_path, str(self.output_path),
+                                                  total_duration=total_duration)
             try: os.unlink(mux_path)
             except Exception: pass
             return result
@@ -3845,7 +3882,8 @@ class VideoComposer:
                     )
                     result = self._create_audio_first_composition(total_duration, total_chunks)
                     if result and os.path.exists(result):
-                        result = self._apply_text_overlays_inplace(str(result), total_duration)
+                        # Overlays already applied inside _compress_final_output
+                        # in the same ffmpeg run as compression — no third pass.
                         elapsed = time.time() - start_time
                         logging.info(f"🎉 Audio-first composition complete! {elapsed:.2f}s")
                         return result
@@ -6178,15 +6216,25 @@ class VideoComposer:
         return path
 
     def _escape_path_for_filter(self, path):
-        """Escape a filesystem path for use in an FFmpeg filter option value.
+        """Escape a filesystem path for use in an FFmpeg filter option value
+        (e.g. drawtext's fontfile=).
 
-        In FFmpeg filter strings, ':' is an option separator.  Single-quoted
-        wrappers ('...') do NOT protect a Windows drive colon in this FFmpeg
-        build — FFmpeg still splits on it.  The correct level-1 escape is a
-        backslash before the colon: C\:/path/to/file.txt (no outer quotes).
+        FFmpeg parses filter graphs in two passes:
+          1. The graph parser tokenises filter chains and unescapes ONE level
+             of backslashes inside option values.
+          2. The filter (drawtext) parser then sees the unescaped value.
+
+        For a Windows drive colon to survive both passes intact, the source
+        string must contain a DOUBLE-backslash before the colon (``C\\:/path``).
+        After pass 1 it becomes ``C\:`` (escaped colon), which pass 2 then
+        reads as the literal value ``C:``.
+
+        A single backslash (``C\:/path``) is silently consumed by pass 1,
+        leaving ``C:`` which pass 2 then mis-parses as ``option:value`` and
+        fails with ``No option name near '/Windows/Fonts/...''``.
         """
-        p = path.replace('\\', '/')   # normalise to forward slashes
-        p = p.replace(':', '\\:')     # escape drive-letter colon: C: → C\:
+        p = path.replace('\\', '/')      # normalise to forward slashes
+        p = p.replace(':', '\\\\:')      # escape drive-letter colon: C: → C\\:
         return p
 
     def _apply_cell_style_filters(self, filter_parts, input_label, output_label,
@@ -6276,16 +6324,32 @@ class VideoComposer:
             current = f'[{next_label}]'
 
         # ── 3. Beat flash ────────────────────────────────────────────────────
-        # Simple onset flash: bright burst at t=0 (chunk/clip start = note onset).
-        # For multi-note chunks, add additional flashes based on notes in segment.
+        # Onset flash: bright burst at clip start AND on each note onset.
+        # Adjacent flashes (<60ms apart) are merged so dense drum chunks
+        # (hi-hats, snare rolls) don't get silently truncated.  Cap at 60
+        # merged windows per chunk so the FFmpeg enable= expression stays
+        # well under parser limits (~1.5KB worst case).
         if beat_flash_enabled:
             notes = cell_segment.get('notes', []) if cell_segment else []
-            flash_windows = [(0.0, 0.1)]  # Always flash at clip start
-            for note in notes[:20]:  # Cap to 20 notes for expression length
+            FLASH_DUR = 0.10
+            MERGE_GAP = 0.06
+            MAX_WINDOWS = 60
+            raw = [(0.0, FLASH_DUR)]  # always flash at clip start
+            for note in notes:
                 t = float(note.get('chunk_time', note.get('time', 0)))
-                if t > 0.05:  # Skip if too close to the start flash
-                    flash_windows.append((round(t, 3), round(t + 0.1, 3)))
-            enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in flash_windows)
+                if t > 0.05:
+                    raw.append((round(t, 3), round(t + FLASH_DUR, 3)))
+            raw.sort(key=lambda w: w[0])
+            merged: list = []
+            for s, e in raw:
+                if merged and s - merged[-1][1] < MERGE_GAP:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            if len(merged) > MAX_WINDOWS:
+                logging.debug(f"[style] beat-flash: {len(merged)} → {MAX_WINDOWS} windows (truncated)")
+                merged = merged[:MAX_WINDOWS]
+            enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged)
             next_label = f'v_fl_{output_label[1:-1]}'
             filter_parts.append(
                 f"{current}eq=brightness={beat_flash_intensity:.2f}:enable='{enable_expr}'[{next_label}]"
@@ -6323,13 +6387,33 @@ class VideoComposer:
             )
             current = f'[{next_label}]'
 
-        # ── 5. Clip fade-in (applied before border so border is always visible) ──
+        # ── 5. Clip fade-in (per-note triggered, applied before border) ──────
+        # Matches the styleDefaults UI label "fade-in/out on note trigger":
+        # darkens the clip between notes and brightens at each onset.
+        # Implementation: chained fade=in filters at every note onset (luminance
+        # only — no alpha channel needed).  Without notes, falls back to the
+        # legacy single fade-in at chunk start.
         if fade_enabled and fade_duration > 0:
             fd = max(fade_duration, 0.001)
-            next_label = f'v_fade_{output_label[1:-1]}'
-            filter_parts.append(
-                f"{current}fade=t=in:st=0:d={fd:.3f}[{next_label}]"
+            notes = cell_segment.get('notes', []) if cell_segment else []
+            onsets = sorted({
+                round(max(0.0, float(n.get('chunk_time', n.get('time', 0)))), 3)
+                for n in notes
+            })
+            # Cap chain length so the filter graph stays parseable on dense chunks.
+            MAX_FADES = 30
+            if len(onsets) > MAX_FADES:
+                # Subsample evenly across the chunk.
+                step = len(onsets) / MAX_FADES
+                onsets = [onsets[int(i * step)] for i in range(MAX_FADES)]
+            # Always include t=0 so the clip fades in at chunk start.
+            if not onsets or onsets[0] > 0.01:
+                onsets = [0.0] + onsets
+            chain = ','.join(
+                f"fade=t=in:st={t:.3f}:d={fd:.3f}" for t in onsets
             )
+            next_label = f'v_fade_{output_label[1:-1]}'
+            filter_parts.append(f"{current}{chain}[{next_label}]")
             current = f'[{next_label}]'
 
         # ── 6. Border ────────────────────────────────────────────────────────
@@ -6504,34 +6588,26 @@ class VideoComposer:
 
         return current_label, audio_label
 
-    def _apply_text_overlays_to_video(self, input_path: str, output_path: str,
-                                       total_duration: float) -> 'str | None':
-        """Post-processing pass: apply intro card, title, tagline, and watermark
-        drawtext overlays to the full composed video in one FFmpeg pass.
+    def _build_overlay_filter_chain(self, total_duration: float) -> 'str | None':
+        """Build the filter_complex chain for intro card / title / tagline /
+        watermark text overlays.  Returns the chain string (ending in
+        '[text_out]') or None if no overlays are enabled.
 
-        Must run AFTER chunk concatenation so alpha/enable expressions reference
-        global video time (not per-chunk time which resets to 0 at every boundary).
-        Returns output_path on success, None on failure.
+        Extracted from _apply_text_overlays_to_video so the same chain can be
+        reused by the combined compress+overlay finalization pass.
         """
         cs = getattr(self, 'composition_style', {}) or {}
         has_title     = bool(cs.get('titleEnabled')     and cs.get('titleText',     '').strip())
         has_tagline   = bool(cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip())
         has_watermark = bool(cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip())
         has_intro     = bool(cs.get('introCardEnabled'))
-
         if not (has_title or has_tagline or has_watermark or has_intro):
-            import shutil as _sh
-            _sh.copy2(input_path, output_path)
-            return output_path
+            return None
 
         filter_parts: list = []
         current_label = '0:v'
 
         def _esc(t: str) -> str:
-            """Escape text for FFmpeg drawtext text= in filter_complex.
-            Order matters: escape backslash first, then colon (option separator),
-            percent (strftime trigger), and replace apostrophe with a Unicode
-            curly quote that FFmpeg never treats as a quoting character."""
             return (t or '').replace('\r', '').replace('\n', ' ') \
                             .replace('\\', '\\\\') \
                             .replace(':', '\\:') \
@@ -6569,7 +6645,6 @@ class VideoComposer:
                 f'+max(0,1-(t-{fade_out})/0.3)*lt(t,{d})'
                 if animated else '1'
             )
-            # Solid colour background overlay for the intro duration
             nxt = f'v_to_{len(filter_parts)}'
             filter_parts.append(
                 f"[{current_label}]drawbox=x=0:y=0:w=iw:h=ih"
@@ -6644,7 +6719,26 @@ class VideoComposer:
                          font_key=cs.get('watermarkFont', 'default'))
 
         filter_parts.append(f"[{current_label}]null[text_out]")
-        fc_str = ';'.join(filter_parts)
+        return ';'.join(filter_parts)
+
+    def _apply_text_overlays_to_video(self, input_path: str, output_path: str,
+                                       total_duration: float) -> 'str | None':
+        """Post-processing pass: apply intro card, title, tagline, and watermark
+        drawtext overlays to the full composed video in one FFmpeg pass.
+
+        Must run AFTER chunk concatenation so alpha/enable expressions reference
+        global video time (not per-chunk time which resets to 0 at every boundary).
+
+        Uses GPU encoding when available so the overlay pass doesn't undo the
+        prior compression's quality settings (was previously hardcoded to libx264
+        CRF 18, which on its own bloated outputs ~3-4x).
+        Returns output_path on success, None on failure.
+        """
+        fc_str = self._build_overlay_filter_chain(total_duration)
+        if fc_str is None:
+            import shutil as _sh
+            _sh.copy2(input_path, output_path)
+            return output_path
 
         fc_script_path = None
         try:
@@ -6655,11 +6749,16 @@ class VideoComposer:
         except Exception:
             fc_arg = ['-filter_complex', fc_str]
 
+        # Match the encoder used elsewhere in the pipeline (NVENC if available).
+        # Adding pix_fmt + faststart so the overlay pass produces a web-playable
+        # file (previously could leave non-yuv420p / non-faststart output).
+        enc = self._get_encoding_settings()
         cmd = [
             'ffmpeg', '-y', '-i', input_path,
             *fc_arg,
             '-map', '[text_out]', '-map', '0:a?',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+            *enc,
+            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
             '-c:a', 'copy',
             '-t', str(total_duration),
             output_path,
@@ -6675,7 +6774,7 @@ class VideoComposer:
                 f"✅ Text overlays applied to full video: {os.path.getsize(output_path):,} bytes"
             )
             return output_path
-        logging.error(f"❌ Text overlay pass failed: {result.stderr[-400:]}")
+        logging.error(f"❌ Text overlay pass failed: {result.stderr[-1500:]}")
         return None
 
     def _apply_text_overlays_inplace(self, path: str, total_duration: float) -> str:
