@@ -30,7 +30,7 @@ spawn('python', ['backend/python/video_composer.py', ...])
 - Large payloads (1GB limit): [`backend/server.js`](backend/server.js) sets `express.json({ limit: '1000mb' })`
 - Python receives JSON via stdin, returns progress via stdout (`PROGRESS:XX`)
 - Frontend polls `/api/compose/status/:jobId` for async job updates
-- **Authentication:** Currently **NO** authentication middleware. CORS is restricted to `localhost:5173`. User auth is planned for future releases.
+- **Authentication:** JWT-based auth is fully implemented. `backend/middleware/auth.js` exports `authenticateToken` (reads `Authorization: Bearer <token>`). `backend/routes/authRoutes.js` + `backend/controllers/authController.js` handle login/register. All composition and project routes require auth. Frontend stores JWT in `localStorage` under `auth_token`. **CORS** is restricted to origins listed in the `ALLOWED_ORIGINS` env var (default: `http://localhost:5173`).
 
 ### Async Job Queue & Caching
 
