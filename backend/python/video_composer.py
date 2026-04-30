@@ -1,5 +1,5 @@
 import os
-import re 
+import re
 import gc
 import threading
 import subprocess
@@ -10,16 +10,19 @@ import os.path
 import math
 import shutil
 import tempfile
-import cProfile
-import pstats
-import threading
-import asyncio
 import json
 import time
+import mmap
+import weakref
 import numpy as np
 import torch
 from pathlib import Path
 from threading import RLock
+from contextlib import contextmanager
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from cachetools import LRUCache
+from logging.handlers import RotatingFileHandler
 
 # Optional audio analysis
 try:
@@ -30,83 +33,49 @@ except ImportError:
     AUBIO_AVAILABLE = False
     logging.warning("aubio not available, some audio analysis features disabled")
 
-import syncio
-from pstats import SortKey
-
-# Optional tqdm for progress bars
+# Optional tqdm with graceful fallback
 try:
     from tqdm import tqdm
     TQDM_AVAILABLE = True
 except ImportError:
-    # Fallback tqdm implementation
-    class tqdm:
+    class tqdm:  # noqa: N801
         def __init__(self, iterable=None, total=None, **kwargs):
             self.iterable = iterable
             self.total = total
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def __iter__(self):
-            return iter(self.iterable) if self.iterable else iter([])
-        def update(self, n=1):
-            pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def __iter__(self): return iter(self.iterable) if self.iterable else iter([])
+        def update(self, n=1): pass
+        def set_postfix(self, **kwargs): pass
     TQDM_AVAILABLE = False
     logging.warning("tqdm not available, progress bars disabled")
 
-import time
-from contextlib import contextmanager
-from cachetools import LRUCache
-
-# Third-party imports
-import numpy as np
-import torch
-
 from moviepy import (
     VideoFileClip,
-    clips_array,
     CompositeVideoClip,
     ColorClip,
-    concatenate_videoclips
+    concatenate_videoclips,
 )
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
-
-import weakref
-
-from contextlib import contextmanager
 
 try:
     from utils import normalize_instrument_name, midi_to_note
 except ImportError:
-    # Fallback implementation
     def normalize_instrument_name(name):
-        """Match frontend's normalizeInstrumentName"""
+        """Match frontend's normalizeInstrumentName."""
         return name.lower().replace(' ', '_')
-    
+
     def midi_to_note(midi_num):
-        """Convert MIDI note number to note name"""
+        """Convert MIDI note number to note name."""
         notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-        note_name = notes[midi_num % 12]
-        octave = (midi_num // 12) - 1
-        return f"{note_name}{octave}"
-from drum_utils import (
-    DRUM_NOTES,
-    # process_drum_track,
-    # get_drum_groups,
-    # get_drum_name,
-    is_drum_kit
-)
+        return f"{notes[midi_num % 12]}{(midi_num // 12) - 1}"
+
+from drum_utils import DRUM_NOTES, is_drum_kit
 
 from processing_utils import encoder_queue, GPUManager
 
-# Import GPU acceleration functions
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
-# Removed unresolved import; GPU encode is imported lazily from utils.ffmpeg_gpu where used
 
-# Import GPU pipeline processor if available
 try:
     from gpu_pipeline import GPUPipelineProcessor
 except ImportError:
@@ -117,16 +86,18 @@ from video_utils import run_ffmpeg_command, encode_video, validate_video
 from path_registry import PathRegistry
 from optimized_autotune_cache import OptimizedAutotuneCache as _RealOptimizedAutotuneCache
 
-import mmap
-# from contextlib import ExitStack
-
-from tqdm import tqdm
-
-from logging.handlers import RotatingFileHandler
+# ── Utility classes / helpers (see composer_utils.py) ─────────────────────────
+from composer_utils import (
+    GPUStreamManager,
+    gpu_subprocess_run,
+    ClipPool,
+    ClipManager,
+    VideoComposerConfig,
+    get_system_metrics,
+)
 
 # Log to an absolute path in the backend/ directory (next to this file's parent)
-_LOG_FILE = os.path.join(os.path.dirname(__file__), '..', 'video_processing.log')
-_LOG_FILE = os.path.abspath(_LOG_FILE)
+_LOG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'video_processing.log'))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,276 +120,11 @@ for handler in logging.getLogger().handlers:
             except:
                 pass
 
-@contextmanager
-def timing_block(name):
-    """Context manager to measure execution time"""
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        duration = time.perf_counter() - start
-        logging.info(f"Operation [{name}] took {duration:.3f} seconds")
-
-def get_system_metrics():
-    """Get system performance metrics"""
-    try:
-        import psutil
-        return {
-            'cpu_percent': psutil.cpu_percent(),
-            'memory_percent': psutil.virtual_memory().percent,
-            'disk_percent': psutil.disk_usage('/').percent if os.name != 'nt' else psutil.disk_usage('C:').percent
-        }
-    except ImportError:
-        return {'cpu_percent': 0, 'memory_percent': 0, 'disk_percent': 0}
-
 # Use the real OptimizedAutotuneCache from optimized_autotune_cache.py
 OptimizedAutotuneCache = _RealOptimizedAutotuneCache
 
-class GPUStreamManager:
-    def __init__(self, num_streams=4):
-        self.streams = [torch.cuda.Stream() for _ in range(num_streams)]
-        self.current_stream = 0
-        
-    def get_stream(self):
-        """Get next available stream"""
-        stream = self.streams[self.current_stream]
-        self.current_stream = (self.current_stream + 1) % len(self.streams)
-        return stream
-        
-    def synchronize_all(self):
-        """Wait for all streams to complete"""
-        for stream in self.streams:
-            torch.cuda.synchronize(stream.device)
 
-# def gpu_subprocess_run(cmd, **kwargs):
-#     """
-#     GPU-accelerated subprocess wrapper for ffmpeg commands
-#     Falls back to regular subprocess if GPU is not available
-#     """
-#     try:
-#         # Check if this is an ffmpeg command and GPU is available
-#         if cmd[0] == 'ffmpeg' and torch.cuda.is_available():
-#             # Special handling for concat commands - don't modify them
-#             if '-f' in cmd and 'concat' in cmd:
-#                 # Concat commands should not be modified - they copy streams
-#                 return subprocess.run(cmd, **kwargs)
-            
-#             # For complex filter commands, just add GPU encoding to the existing command
-#             if '-filter_complex' in cmd or any('xstack' in arg for arg in cmd):
-#                 # Complex filter detected - add GPU encoding to existing command
-#                 gpu_cmd = cmd.copy()
-                
-#                 # Find the output file (last .mp4 file in command)
-#                 output_file = None
-#                 for arg in reversed(cmd):
-#                     if arg.endswith('.mp4') and not arg.startswith('-'):
-#                         output_file = arg
-#                         break
-                
-#                 if output_file:
-#                     # Insert GPU encoding parameters before the output file
-#                     output_index = gpu_cmd.index(output_file)
-#                     gpu_params = ['-c:v', 'h264_nvenc', '-preset', 'fast', '-pix_fmt', 'yuv420p']
-                    
-#                     # Insert GPU parameters before output file
-#                     for i, param in enumerate(reversed(gpu_params)):
-#                         gpu_cmd.insert(output_index, param)
-                    
-#                     # Add hardware acceleration at the beginning
-#                     gpu_cmd.insert(1, '-hwaccel')
-#                     gpu_cmd.insert(2, 'cuda')
-                    
-#                     try:
-#                         result = subprocess.run(gpu_cmd, capture_output=True, text=True, check=True)
-#                         logging.info("✅ GPU encoding successful with complex filters")
-#                         return result
-#                     except subprocess.CalledProcessError as e:
-#                         logging.warning(f"GPU encoding failed with complex filters: {e.stderr}")
-#                         logging.warning("GPU encoding failed, falling back to CPU")
-#                         pass
-#             else:
-#                 # Simple command - try direct GPU encoding
-#                 input_path = None
-#                 output_path = None
-                
-#                 for i, arg in enumerate(cmd):
-#                     if arg == '-i' and i + 1 < len(cmd):
-#                         input_path = cmd[i + 1]
-#                     elif arg.endswith('.mp4') and not arg.startswith('-'):
-#                         output_path = arg
-                
-#                 if input_path and output_path:
-#                     # Use direct GPU encoding command
-#                     gpu_cmd = [
-#                         'ffmpeg', '-y',
-#                         '-hwaccel', 'cuda',
-#                         '-i', input_path,
-#                         '-c:v', 'h264_nvenc',
-#                         '-preset', 'fast',
-#                         '-crf', '23',
-#                         '-pix_fmt', 'yuv420p',
-#                         '-c:a', 'aac',
-#                         '-b:a', '192k',
-#                         output_path
-#                     ]
-                    
-#                     try:
-#                         result = subprocess.run(gpu_cmd, capture_output=True, text=True, check=True)
-#                         return result
-#                     except subprocess.CalledProcessError:
-#                         logging.warning("GPU encoding failed, falling back to CPU")
-#                         pass
-            
-#             # Fallback to regular subprocess if GPU fails
-#             return subprocess.run(cmd, **kwargs)
-#         else:
-#             # Fallback to regular subprocess
-#             return subprocess.run(cmd, **kwargs)
-#     except Exception as e:
-#         logging.warning(f"GPU subprocess failed: {e}, falling back to CPU")
-#         return subprocess.run(cmd, **kwargs)
-
-# Fix GPU processing for note-triggered videos
-
-
-
-def gpu_subprocess_run(cmd, **kwargs):
-    """
-    Enhanced GPU subprocess runner that handles note-triggered video creation
-    """
-    try:
-        # For note-triggered video creation, use standard CPU processing
-        # to avoid hwaccel issues with complex filters
-        if any('trim=' in str(arg) and 'overlay=' in str(arg) for arg in cmd):
-            # This is a complex filter for note triggering - use CPU processing
-            logging.info("Using CPU processing for note-triggered video creation")
-            return subprocess.run(cmd, **kwargs)
-        
-        # For other commands, check if GPU is available and use it
-        if cmd[0] == 'ffmpeg' and torch.cuda.is_available():
-            # Special handling for concat commands - don't modify them
-            if '-f' in cmd and 'concat' in cmd:
-                return subprocess.run(cmd, **kwargs)
-            
-            # For simple encoding commands, add GPU encoding
-            if '-c:v' not in cmd:
-                gpu_cmd = cmd.copy()
-                # Find output file and insert GPU encoding before it
-                for i, arg in enumerate(cmd):
-                    if arg.endswith('.mp4') and not arg.startswith('-'):
-                        # Insert GPU encoding parameters before output file
-                        gpu_cmd.insert(i, '-c:v')
-                        gpu_cmd.insert(i + 1, 'h264_nvenc')
-                        gpu_cmd.insert(i + 2, '-preset')
-                        gpu_cmd.insert(i + 3, 'fast')
-                        break
-                
-                try:
-                    result = subprocess.run(gpu_cmd, **kwargs)
-                    return result
-                except subprocess.CalledProcessError as e:
-                    logging.warning(f"GPU processing failed: {e}")
-                    # Fall back to CPU
-                    return subprocess.run(cmd, **kwargs)
-        
-        # Default to CPU processing
-        return subprocess.run(cmd, **kwargs)
-        
-    except Exception as e:
-        logging.error(f"GPU subprocess error: {e}")
-        return subprocess.run(cmd, **kwargs)
-
-class ClipPool:
-    def __init__(self, max_size=8):
-        self.semaphore = threading.BoundedSemaphore(max_size)
-        self.clips = weakref.WeakSet()
-    
-    @contextmanager
-    def acquire(self):
-        self.semaphore.acquire()
-        try:
-            clip = None
-            yield clip
-        finally:
-            if clip:
-                clip.close()
-            self.semaphore.release()
-
-
-class MMAPHandler:
-    def __init__(self):
-        self.mapped_files = {}
-        
-    def __enter__(self):
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
-        
-    def map_file(self, file_path):
-        if file_path not in self.mapped_files:
-            with open(file_path, 'rb') as f:
-                self.mapped_files[file_path] = mmap.mmap(
-                    f.fileno(), 0, access=mmap.ACCESS_READ)
-        return self.mapped_files[file_path]
-        
-    def cleanup(self):
-        for mmap_obj in self.mapped_files.values():
-            try:
-                mmap_obj.close()
-            except:
-                pass
-        self.mapped_files.clear()
-
-
-class ClipManager:
-    def __init__(self):
-        self.active_clips = weakref.WeakSet()
-        
-    @contextmanager
-    def managed_clip(self, clip):
-        try:
-            self.active_clips.add(clip)
-            yield clip
-        finally:
-            try:
-                clip.close()
-            except:
-                pass
-            self.active_clips.discard(clip)
-
-class ProgressTracker:
-    def __init__(self, total_notes):
-        self.progress_bar = tqdm(total=total_notes, 
-                               desc="Processing notes",
-                               unit="note")
-        self.completed = 0
-        self.failed = 0
-        
-    def update(self, success=True):
-        self.completed += 1
-        if not success:
-            self.failed += 1
-        self.progress_bar.update(1)
-        self.progress_bar.set_postfix({
-            "success_rate": f"{(self.completed-self.failed)/self.completed*100:.1f}%"
-        })
-
-    def close(self):
-        self.progress_bar.close()
-
-class VideoComposerConfig:
-    def __init__(self):
-        self.CHUNK_DURATION = 16
-        self.OVERLAP_DURATION = 1
-        self.CROSSFADE_DURATION = 0.5
-        self.MIN_VIDEO_DURATION = 1.0
-        self.DURATION = 1.0
-        self.VOLUME_MULTIPLIERS = {
-            'drums': 1.0,
-            'instruments': 1.0
-        }
-
+# ── Main compositor ────────────────────────────────────────────────────────────
 class VideoComposer:
 
     FRAME_RATE = 30
