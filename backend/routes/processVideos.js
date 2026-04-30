@@ -1,5 +1,6 @@
 import express from 'express';
 import multer from 'multer';
+import { EventEmitter } from 'events';
 import { runPythonProcessor, preprocessVideo } from '../js/pythonBridge.js';
 import fs from 'fs';
 import path from 'path';
@@ -25,9 +26,18 @@ const storage = multer.diskStorage({
   },
 });
 
-// ── Job store ──────────────────────────────────────────────────────────────
+// ── Job store & SSE emitter ────────────────────────────────────────────────
 // Keyed by jobId. Fields: status, progress, outputPath, error, createdAt, completedAt, userId, projectId
 const jobs = new Map();
+const jobEmitter = new EventEmitter();
+jobEmitter.setMaxListeners(200); // allow many concurrent SSE connections
+
+/** Atomic job update — also pushes to any open SSE streams for this job. */
+function updateJob(jobId, patch) {
+  const updated = { ...(jobs.get(jobId) || {}), ...patch };
+  jobs.set(jobId, updated);
+  jobEmitter.emit(`job:${jobId}`, updated);
+}
 // Never expire queued/processing jobs by age alone.
 const JOB_COMPLETED_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
@@ -143,11 +153,10 @@ const upload = multer({
 
 // ── Background composition job ─────────────────────────────────────────────
 async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
-  const updateJob = (patch) => jobs.set(jobId, { ...jobs.get(jobId), ...patch });
   const tempFiles = []; // paths to clean up on failure
 
   try {
-    updateJob({ status: 'processing', progress: 0 });
+    updateJob(jobId, { status: 'processing', progress: 0 });
 
     // ── 1. Parse MIDI data ────────────────────────────────────────────────
     const midiFile = files.find((f) => f.fieldname === 'midiData');
@@ -166,7 +175,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     const validationError = validateComposeInputs(midiData, videoFiles);
     if (validationError) throw new Error(validationError);
 
-    updateJob({ progress: 5 });
+    updateJob(jobId, { progress: 5 });
 
     // ── 2. Compute cell size ──────────────────────────────────────────────
     const gridArrangement = midiData.gridArrangement;
@@ -235,7 +244,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
       if (idx !== -1) tempFiles.splice(idx, 1);
 
       processedCount++;
-      updateJob({ progress: 5 + Math.round((processedCount / totalVideos) * 40) }); // 5→45%
+      updateJob(jobId, { progress: 5 + Math.round((processedCount / totalVideos) * 40) }); // 5→45%
     }
 
     // ── 4. Map MIDI notes to videos ───────────────────────────────────────
@@ -328,7 +337,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
       );
     }
 
-    updateJob({ progress: 50 });
+    updateJob(jobId, { progress: 50 });
 
     // ── 5. Build config & run Python ─────────────────────────────────────
     const trackVolumes = midiData.trackVolumes || {};
@@ -348,7 +357,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
 
     const result = await runPythonProcessor(configPath, {
       onProgress: (pct) =>
-        updateJob({ progress: 50 + Math.round(pct * 0.4) }), // 50→90%
+        updateJob(jobId, { progress: 50 + Math.round(pct * 0.4) }), // 50→90%
     });
 
     // Clean up config
@@ -369,7 +378,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
       throw new Error('Composed video file not found after processing');
     }
 
-    updateJob({
+    updateJob(jobId, {
       status: 'done',
       progress: 100,
       outputPath: permanentOutputPath,
@@ -378,7 +387,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     console.log(`[Job ${jobId}] ✅ Done: ${permanentOutputPath}`);
   } catch (err) {
     console.error(`[Job ${jobId}] ❌ Failed:`, err.message);
-    updateJob({ status: 'failed', error: err.message, completedAt: Date.now() });
+    updateJob(jobId, { status: 'failed', error: err.message, completedAt: Date.now() });
   } finally {
     // Clean up any remaining temp files
     for (const f of tempFiles) {
@@ -440,11 +449,55 @@ router.post(
       console.error(`[Job ${jobId}] Unhandled error:`, err);
       const job = jobs.get(jobId);
       if (job && job.status !== 'failed') {
-        jobs.set(jobId, { ...job, status: 'failed', error: err.message, completedAt: Date.now() });
+        updateJob(jobId, { status: 'failed', error: err.message, completedAt: Date.now() });
       }
     });
   },
 );
+
+// GET /progress/:jobId — SSE stream for real-time job progress (auth required)
+router.get('/progress/:jobId', authenticateToken, (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.userId && job.userId !== req.user.id)
+    return res.status(403).json({ error: 'Access denied' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering
+  res.flushHeaders();
+
+  const send = (evt, data) => res.write(`event: ${evt}\ndata: ${JSON.stringify(data)}\n\n`);
+
+  // Send current state immediately
+  const current = jobs.get(jobId);
+  send('progress', { status: current.status, progress: current.progress || 0 });
+  if (current.status === 'done' || current.status === 'failed') {
+    res.end();
+    return;
+  }
+
+  const onUpdate = (j) => {
+    send('progress', { status: j.status, progress: j.progress || 0, error: j.error || null });
+    if (j.status === 'done' || j.status === 'failed') cleanup();
+  };
+
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000);
+
+  function cleanup() {
+    clearInterval(heartbeat);
+    jobEmitter.off(`job:${jobId}`, onUpdate);
+    res.end();
+  }
+
+  jobEmitter.on(`job:${jobId}`, onUpdate);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    jobEmitter.off(`job:${jobId}`, onUpdate);
+  });
+});
 
 // GET /status/:jobId — poll for job progress (auth required)
 router.get('/status/:jobId', authenticateToken, (req, res) => {

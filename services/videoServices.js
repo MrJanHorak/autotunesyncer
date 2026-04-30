@@ -305,3 +305,99 @@ export const pollCompositionJob = (jobId, onProgress) => {
     setTimeout(poll, POLL_INTERVAL_MS);
   });
 };
+
+/**
+ * Download the finished composition blob.
+ * @param {string} jobId
+ * @returns {Promise<Blob>}
+ */
+function downloadCompositionResult(jobId) {
+  return fetch(
+    withProjectId(`${API_BASE_URL}/process-videos/result/${jobId}`),
+    { headers: authFetchHeaders() },
+  ).then((r) => {
+    if (!r.ok) throw new Error('Failed to download composition result');
+    return r.blob();
+  });
+}
+
+/**
+ * Track a composition job via SSE (Server-Sent Events), falling back to polling
+ * if the browser or network doesn't support streaming.
+ *
+ * Uses fetch + ReadableStream so the Authorization header is preserved.
+ *
+ * @param {string} jobId
+ * @param {function} [onProgress] - called with progress 0-100
+ * @param {AbortSignal} [signal] - optional AbortSignal for cancellation
+ * @returns {Promise<Blob>}
+ */
+export const trackCompositionJob = (jobId, onProgress, signal) => {
+  return new Promise((resolve, reject) => {
+    // Fall back to polling if the browser lacks streaming support
+    if (!window.ReadableStream || !window.TextDecoderStream) {
+      return pollCompositionJob(jobId, onProgress).then(resolve).catch(reject);
+    }
+
+    let settled = false;
+
+    const settle = (fn, ...args) => {
+      if (settled) return;
+      settled = true;
+      fn(...args);
+    };
+
+    const url = withProjectId(`${API_BASE_URL}/process-videos/progress/${jobId}`);
+
+    fetch(url, { headers: authFetchHeaders(), signal })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`SSE endpoint error: ${r.statusText}`);
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+
+          // Process all complete SSE messages (delimited by double newline)
+          let boundary;
+          while ((boundary = buf.indexOf('\n\n')) !== -1) {
+            const chunk = buf.slice(0, boundary);
+            buf = buf.slice(boundary + 2);
+            let evt = '';
+            let data = '';
+            for (const line of chunk.split('\n')) {
+              if (line.startsWith('event: ')) evt = line.slice(7).trim();
+              else if (line.startsWith('data: ')) data = line.slice(6);
+            }
+            if (evt !== 'progress' || !data) continue;
+            try {
+              const { status, progress: pct, error } = JSON.parse(data);
+              if (onProgress && typeof pct === 'number') onProgress(pct);
+              if (status === 'done') {
+                settle(
+                  (res) => downloadCompositionResult(jobId).then(res).catch(reject),
+                  resolve,
+                );
+                return; // stop reading
+              } else if (status === 'failed') {
+                settle(reject, new Error(error || 'Composition failed'));
+                return;
+              }
+            } catch { /* malformed JSON — skip */ }
+          }
+        }
+      })
+      .catch((err) => {
+        if (settled || signal?.aborted) return;
+        // SSE failed — fall back to polling
+        console.warn('[videoServices] SSE unavailable, falling back to poll:', err.message);
+        pollCompositionJob(jobId, onProgress).then(
+          (blob) => settle(resolve, blob),
+          (e) => settle(reject, e),
+        );
+      });
+  });
+};

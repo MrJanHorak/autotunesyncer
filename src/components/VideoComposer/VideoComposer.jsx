@@ -1,6 +1,6 @@
 /* eslint-disable react/prop-types */
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { startCompositionJob, pollCompositionJob } from '../../../services/videoServices.js';
+import { startCompositionJob, pollCompositionJob, trackCompositionJob } from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 
 const VideoComposer = ({
@@ -24,6 +24,7 @@ const VideoComposer = ({
   const [showShareModal, setShowShareModal] = useState(false);
   const [error, setError] = useState(null);
   const timerRef = useRef(null);
+  const abortRef = useRef(null);
 
   const validationErrors = useMemo(() => {
     const errors = [];
@@ -181,9 +182,11 @@ const VideoComposer = ({
       });
       console.log('Composition job started:', jobId);
 
-      const blob = await pollCompositionJob(jobId, (pct) => {
+      const abort = new AbortController();
+      abortRef.current = abort;
+      const blob = await trackCompositionJob(jobId, (pct) => {
         setRenderProgress(pct);
-      });
+      }, abort.signal);
 
       setComposedBlob(blob);
       const url = URL.createObjectURL(blob);
@@ -199,10 +202,11 @@ const VideoComposer = ({
     }
   };
 
-  // Cleanup timer and URL on unmount
+  // Cleanup timer, SSE stream, and URL on unmount
   useEffect(() => {
     return () => {
       clearInterval(timerRef.current);
+      abortRef.current?.abort();
       if (composedVideoUrl) URL.revokeObjectURL(composedVideoUrl);
     };
   }, [composedVideoUrl]);
