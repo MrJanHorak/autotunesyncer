@@ -624,8 +624,8 @@ def process_audio_predetected(audio, sr, detected_pitch, target_midi_note=60,
     return stereo_output, dummy_pitch, dummy_pitch
 
 
+def main():
     # Set proper encoding for Windows
-    import sys
     import io
     
     # Force UTF-8 encoding for stdout/stderr
