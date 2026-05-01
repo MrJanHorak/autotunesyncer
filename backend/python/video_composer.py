@@ -270,14 +270,24 @@ class VideoComposer:
             self._duration_cache: dict = {}
             self._duration_cache_lock = threading.RLock()
             # Global FFmpeg concurrency cap — shared by stem sub-batches AND video chunks.
-            # Caps simultaneous filter-complex FFmpeg processes to half the CPU count so
-            # nested parallelism (outer stem workers + inner sub-batch workers) never
-            # over-subscribes the machine.
+            # Caps simultaneous filter-complex FFmpeg processes to prevent GPU memory exhaustion.
+            # For GPU encoding: allow more streams (GPU can handle 32-64+ concurrent h264_nvenc).
+            # For CPU encoding: limit to half the CPU count for stability.
             _cpu = os.cpu_count() or 4
             self._ffmpeg_semaphore = threading.Semaphore(max(4, _cpu // 2))
-            self.max_concurrent_streams = int(os.environ.get('ATS_MAX_CONCURRENT_STREAMS', '16'))
+            # Default: 32 streams (suitable for GPU; will be limited by CPU fallback if needed)
+            self.max_concurrent_streams = int(os.environ.get('ATS_MAX_CONCURRENT_STREAMS', '32'))
             self.ffmpeg_hwaccel = self._detect_ffmpeg_hwaccel()
-            logging.info(f"Selected FFmpeg hwaccel: {self.ffmpeg_hwaccel or 'none'}")
+            
+            # CRITICAL: Log GPU status explicitly
+            if self.ffmpeg_hwaccel == 'cuda':
+                logging.info(f"✅ GPU ACCELERATION ENABLED: h264_nvenc (NVIDIA CUDA)")
+            elif self.ffmpeg_hwaccel == 'videotoolbox':
+                logging.info(f"✅ GPU ACCELERATION ENABLED: h264_videotoolbox (Apple)")
+            else:
+                logging.warning(f"⚠️ GPU NOT AVAILABLE: Falling back to CPU encoding (libx264) — composition will be VERY SLOW (~40-50x slower)")
+                logging.warning(f"   Please check FFmpeg installation: run 'ffmpeg -hwaccels' to verify CUDA support")
+            
             # Initialize path registry - use singleton instance
             self.path_registry = PathRegistry.get_instance()
             
@@ -304,14 +314,14 @@ class VideoComposer:
                     torch.cuda.set_device(device)
                     # Create empty tensor to initialize CUDA
                     _ = torch.zeros(1, device=device)
-                    logging.info(f"CUDA initialized successfully: {torch.cuda.get_device_name(0)}")
+                    logging.info(f"✅ CUDA initialized successfully: {torch.cuda.get_device_name(0)}")
                     
                     # Set optimal settings for video processing
                     torch.backends.cudnn.benchmark = True
                     torch.backends.cuda.matmul.allow_tf32 = True
                     torch.backends.cudnn.allow_tf32 = True
                 else:
-                    logging.warning("CUDA not available, using CPU processing")
+                    logging.warning("⚠️ CUDA not available in PyTorch, using CPU processing")
             except Exception as e:
                 self.has_cuda = False
                 logging.error(f"Error initializing CUDA: {e}")
@@ -349,15 +359,29 @@ class VideoComposer:
         config = self.render_config
 
         if self.ffmpeg_hwaccel == 'cuda':
-            # Production preset is env-configurable; preview always uses p1 (fastest).
-            _prod_preset = os.environ.get('ATS_NVENC_PRESET', 'fast')
-            return [
+            # NVENC settings with safer, more compatible options
+            # Preset: p1 (fastest) to p7 (highest quality) — use p2-p4 for balanced speed/quality
+            _prod_preset = os.environ.get('ATS_NVENC_PRESET', 'p2')
+            _prod_bitrate = os.environ.get('ATS_NVENC_BITRATE', '')
+            _prod_maxrate = os.environ.get('ATS_NVENC_MAXRATE', '')
+
+            # Quality/CRF: For NVENC, map libx264 CRF (0-51) to NVENC CQ (0-51)
+            # libx264 crf='26' -> NVENC cq=26 (lossy but reasonable)
+            crf_val = int(config['crf']) if isinstance(config['crf'], str) else config['crf']
+            crf_val = max(0, min(51, crf_val))  # Clamp to valid range
+
+            args = [
                 '-c:v', 'h264_nvenc',
                 '-preset', 'p1' if self.preview_mode else _prod_preset,
-                '-rc', 'vbr',
-                '-cq', config['crf'],
-                '-b:v', config['video_bitrate'],
+                '-rc', 'vbr',  # Variable bitrate for better quality
+                '-cq', str(crf_val),  # Quality level
             ]
+            if not self.preview_mode:
+                if _prod_bitrate:
+                    args += ['-b:v', _prod_bitrate]
+                if _prod_maxrate:
+                    args += ['-maxrate', _prod_maxrate]
+            return args
         if self.ffmpeg_hwaccel == 'videotoolbox':
             return [
                 '-c:v', 'h264_videotoolbox',
@@ -384,13 +408,73 @@ class VideoComposer:
             lower = output.lower()
 
             if 'cuda' in lower:
-                return 'cuda'
+                # CUDA hwaccel is available in FFmpeg, but encoder might not work at runtime
+                # Verify the encoder is actually functional before returning
+                if self._verify_gpu_encoder_works():
+                    return 'cuda'
+                else:
+                    logging.warning("❌ CUDA detected but h264_nvenc encoder verification FAILED")
+                    return None
             if 'videotoolbox' in lower:
                 return 'videotoolbox'
             return None
         except Exception as e:
             logging.warning(f"Failed to detect FFmpeg hwaccels: {e}")
             return None
+
+    def _verify_gpu_encoder_works(self):
+        """
+        Quick test: can h264_nvenc actually encode?
+        Creates a 1-frame test video to verify GPU encoder works before composition starts.
+        """
+        try:
+            import tempfile
+            import os
+            
+            # Create a temporary test output file
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as f:
+                test_output = f.name
+            
+            try:
+                # Quick test: 1 second of black video encoded with h264_nvenc
+                test_cmd = [
+                    'ffmpeg', '-y', '-hide_banner', '-loglevel', 'error',
+                    '-f', 'lavfi', '-i', 'color=black:s=320x240:r=30:d=0.5',
+                    '-c:v', 'h264_nvenc',
+                    '-preset', 'p1',
+                    '-t', '0.5',
+                    test_output
+                ]
+                
+                result = subprocess.run(
+                    test_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10
+                )
+                
+                success = result.returncode == 0 and os.path.exists(test_output) and os.path.getsize(test_output) > 100
+                
+                if success:
+                    logging.info("✅ h264_nvenc encoder verification PASSED")
+                else:
+                    logging.warning(f"❌ h264_nvenc encoder test failed: {result.stderr[-200:] if result.stderr else 'no output'}")
+                
+                return success
+            finally:
+                # Clean up test file
+                if os.path.exists(test_output):
+                    try:
+                        os.unlink(test_output)
+                    except Exception:
+                        pass
+        except subprocess.TimeoutExpired:
+            logging.warning("❌ h264_nvenc encoder test timed out (GPU may be busy or driver issue)")
+            return False
+        except Exception as e:
+            logging.warning(f"❌ h264_nvenc encoder test error: {e}")
+            return False
 
     def _get_ffmpeg_decode_args(self):
         """Return decode args for ffmpeg -i based on selected hwaccel."""
@@ -2601,7 +2685,9 @@ class VideoComposer:
             logging.error(f"❌ Stem mix failed: {r.stderr[-500:]}")
             return None
 
-        mastered_path = audio_dir / "mastered_audio.aac"
+        # Use an MP4/M4A container for stable/accurate duration metadata.
+        # Raw ADTS AAC can report wildly incorrect duration via ffprobe.
+        mastered_path = audio_dir / "mastered_audio.m4a"
         return self._normalize_audio_file(str(unmastered_path), str(mastered_path), total_duration)
 
     def _build_silent_video(self, total_duration: float, total_chunks: int,
@@ -3493,14 +3579,21 @@ class VideoComposer:
     def _calculate_total_duration(self):
         """FIXED: Calculate total duration correctly for any MIDI file"""
         max_end_time = 0
+        culprit_note = None
         
         # Check all tracks (both regular and drum)
         all_tracks = self.regular_tracks + self.drum_tracks
         
-        for track in all_tracks:
-            for note in track.get('notes', []):
-                note_end = float(note.get('time', 0)) + float(note.get('duration', 1))
-                max_end_time = max(max_end_time, note_end)
+        for track_idx, track in enumerate(all_tracks):
+            track_name = track.get('instrument', {}).get('name', f'track_{track_idx}')
+            for note_idx, note in enumerate(track.get('notes', [])):
+                note_time = float(note.get('time', 0))
+                note_duration = float(note.get('duration', 1))
+                note_end = note_time + note_duration
+                
+                if note_end > max_end_time:
+                    max_end_time = note_end
+                    culprit_note = (track_name, note_idx, note_time, note_duration, note_end)
         
         # Add reasonable buffer (not hardcoded to specific song)
         buffer_time = min(3.0, max_end_time * 0.1)  # 10% buffer, max 3 seconds
@@ -3508,8 +3601,31 @@ class VideoComposer:
         
         logging.info(f"📏 Duration calculation for ANY MIDI file:")
         logging.info(f"   Max note end time: {max_end_time:.2f}s")
+        if culprit_note:
+            track, idx, t, dur, end = culprit_note
+            # Only flag truly abnormal single-note lengths. End-time position alone
+            # is expected to be large in long songs and is not a corruption signal.
+            if dur > 120.0:
+                logging.warning(f"   ⚠️ SUSPICIOUSLY LONG NOTE: Track '{track}' note #{idx}")
+                logging.warning(f"      Start: {t:.2f}s, Duration: {dur:.2f}s, Ends at: {end:.2f}s")
+                logging.warning(f"      This may indicate MIDI timing corruption!")
+            else:
+                logging.info(f"   Latest note: Track '{track}' ends at {end:.2f}s")
         logging.info(f"   Dynamic buffer: {buffer_time:.2f}s") 
         logging.info(f"   Total duration: {total_duration:.2f}s")
+        
+        # Safety check: if duration is suspiciously long, cap it at a reasonable max
+        # (most songs are < 10 minutes; flag anything > 20 minutes as potential corruption)
+        MAX_REASONABLE_DURATION = 1200.0  # 20 minutes
+        if total_duration > MAX_REASONABLE_DURATION:
+            logging.error(f"❌ MIDI duration {total_duration:.2f}s exceeds max reasonable ({MAX_REASONABLE_DURATION}s)")
+            if culprit_note:
+                track, idx, t, dur, end = culprit_note
+                logging.error(f"   Caused by: Track '{track}' note #{idx} ending at {end:.2f}s")
+                logging.error(f"   This is likely a MIDI import/parsing error.")
+                logging.error(f"   SOLUTION: Check the MIDI file — ensure it was uploaded correctly.")
+            # For now, continue with the corrupted duration (user should fix their MIDI)
+            # In future, could auto-cap or reject the composition
         
         return total_duration
     def _create_simplified_chunk(self, chunk_idx, start_time, end_time, chunks_dir):
@@ -4991,8 +5107,10 @@ class VideoComposer:
             force_cpu_encode = cells_with_content > self.max_concurrent_streams
             if force_cpu_encode:
                 logging.warning(
-                    f"High stream pressure ({cells_with_content} active cells) exceeds ATS_MAX_CONCURRENT_STREAMS={self.max_concurrent_streams}. "
-                    "Falling back to CPU encode for stability."
+                    f"⚠️ HIGH STREAM PRESSURE: {cells_with_content} active cells > {self.max_concurrent_streams} max allowed. "
+                    f"Falling back to CPU encode for stability. "
+                    f"To use GPU for all streams, increase ATS_MAX_CONCURRENT_STREAMS env var. "
+                    f"(e.g., export ATS_MAX_CONCURRENT_STREAMS=64 or set in .env)"
                 )
 
             # Create the xstack and amix filters
@@ -5054,7 +5172,31 @@ class VideoComposer:
 
             logging.info(f"🚀 Executing FFmpeg grid composition...")
             logging.info(f"   Filter complex length: {len(fc_str)} characters")
+            logging.info(f"   Using codec: {encoding_args[1] if len(encoding_args) > 1 else 'unknown'}")
+            
             result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Check for GPU encoder failure and retry with CPU fallback
+            if (result.returncode != 0 and 
+                'h264_nvenc' in ' '.join(encoding_args) and 
+                any(err in result.stderr.lower() for err in ['unknown', 'error', 'not found', 'failed'])):
+                logging.warning(f"⚠️ GPU encoder (h264_nvenc) failed, attempting CPU fallback...")
+                logging.warning(f"   Error: {result.stderr[:300]}")
+                
+                # Rebuild command with CPU encoder
+                cpu_encoding_args = ['-c:v', 'libx264', '-preset', self.render_config['preset'], '-crf', self.render_config['crf']]
+                cmd_cpu = cmd[:-len(encoding_args) - 5]  # Remove old encoding args
+                cmd_cpu.extend([
+                    '-map', final_video_map, '-map', final_audio_map,
+                    *cpu_encoding_args,
+                    '-c:a', 'aac', '-b:a', self.render_config['audio_bitrate'],
+                    '-pix_fmt', 'yuv420p',
+                    '-t', str(duration), '-r', '30', str(output_path)
+                ])
+                
+                logging.info(f"🔄 Retrying with CPU encoder (libx264)...")
+                result = subprocess.run(cmd_cpu, capture_output=True, text=True)
+            
             # Cleanup temp files (style + preprocess)
             for tf in style_temp_files + preprocess_temp_files:
                 try: os.unlink(tf)

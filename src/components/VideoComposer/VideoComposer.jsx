@@ -1,6 +1,9 @@
 /* eslint-disable react/prop-types */
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { startCompositionJob, trackCompositionJob } from '../../../services/videoServices.js';
+import {
+  startCompositionJob,
+  trackCompositionJob,
+} from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 
 const VideoComposer = ({
@@ -34,6 +37,35 @@ const VideoComposer = ({
   const composedVideoUrlRef = useRef(null);
   // Preserved across finally so Retry knows which mode was last used.
   const lastModeRef = useRef(false);
+  const MIN_NOTE_DURATION_SECONDS = 1 / 120;
+
+  const getNormalizedNoteTime = (note) => {
+    const candidates = [note?.time, note?.start, note?.startTime];
+    for (const candidate of candidates) {
+      const value = Number(candidate);
+      if (Number.isFinite(value)) return value;
+    }
+    return NaN;
+  };
+
+  const getNormalizedNoteDuration = (note) => {
+    const direct = Number(note?.duration);
+    if (Number.isFinite(direct)) {
+      return direct > 0 ? direct : MIN_NOTE_DURATION_SECONDS;
+    }
+
+    const start = getNormalizedNoteTime(note);
+    const endCandidates = [note?.end, note?.endTime];
+    for (const candidate of endCandidates) {
+      const end = Number(candidate);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        const computed = end - start;
+        return computed > 0 ? computed : MIN_NOTE_DURATION_SECONDS;
+      }
+    }
+
+    return NaN;
+  };
 
   const validationErrors = useMemo(() => {
     const errors = [];
@@ -48,9 +80,9 @@ const VideoComposer = ({
       const hasInvalidNoteTiming = midiData.tracks.some((track) =>
         (track?.notes || []).some(
           (note) =>
-            !Number.isFinite(Number(note?.time)) ||
-            !Number.isFinite(Number(note?.duration)) ||
-            Number(note.duration) <= 0,
+            !Number.isFinite(getNormalizedNoteTime(note)) ||
+            !Number.isFinite(getNormalizedNoteDuration(note)) ||
+            getNormalizedNoteDuration(note) <= 0,
         ),
       );
 
@@ -142,9 +174,19 @@ const VideoComposer = ({
     try {
       const formData = new FormData();
 
+      const normalizedTracks = (midiData.tracks || []).map((track) => ({
+        ...track,
+        notes: (track?.notes || []).map((note) => ({
+          ...note,
+          time: getNormalizedNoteTime(note),
+          duration: getNormalizedNoteDuration(note),
+        })),
+      }));
+
       // Add MIDI data — substitute effective volumes so mute/solo is baked in
       const midiPayload = {
         ...midiData,
+        tracks: normalizedTracks,
         gridArrangement,
         trackVolumes: effectiveVolumes,
         compositionStyle: compositionStyle || {},
@@ -196,13 +238,18 @@ const VideoComposer = ({
       });
       console.log('Composition job started:', jobId);
 
-      const blob = await trackCompositionJob(jobId, (pct) => {
-        setRenderProgress(pct);
-        onProgress?.(pct);
-      }, abort.signal);
+      const blob = await trackCompositionJob(
+        jobId,
+        (pct) => {
+          setRenderProgress(pct);
+          onProgress?.(pct);
+        },
+        abort.signal,
+      );
 
       setComposedBlob(blob);
-      if (composedVideoUrlRef.current) URL.revokeObjectURL(composedVideoUrlRef.current);
+      if (composedVideoUrlRef.current)
+        URL.revokeObjectURL(composedVideoUrlRef.current);
       const url = URL.createObjectURL(blob);
       composedVideoUrlRef.current = url;
       setComposedVideoUrl(url);
@@ -229,7 +276,8 @@ const VideoComposer = ({
     return () => {
       clearInterval(timerRef.current);
       abortRef.current?.abort();
-      if (composedVideoUrlRef.current) URL.revokeObjectURL(composedVideoUrlRef.current);
+      if (composedVideoUrlRef.current)
+        URL.revokeObjectURL(composedVideoUrlRef.current);
     };
   }, []);
 
@@ -273,21 +321,28 @@ const VideoComposer = ({
       </div>
 
       {isProcessing && (
-        <div className='mt-4' aria-live='polite' aria-label='Composition progress'>
+        <div
+          className='mt-4'
+          aria-live='polite'
+          aria-label='Composition progress'
+        >
           {/* Upload phase */}
           {uploadProgress < 100 ? (
             <>
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded transition-all duration-300 ${
-                    processingMode === 'preview' ? 'bg-yellow-500' : 'bg-blue-500'
+                    processingMode === 'preview'
+                      ? 'bg-yellow-500'
+                      : 'bg-blue-500'
                   }`}
                   style={{ width: `${uploadProgress}%` }}
                 />
               </div>
               <p className='text-sm text-gray-600 mt-1'>
                 <span className='font-medium text-blue-600'>📤 Uploading</span>
-                {' — '}{uploadProgress}%
+                {' — '}
+                {uploadProgress}%
               </p>
             </>
           ) : renderProgress > 0 ? (
@@ -296,7 +351,9 @@ const VideoComposer = ({
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded transition-all duration-500 ${
-                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
+                    processingMode === 'preview'
+                      ? 'bg-yellow-400'
+                      : 'bg-blue-500'
                   }`}
                   style={{ width: `${renderProgress}%` }}
                 />
@@ -306,15 +363,20 @@ const VideoComposer = ({
                   {renderProgress <= 25
                     ? '🔬 Preprocessing'
                     : renderProgress <= 85
-                    ? `${processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'} Rendering`
-                    : '✨ Finalizing'}
+                      ? `${processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'} Rendering`
+                      : '✨ Finalizing'}
                 </span>
-                {' — '}{renderProgress}%
-                {' · '}{elapsedSeconds}s elapsed
-                {elapsedSeconds > 2 && (() => {
-                  const etaSec = Math.round(elapsedSeconds * (100 - renderProgress) / renderProgress);
-                  return etaSec > 0 ? `, ~${etaSec}s remaining` : null;
-                })()}
+                {' — '}
+                {renderProgress}%{' · '}
+                {elapsedSeconds}s elapsed
+                {elapsedSeconds > 2 &&
+                  (() => {
+                    const etaSec = Math.round(
+                      (elapsedSeconds * (100 - renderProgress)) /
+                        renderProgress,
+                    );
+                    return etaSec > 0 ? `, ~${etaSec}s remaining` : null;
+                  })()}
               </p>
             </>
           ) : (
@@ -323,17 +385,21 @@ const VideoComposer = ({
               <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
                 <div
                   className={`h-full rounded ${
-                    processingMode === 'preview' ? 'bg-yellow-400' : 'bg-blue-500'
+                    processingMode === 'preview'
+                      ? 'bg-yellow-400'
+                      : 'bg-blue-500'
                   }`}
                   style={{
                     width: '40%',
-                    animation: 'indeterminate-progress 1.4s infinite ease-in-out',
+                    animation:
+                      'indeterminate-progress 1.4s infinite ease-in-out',
                   }}
                 />
               </div>
               <p className='text-sm text-gray-600 mt-1'>
                 <span className='font-medium text-gray-500'>⚙️ Queued</span>
-                {' — '}{elapsedSeconds}s elapsed
+                {' — '}
+                {elapsedSeconds}s elapsed
               </p>
             </>
           )}
@@ -341,10 +407,16 @@ const VideoComposer = ({
       )}
 
       {error && (
-        <div className='mt-4 p-4 bg-red-100 text-red-700 rounded flex items-start gap-3' role='alert'>
+        <div
+          className='mt-4 p-4 bg-red-100 text-red-700 rounded flex items-start gap-3'
+          role='alert'
+        >
           <span className='flex-1'>{error}</span>
           <button
-            onClick={() => { setError(null); startComposition(lastModeRef.current); }}
+            onClick={() => {
+              setError(null);
+              startComposition(lastModeRef.current);
+            }}
             className='shrink-0 px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700 font-medium'
           >
             ↺ Retry
@@ -361,26 +433,57 @@ const VideoComposer = ({
       {composedVideoUrl && (
         <div className='mt-4'>
           <div style={{ maxWidth: '800px', margin: '0 auto' }}>
-          <video
-            src={composedVideoUrl}
-            controls
-            style={{ width: '100%', maxHeight: '65vh', objectFit: 'contain', background: '#000', borderRadius: '8px', display: 'block' }}
-          />
-          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
-            <a
-              href={composedVideoUrl}
-              download='composition.mp4'
-              style={{ padding: '0.5rem 1.1rem', background: '#16a34a', color: '#fff', borderRadius: '8px', fontWeight: 600, fontSize: '0.875rem', textDecoration: 'none' }}
+            <video
+              src={composedVideoUrl}
+              controls
+              style={{
+                width: '100%',
+                maxHeight: '65vh',
+                objectFit: 'contain',
+                background: '#000',
+                borderRadius: '8px',
+                display: 'block',
+              }}
+            />
+            <div
+              style={{
+                display: 'flex',
+                gap: '0.75rem',
+                marginTop: '0.75rem',
+                flexWrap: 'wrap',
+              }}
             >
-              ⬇ Download
-            </a>
-            <button
-              onClick={() => setShowShareModal(true)}
-              style={{ padding: '0.5rem 1.1rem', background: '#0f3460', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 600, fontSize: '0.875rem', cursor: 'pointer' }}
-            >
-              📤 Share to Feed
-            </button>
-          </div>
+              <a
+                href={composedVideoUrl}
+                download='composition.mp4'
+                style={{
+                  padding: '0.5rem 1.1rem',
+                  background: '#16a34a',
+                  color: '#fff',
+                  borderRadius: '8px',
+                  fontWeight: 600,
+                  fontSize: '0.875rem',
+                  textDecoration: 'none',
+                }}
+              >
+                ⬇ Download
+              </a>
+              <button
+                onClick={() => setShowShareModal(true)}
+                style={{
+                  padding: '0.5rem 1.1rem',
+                  background: '#0f3460',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontWeight: 600,
+                  fontSize: '0.875rem',
+                  cursor: 'pointer',
+                }}
+              >
+                📤 Share to Feed
+              </button>
+            </div>
           </div>
         </div>
       )}
