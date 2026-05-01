@@ -158,18 +158,17 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
         const newIndex = items.findIndex((item) => item.id === over.id);
         const newItems = arrayMove(items, oldIndex, newIndex);
 
-        // Modify arrangement to match backend expectations
         const arrangement = newItems.reduce((acc, item, index) => {
-          if (!item.isEmpty) {
-            // Extract the actual identifier without the prefix
-            const id = item.id.replace(/^(track-|drum-)/, '');
-            acc[id] = {
-              position: index,
-              row: Math.floor(index / columnCount),
-              column: index % columnCount,
-              type: item.id.startsWith('drum-') ? 'drum' : 'track',
-            };
-          }
+          const id = item.isEmpty
+            ? item.id
+            : item.id.replace(/^(track-|drum-)/, '');
+          acc[id] = {
+            position: index,
+            row: Math.floor(index / columnCount),
+            column: index % columnCount,
+            type: item.isEmpty ? 'empty' : (item.id.startsWith('drum-') ? 'drum' : 'track'),
+            isEmpty: item.isEmpty || false,
+          };
           return acc;
         }, {});
         onArrangementChange(arrangement);
@@ -249,15 +248,16 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
   useEffect(() => {
     if (items.length > 0) {
       const arrangement = items.reduce((acc, item, index) => {
-        if (!item.isEmpty) {
-          const id = item.id.replace(/^(track-|drum-)/, '');
-          acc[id] = {
-            position: index,
-            row: Math.floor(index / columnCount),
-            column: index % columnCount,
-            type: item.id.startsWith('drum-') ? 'drum' : 'track',
-          };
-        }
+        const id = item.isEmpty
+          ? item.id
+          : item.id.replace(/^(track-|drum-)/, '');
+        acc[id] = {
+          position: index,
+          row: Math.floor(index / columnCount),
+          column: index % columnCount,
+          type: item.isEmpty ? 'empty' : (item.id.startsWith('drum-') ? 'drum' : 'track'),
+          isEmpty: item.isEmpty || false,
+        };
         return acc;
       }, {});
       onArrangementChange(arrangement);
@@ -266,22 +266,6 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
 
   return (
     <div className='grid-container'>
-      <div className='grid-controls'>
-        <label htmlFor='column-select'>Grid Columns: </label>
-        <select
-          id='column-select'
-          value={columnCount}
-          onChange={handleColumnChange}
-          className='column-select'
-        >
-          {calculateOptimalColumns.map((cols) => (
-            <option key={cols} value={cols}>
-              {cols} {cols === 1 ? 'Column' : 'Columns'}
-            </option>
-          ))}
-        </select>
-      </div>
-
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}

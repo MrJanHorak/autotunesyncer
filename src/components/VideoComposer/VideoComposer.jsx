@@ -104,7 +104,10 @@ const VideoComposer = ({
       );
     }
 
-    if (!gridArrangement || Object.keys(gridArrangement).length === 0) {
+    const nonEmptyArrangement = Object.fromEntries(
+      Object.entries(gridArrangement || {}).filter(([, v]) => !v.isEmpty),
+    );
+    if (Object.keys(nonEmptyArrangement).length === 0) {
       errors.push('Grid arrangement is missing.');
     }
 
@@ -190,7 +193,9 @@ const VideoComposer = ({
       const midiPayload = {
         ...midiData,
         tracks: normalizedTracks,
-        gridArrangement,
+        gridArrangement: Object.fromEntries(
+          Object.entries(gridArrangement || {}).filter(([, v]) => !v.isEmpty),
+        ),
         trackVolumes: effectiveVolumes,
         compositionStyle: compositionStyle || {},
         clipStyles: clipStyles || {},
