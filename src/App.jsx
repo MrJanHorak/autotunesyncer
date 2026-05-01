@@ -1,7 +1,7 @@
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState, useRef } from 'react';
 import PropTypes from 'prop-types';
-import { Film, Music, Grid3x3, FolderOpen, LogOut, Bell, Settings, User } from 'lucide-react';
+import { Film, Music, Grid3x3, FolderOpen, LogOut, Bell, Settings, User, Download, Upload, Undo2, Redo2 } from 'lucide-react';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
 import { DEFAULT_COMPOSITION_STYLE, DEFAULT_CLIP_STYLE } from './js/styleDefaults';
@@ -14,10 +14,14 @@ import { useMidiProcessing } from './hooks/useMidiProcessing';
 import { useVideoRecording } from './hooks/useVideoRecording';
 import { useAuth } from './context/AuthContext';
 import { useProject } from './context/ProjectContext';
+import { useUndoRedo } from './hooks/useUndoRedo';
+import { useProjectSync } from './hooks/useProjectSync';
 import {
   configureApiService,
   apiFetch,
   uploadClip,
+  downloadProjectExport,
+  importProjectFromZip,
 } from './services/apiService';
 
 // Components
@@ -429,9 +433,8 @@ function MainApp({ onChangeProject, onLogout }) {
   const [soloTrack, setSoloTrack] = useState(null);
   const [activeLevels, setActiveLevels] = useState({});
   const lastMeterStateRef = useRef(0);
-  const saveArrangementTimeoutRef = useRef(null);
 
-  // Panel open/close state
+
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   // Currently open recording modal target (instrument object or null)
@@ -439,169 +442,82 @@ function MainApp({ onChangeProject, onLogout }) {
   // Preview playback state — synced to grid video overlays
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
 
-  // Persisted clip keys from server (instrument keys that have saved clips)
-  const [savedClipKeys, setSavedClipKeys] = useState(new Set());
-  // In-memory blob cache to avoid re-fetching on MIDI change within same project
-  const clipBlobCache = useRef({});
-  // Version counter — incremented on project switch to discard stale fetches
-  const clipsLoadingVersion = useRef(0);
+  // Project-scoped persistence: clip list, blob cache, state restore & save
+  const { savedClipKeys, setSavedClipKeys, clipBlobCache } = useProjectSync({
+    currentProject,
+    instruments,
+    midiFile,
+    gridArrangement,
+    trackVolumes,
+    compositionStyle,
+    clipStyles,
+    loadProjectState,
+    saveProjectState,
+    toInstrumentKey,
+    precachedKeysRef,
+    setMidiFile,
+    setGridArrangement,
+    setTrackVolumes,
+    setCompositionStyle,
+    setClipStyles,
+    setVideoFiles,
+    setInstrumentVideos,
+  });
 
   // Track which instrument keys have already been queued for pre-caching
   // so we don't send duplicate requests on every re-render.
   const precachedKeysRef = useRef(new Set());
 
-  // ── Project clip persistence ──────────────────────────────────────────────
+  // Export/import state
+  const [exportLoading, setExportLoading] = useState(false);
+  const [importLoading, setImportLoading] = useState(false);
+  const importInputRef = useRef(null);
 
-  // On project change: load saved clip list from server + restore MIDI from state.
+  // ── Undo / Redo ───────────────────────────────────────────────────────────
+  const {
+    snapshot: undoSnapshot,
+    canUndo,
+    canRedo,
+    pushSnapshot,
+    undo: undoHistory,
+    redo: redoHistory,
+    reset: resetHistory,
+    isProgrammaticRef,
+  } = useUndoRedo({ gridArrangement, compositionStyle, clipStyles, trackVolumes, muteStates, soloTrack });
+
+  const pushUndoDebounceRef = useRef(null);
+
+  // Push a debounced snapshot on every relevant state change.
   useEffect(() => {
-    // Always increment version first so any in-flight fetches from the previous
-    // project are discarded, even when the new value is null.
-    const version = ++clipsLoadingVersion.current;
-
-    // Revoke stale blob URLs and clear clip state from the previous project.
-    setInstrumentVideos((prev) => {
-      Object.values(prev).forEach((url) => {
-        try { URL.revokeObjectURL(url); } catch { /* ignore */ }
-      });
-      return {};
-    });
-    setVideoFiles({});
-    precachedKeysRef.current = new Set();
-
-    if (!currentProject) {
-      setSavedClipKeys(new Set());
-      clipBlobCache.current = {};
+    if (isProgrammaticRef.current) {
+      isProgrammaticRef.current = false;
       return;
     }
+    clearTimeout(pushUndoDebounceRef.current);
+    pushUndoDebounceRef.current = setTimeout(() => {
+      pushSnapshot({ gridArrangement, compositionStyle, clipStyles, trackVolumes, muteStates, soloTrack });
+    }, 400);
+  }, [gridArrangement, compositionStyle, clipStyles, trackVolumes, muteStates, soloTrack]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    apiFetch(`/projects/${currentProject.id}/clips`)
-      .then((r) => r.json())
-      .then(({ clips }) => {
-        if (clipsLoadingVersion.current !== version) return;
-        setSavedClipKeys(new Set(clips.map((c) => c.instrument_key)));
-      })
-      .catch((err) => console.warn('[clips] Failed to load clip list:', err));
+  // Apply snapshot when undo/redo changes it.
+  const prevSnapshotRef = useRef(undoSnapshot);
+  useEffect(() => {
+    if (undoSnapshot === prevSnapshotRef.current) return;
+    prevSnapshotRef.current = undoSnapshot;
+    if (!isProgrammaticRef.current) return;
+    setGridArrangement(undoSnapshot.gridArrangement);
+    setCompositionStyle(undoSnapshot.compositionStyle);
+    setClipStyles(undoSnapshot.clipStyles);
+    setTrackVolumes(undoSnapshot.trackVolumes);
+    setMuteStates(undoSnapshot.muteStates);
+    setSoloTrack(undoSnapshot.soloTrack);
+  }, [undoSnapshot]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    loadProjectState(currentProject.id)
-      .then((state) => {
-        if (clipsLoadingVersion.current !== version) return;
-        if (state?.midiFileBase64) {
-          const file = base64ToFile(
-            state.midiFileBase64,
-            state.midiFileName || 'project.mid',
-          );
-          setMidiFile(file);
-        }
-        if (state?.gridArrangement && Object.keys(state.gridArrangement).length > 0) {
-          setGridArrangement(state.gridArrangement);
-        }
-        if (state?.trackVolumes && Object.keys(state.trackVolumes).length > 0) {
-          setTrackVolumes(state.trackVolumes);
-        }
-        if (state?.compositionStyle) {
-          setCompositionStyle((prev) => ({ ...DEFAULT_COMPOSITION_STYLE, ...prev, ...state.compositionStyle }));
-        }
-        if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {
-          // Merge each saved style with DEFAULT_CLIP_STYLE so any fields added
-          // since the project was saved are populated with sensible defaults.
-          const merged = Object.fromEntries(
-            Object.entries(state.clipStyles).map(([id, saved]) => [
-              id,
-              { ...DEFAULT_CLIP_STYLE, ...saved },
-            ])
-          );
-          setClipStyles(merged);
-        }
-      })
-      .catch((err) =>
-        console.warn('[clips] Failed to load project state:', err),
-      );
+  // Reset undo history when switching projects (prevents undo into a previous project's state).
+  useEffect(() => {
+    resetHistory({ gridArrangement: {}, compositionStyle: { ...DEFAULT_COMPOSITION_STYLE }, clipStyles: {}, trackVolumes: {}, muteStates: {}, soloTrack: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
-
-  // When instruments load or savedClipKeys changes: lazily fetch blobs for matching clips.
-  useEffect(() => {
-    if (!instruments.length || !savedClipKeys.size || !currentProject) return;
-    const version = clipsLoadingVersion.current;
-    const projectId = currentProject.id;
-
-    for (const instrument of instruments) {
-      const key = toInstrumentKey(instrument);
-      if (!savedClipKeys.has(key)) continue;
-
-      if (clipBlobCache.current[key]) {
-        setVideoFiles((prev) =>
-          prev[key] ? prev : { ...prev, [key]: clipBlobCache.current[key] },
-        );
-        setInstrumentVideos((prev) =>
-          prev[key]
-            ? prev
-            : {
-                ...prev,
-                [key]: URL.createObjectURL(clipBlobCache.current[key]),
-              },
-        );
-        continue;
-      }
-
-      apiFetch(`/projects/${projectId}/clips/${encodeURIComponent(key)}/file`)
-        .then((r) => {
-          if (clipsLoadingVersion.current !== version) return null;
-          return r.blob();
-        })
-        .then((blob) => {
-          if (!blob || clipsLoadingVersion.current !== version) return;
-          clipBlobCache.current[key] = blob;
-          setVideoFiles((prev) =>
-            prev[key] ? prev : { ...prev, [key]: blob },
-          );
-          setInstrumentVideos((prev) =>
-            prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(blob) },
-          );
-        })
-        .catch((err) =>
-          console.warn(`[clips] Failed to fetch clip for ${key}:`, err),
-        );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instruments, savedClipKeys, currentProject?.id]);
-
-  // When MIDI file changes: persist it to project state for restore on refresh.
-  useEffect(() => {
-    if (!midiFile || !currentProject) return;
-    const projectId = currentProject.id;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const currentState = await loadProjectState(projectId).catch(
-          () => null,
-        );
-        await saveProjectState({
-          ...(currentState || {}),
-          midiFileBase64: reader.result,
-          midiFileName: midiFile.name,
-        });
-      } catch (err) {
-        console.warn('[clips] Failed to save MIDI to project state:', err);
-      }
-    };
-    reader.readAsDataURL(midiFile);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [midiFile, currentProject?.id]);
-
-  // Debounced save of grid arrangement, track volumes, and style settings to project state
-  useEffect(() => {
-    if (!currentProject || Object.keys(gridArrangement).length === 0) return;
-    clearTimeout(saveArrangementTimeoutRef.current);
-    saveArrangementTimeoutRef.current = setTimeout(async () => {
-      try {
-        const currentState = await loadProjectState(currentProject.id).catch(() => null);
-        await saveProjectState({ ...(currentState || {}), gridArrangement, trackVolumes, compositionStyle, clipStyles });
-      } catch (err) {
-        console.warn('[state] Failed to save arrangement:', err);
-      }
-    }, 1500);
-  }, [gridArrangement, trackVolumes, compositionStyle, clipStyles, currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -794,6 +710,33 @@ function MainApp({ onChangeProject, onLogout }) {
     return () => document.removeEventListener('click', handleClick);
   }, [isAudioContextReady, startAudioContext]);
 
+  const handleExport = useCallback(async () => {
+    if (!currentProject) return;
+    setExportLoading(true);
+    try {
+      await downloadProjectExport(currentProject.id, currentProject.name);
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+    } finally {
+      setExportLoading(false);
+    }
+  }, [currentProject]);
+
+  const handleImport = useCallback(async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setImportLoading(true);
+    try {
+      const { project } = await importProjectFromZip(file);
+      onChangeProject(project);
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+    } finally {
+      setImportLoading(false);
+    }
+  }, [onChangeProject]);
+
   return (
     <div className='editor-shell'>
       {/* Non-rendering helpers always present */}
@@ -828,6 +771,50 @@ function MainApp({ onChangeProject, onLogout }) {
           <MidiUploader onMidiProcessed={handleMidiProcessed} compact />
         )}
         <div className='editor-topbar__spacer' />
+
+        {/* Undo / Redo */}
+        <button
+          className='editor-topbar__icon-btn'
+          onClick={undoHistory}
+          disabled={!canUndo}
+          title='Undo (Ctrl+Z)'
+          aria-label='Undo'
+        ><Undo2 size={16} /></button>
+        <button
+          className='editor-topbar__icon-btn'
+          onClick={redoHistory}
+          disabled={!canRedo}
+          title='Redo (Ctrl+Y)'
+          aria-label='Redo'
+        ><Redo2 size={16} /></button>
+
+        {/* Export / Import */}
+        {currentProject && (
+          <>
+            <button
+              className='editor-topbar__icon-btn'
+              onClick={handleExport}
+              disabled={exportLoading}
+              title='Export project as ZIP'
+              aria-label='Export project'
+            ><Download size={16} /></button>
+            <button
+              className='editor-topbar__icon-btn'
+              onClick={() => importInputRef.current?.click()}
+              disabled={importLoading}
+              title='Import project from ZIP'
+              aria-label='Import project'
+            ><Upload size={16} /></button>
+            <input
+              ref={importInputRef}
+              type='file'
+              accept='.zip'
+              style={{ display: 'none' }}
+              onChange={handleImport}
+            />
+          </>
+        )}
+
         <AudioContextInitializer
           audioContextStarted={audioContextStarted}
           onInitialize={startAudioContext}

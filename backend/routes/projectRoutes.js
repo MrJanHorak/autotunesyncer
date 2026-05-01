@@ -9,6 +9,8 @@ import {
   deleteProject,
   saveProjectState,
   loadProjectState,
+  exportProject,
+  importProject,
 } from '../controllers/projectController.js';
 import { saveClip, listClips, getClipFile, deleteClip } from '../controllers/clipController.js';
 
@@ -19,15 +21,25 @@ const clipUpload = multer({
   limits: { fileSize: 1000 * 1024 * 1024 },
 }).single('video');
 
+const zipUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 500 * 1024 * 1024 },
+}).single('archive');
+
 router.use(authenticateToken);
 
 router.get('/', listProjects);
 router.post('/', createProject);
+router.post('/import', (req, res, next) => zipUpload(req, res, (err) => {
+  if (err) return res.status(400).json({ error: err.message });
+  next();
+}), importProject);
 router.get('/:id', getProject);
 router.put('/:id', updateProject);
 router.delete('/:id', deleteProject);
 router.post('/:id/state', saveProjectState);
 router.get('/:id/state', loadProjectState);
+router.get('/:id/export', exportProject);
 
 // Clip persistence routes
 router.get('/:id/clips', listClips);

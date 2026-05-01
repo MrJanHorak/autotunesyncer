@@ -14,6 +14,7 @@ import precacheRoutes from './routes/precache.js';
 import authRoutes from './routes/authRoutes.js';
 import projectRoutes from './routes/projectRoutes.js';
 import socialRoutes from './routes/socialRoutes.js';
+import shareRoutes from './routes/shareRoutes.js';
 
 const app = express();
 
@@ -80,6 +81,7 @@ app.use('/api/autotune', autotuneRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/process-videos', processVideos);
 app.use('/api/autotune/precache', precacheRoutes);
+app.use('/api/share', shareRoutes);
 
 // Add error handling for large payloads
 app.use((err, req, res, next) => {

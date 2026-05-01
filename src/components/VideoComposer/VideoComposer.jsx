@@ -5,6 +5,7 @@ import {
   trackCompositionJob,
 } from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
+import { shareComposition } from '../../services/apiService.js';
 
 const VideoComposer = ({
   videoFiles,
@@ -29,6 +30,8 @@ const VideoComposer = ({
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
   const [composedBlob, setComposedBlob] = useState(null);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [shareUrl, setShareUrl] = useState(null);
+  const [shareLoading, setShareLoading] = useState(false);
   const [error, setError] = useState(null);
   const timerRef = useRef(null);
   const abortRef = useRef(null);
@@ -483,6 +486,53 @@ const VideoComposer = ({
               >
                 📤 Share to Feed
               </button>
+              <button
+                onClick={async () => {
+                  if (!composedBlob) return;
+                  setShareLoading(true);
+                  setShareUrl(null);
+                  try {
+                    const { url } = await shareComposition(composedBlob);
+                    setShareUrl(url);
+                  } catch (err) {
+                    if (err.message.includes('not configured')) {
+                      alert('Share links are not configured on this server.');
+                    } else {
+                      alert(`Share failed: ${err.message}`);
+                    }
+                  } finally {
+                    setShareLoading(false);
+                  }
+                }}
+                disabled={shareLoading || !composedBlob}
+                style={{
+                  padding: '0.5rem 1.1rem',
+                  background: '#7c3aed',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontWeight: 600,
+                  fontSize: '0.875rem',
+                  cursor: shareLoading ? 'wait' : 'pointer',
+                  opacity: shareLoading ? 0.7 : 1,
+                }}
+              >
+                {shareLoading ? '⏳ Uploading…' : '🔗 Get Share Link'}
+              </button>
+              {shareUrl && (
+                <div style={{ width: '100%', marginTop: '0.5rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  <input
+                    readOnly
+                    value={shareUrl}
+                    style={{ flex: 1, padding: '0.4rem 0.6rem', borderRadius: '6px', border: '1px solid #7c3aed', fontSize: '0.8rem' }}
+                    onClick={(e) => e.target.select()}
+                  />
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(shareUrl); }}
+                    style={{ padding: '0.4rem 0.75rem', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}
+                  >Copy</button>
+                </div>
+              )}
             </div>
           </div>
         </div>

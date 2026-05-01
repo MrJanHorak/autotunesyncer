@@ -1,8 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
-import { rmSync, existsSync } from 'fs';
-import { join, resolve, sep } from 'path';
+import { rmSync, existsSync, mkdirSync, writeFileSync, createReadStream, readdirSync } from 'fs';
+import { join, resolve, sep, basename } from 'path';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { tmpdir } from 'os';
+import archiver from 'archiver';
+import AdmZip from 'adm-zip';
 import db from '../db/database.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -113,5 +116,127 @@ export const loadProjectState = (req, res) => {
     res.json({ state: JSON.parse(project.state) });
   } catch {
     res.json({ state: null });
+  }
+};
+
+const SAFE_KEY_RE = /^[a-z0-9_()\-]{1,80}$/i;
+const MAX_ZIP_SIZE = 500 * 1024 * 1024; // 500 MB
+const MAX_ZIP_ENTRIES = 500;
+
+export const exportProject = (req, res) => {
+  const project = db
+    .prepare('SELECT id, name, state FROM projects WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.user.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const clips = db
+    .prepare('SELECT instrument_key, file_path FROM project_clips WHERE project_id = ?')
+    .all(req.params.id);
+
+  const safeName = (project.name || 'project').replace(/[^a-z0-9_-]/gi, '_').slice(0, 60);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.zip"`);
+
+  const zip = archiver('zip', { zlib: { level: 6 } });
+  zip.on('error', (err) => {
+    console.error('[export] archiver error:', err);
+    if (!res.headersSent) res.status(500).json({ error: 'ZIP creation failed' });
+  });
+  zip.pipe(res);
+
+  zip.append(
+    JSON.stringify({ name: project.name, id: project.id, schemaVersion: 1 }, null, 2),
+    { name: 'manifest.json' },
+  );
+  zip.append(project.state || '{}', { name: 'state.json' });
+
+  for (const { instrument_key: key, file_path: fp } of clips) {
+    if (!SAFE_KEY_RE.test(key)) continue;
+    const safePath = resolve(fp);
+    if (!safePath.startsWith(BASE_UPLOADS_DIR + sep)) continue;
+    if (!existsSync(safePath)) continue;
+    zip.file(safePath, { name: `clips/${key}.mp4` });
+  }
+
+  zip.finalize();
+};
+
+export const importProject = (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'ZIP file required' });
+  if (req.file.size > MAX_ZIP_SIZE) return res.status(413).json({ error: 'ZIP too large (max 500 MB)' });
+
+  const tmpZipPath = join(tmpdir(), `ats_import_${uuidv4()}.zip`);
+  try {
+    writeFileSync(tmpZipPath, req.file.buffer);
+    const zip = new AdmZip(tmpZipPath);
+    const entries = zip.getEntries();
+
+    if (entries.length > MAX_ZIP_ENTRIES) {
+      return res.status(400).json({ error: 'ZIP contains too many entries' });
+    }
+
+    // Parse manifest + state
+    const manifestEntry = entries.find((e) => e.entryName === 'manifest.json');
+    const stateEntry = entries.find((e) => e.entryName === 'state.json');
+    if (!manifestEntry || !stateEntry) {
+      return res.status(400).json({ error: 'Invalid project ZIP (missing manifest.json or state.json)' });
+    }
+
+    let manifest;
+    try { manifest = JSON.parse(manifestEntry.getData().toString('utf8')); }
+    catch { return res.status(400).json({ error: 'Corrupt manifest.json' }); }
+
+    const stateJson = stateEntry.getData().toString('utf8');
+
+    // Collect clip entries and validate keys
+    const clipEntries = entries.filter((e) => e.entryName.startsWith('clips/') && e.entryName.endsWith('.mp4') && !e.isDirectory);
+    for (const e of clipEntries) {
+      const key = basename(e.entryName, '.mp4');
+      if (!SAFE_KEY_RE.test(key)) {
+        return res.status(400).json({ error: `Invalid instrument key in ZIP: ${key}` });
+      }
+    }
+
+    // Create project + clips inside a transaction
+    const newId = uuidv4();
+    const newName = (manifest.name || 'Imported Project').slice(0, 120);
+    const uploadsDir = resolve(join(BASE_UPLOADS_DIR, req.user.id, newId));
+
+    const importTx = db.transaction(() => {
+      db.prepare('INSERT INTO projects (id, user_id, name, description, state) VALUES (?, ?, ?, ?, ?)')
+        .run(newId, req.user.id, newName, '', stateJson);
+
+      mkdirSync(uploadsDir, { recursive: true });
+
+      for (const e of clipEntries) {
+        const key = basename(e.entryName, '.mp4');
+        const filePath = join(uploadsDir, `clip_${key}_${uuidv4()}.mp4`);
+        writeFileSync(filePath, e.getData());
+        db.prepare(`
+          INSERT INTO project_clips (project_id, instrument_key, file_path)
+          VALUES (?, ?, ?)
+          ON CONFLICT(project_id, instrument_key) DO UPDATE
+            SET file_path = excluded.file_path, created_at = datetime('now')
+        `).run(newId, key, filePath);
+      }
+    });
+
+    try {
+      importTx();
+    } catch (txErr) {
+      // Rollback: remove any files written before the transaction threw
+      try { rmSync(uploadsDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      throw txErr;
+    }
+
+    const created = db
+      .prepare('SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?')
+      .get(newId);
+    res.status(201).json({ project: created });
+  } catch (err) {
+    console.error('[import] error:', err);
+    res.status(500).json({ error: 'Import failed' });
+  } finally {
+    try { rmSync(tmpZipPath); } catch { /* ignore */ }
   }
 };

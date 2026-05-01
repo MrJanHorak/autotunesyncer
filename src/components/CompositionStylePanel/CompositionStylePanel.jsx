@@ -1,6 +1,7 @@
 import { useState, useId, cloneElement, isValidElement } from 'react';
 import PropTypes from 'prop-types';
 import { COLOR_THEMES, COLOR_GRADE_LABELS, DEFAULT_COMPOSITION_STYLE, FONT_OPTIONS } from '../../js/styleDefaults';
+import { useStylePresets } from '../../hooks/useStylePresets';
 import './CompositionStylePanel.css';
 
 const Section = ({ title, icon, children, defaultOpen = false }) => {
@@ -66,6 +67,8 @@ FontSelect.propTypes = { id: PropTypes.string, value: PropTypes.string, onChange
 
 const CompositionStylePanel = ({ style, onChange }) => {
   const set = (key, val) => onChange({ ...style, [key]: val });
+  const { presets, savePreset, applyPreset, deletePreset } = useStylePresets();
+  const [selectedPreset, setSelectedPreset] = useState('');
 
   const applyTheme = (theme) => {
     const t = COLOR_THEMES[theme];
@@ -82,6 +85,25 @@ const CompositionStylePanel = ({ style, onChange }) => {
 
   const resetToDefaults = () => onChange({ ...DEFAULT_COMPOSITION_STYLE });
 
+  const handleSavePreset = () => {
+    const name = window.prompt('Preset name:')?.trim();
+    if (!name) return;
+    savePreset(name, style);
+    setSelectedPreset(name);
+  };
+
+  const handleApplyPreset = () => {
+    const applied = applyPreset(selectedPreset);
+    if (applied) onChange(applied);
+  };
+
+  const handleDeletePreset = () => {
+    if (!selectedPreset) return;
+    if (!window.confirm(`Delete preset "${selectedPreset}"?`)) return;
+    deletePreset(selectedPreset);
+    setSelectedPreset('');
+  };
+
   return (
     <div className='csp'>
       <div className='csp__header'>
@@ -90,6 +112,42 @@ const CompositionStylePanel = ({ style, onChange }) => {
           ↺ Reset
         </button>
       </div>
+
+      {/* Presets */}
+      <Section title='Style Presets' icon='💾'>
+        <div className='csp-presets'>
+          <select
+            className='csp-select csp-presets__select'
+            value={selectedPreset}
+            onChange={(e) => setSelectedPreset(e.target.value)}
+            aria-label='Select style preset'
+          >
+            <option value=''>— select preset —</option>
+            {presets.map((p) => (
+              <option key={p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+          <div className='csp-presets__actions'>
+            <button
+              className='csp-btn csp-btn--sm'
+              onClick={handleApplyPreset}
+              disabled={!selectedPreset}
+              title='Apply selected preset'
+            >Apply</button>
+            <button
+              className='csp-btn csp-btn--sm'
+              onClick={handleSavePreset}
+              title='Save current style as a new preset'
+            >Save as…</button>
+            <button
+              className='csp-btn csp-btn--sm csp-btn--danger'
+              onClick={handleDeletePreset}
+              disabled={!selectedPreset}
+              title='Delete selected preset'
+            >Delete</button>
+          </div>
+        </div>
+      </Section>
 
       {/* Theme Picker */}
       <Section title='Color Theme' icon='🎭' defaultOpen>

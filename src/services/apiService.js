@@ -126,4 +126,73 @@ export async function uploadClip(projectId, instrumentKey, blob) {
   return res.json();
 }
 
+/**
+ * Download a project as a ZIP archive.
+ * Triggers a browser save-as dialog.
+ */
+export async function downloadProjectExport(projectId, projectName) {
+  const token = _getToken();
+  const res = await fetch(`${API_BASE}/projects/${projectId}/export`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    let msg = `Export error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${(projectName || 'project').replace(/[^a-z0-9_-]/gi, '_')}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Import a project from a ZIP archive.
+ * Returns { project } on success.
+ */
+export async function importProjectFromZip(zipFile) {
+  const token = _getToken();
+  const formData = new FormData();
+  formData.append('archive', zipFile, zipFile.name || 'project.zip');
+
+  const res = await fetch(`${API_BASE}/projects/import`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    let msg = `Import error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+/**
+ * Upload a finished composition video to cloud storage and return a share URL.
+ * Throws if the server has not been configured with S3_BUCKET.
+ */
+export async function shareComposition(videoBlob) {
+  const token = _getToken();
+  const formData = new FormData();
+  formData.append('video', videoBlob, 'composition.mp4');
+
+  const res = await fetch(`${API_BASE}/share`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+  if (!res.ok) {
+    let msg = `Share error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json(); // { url, expiresInSeconds }
+}
+
 export { API_BASE };
