@@ -155,7 +155,6 @@ const SampleSoundButton = ({
       'low floor tom': [41],
       'high floor tom': [43],
       'hi-hat foot': [44],
-      'hi-hat pedal': [44],
       triangle: [81, 80],
       'triangle open': [81],
       'triangle mute': [80],

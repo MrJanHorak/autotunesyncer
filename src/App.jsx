@@ -442,6 +442,10 @@ function MainApp({ onChangeProject, onLogout }) {
   // Preview playback state — synced to grid video overlays
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
 
+  // Track which instrument keys have already been queued for pre-caching
+  // so we don't send duplicate requests on every re-render.
+  const precachedKeysRef = useRef(new Set());
+
   // Project-scoped persistence: clip list, blob cache, state restore & save
   const { savedClipKeys, setSavedClipKeys, clipBlobCache } = useProjectSync({
     currentProject,
@@ -463,10 +467,6 @@ function MainApp({ onChangeProject, onLogout }) {
     setVideoFiles,
     setInstrumentVideos,
   });
-
-  // Track which instrument keys have already been queued for pre-caching
-  // so we don't send duplicate requests on every re-render.
-  const precachedKeysRef = useRef(new Set());
 
   // Export/import state
   const [exportLoading, setExportLoading] = useState(false);
