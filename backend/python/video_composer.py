@@ -2622,11 +2622,30 @@ class VideoComposer:
             stem_path = audio_dir / f"stem_{entry_id}_{normalize_instrument_name(track_name)}.wav"
             tasks.append(('instrument', entry_id, track_name, notes, stem_path))
 
-        for drum_idx, drum_track in enumerate(self.drum_tracks):
-            instr = drum_track.get('instrument', {})
-            tag = instr.get('name', 'drums') if isinstance(instr, dict) else 'drums'
-            stem_path = audio_dir / f"stem_drums_{drum_idx}_{normalize_instrument_name(tag)}.wav"
-            tasks.append(('drum', drum_idx, drum_track, None, stem_path))
+        if self.drum_tracks:
+            # Merge all drum tracks into a single deduplicated stem task.
+            # MIDI files with N drum tracks often carry the same channel-10 note
+            # list in each entry, so building them as separate stems then amixing
+            # inflates drum volume by N×.  Deduplicating by (midi, centisecond)
+            # collapses identical hits while preserving genuinely distinct events.
+            seen_note_keys: set = set()
+            merged_notes: list = []
+            for dt in self.drum_tracks:
+                for n in dt.get('notes', []):
+                    key = (n.get('midi', 0), round(n.get('time', 0) * 100))
+                    if key not in seen_note_keys:
+                        seen_note_keys.add(key)
+                        merged_notes.append(n)
+            if merged_notes:
+                merged_drum = {**self.drum_tracks[0], 'notes': merged_notes}
+                stem_path = audio_dir / "stem_drums_merged.wav"
+                tasks.append(('drum', 0, merged_drum, None, stem_path))
+                if len(self.drum_tracks) > 1:
+                    logging.info(
+                        f"🥁 Merged {len(self.drum_tracks)} drum tracks → "
+                        f"{len(merged_notes)} unique hits for single stem "
+                        f"(was {sum(len(dt.get('notes',[])) for dt in self.drum_tracks)} total)"
+                    )
 
         if not tasks:
             logging.error("❌ No tracks — audio-first cannot continue")
