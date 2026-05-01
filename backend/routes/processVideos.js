@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { EventEmitter } from 'events';
-import { runPythonProcessor, preprocessVideo } from '../js/pythonBridge.js';
+import { runPythonProcessor, runPythonProcessorDirect, preprocessVideo } from '../js/pythonBridge.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -9,6 +9,9 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireProjectOwnership } from '../middleware/projectOwnership.js';
+
+// Bump when preprocessing algorithm or encoding settings change.
+const PREPROCESS_VERSION = 'v1';
 
 const router = express.Router();
 
@@ -202,54 +205,81 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     const totalVideos = videoFiles.length;
     let processedCount = 0;
 
-    for (const file of videoFiles) {
-      const instrumentName = path.parse(file.originalname).name;
-      const originalPath = file.path;
-      tempFiles.push(originalPath);
+    // Bounded concurrency: 2 for GPU, 4 for CPU (overrideable via env)
+    const gpuMode = process.env.ATS_GPU_MODE !== '0';
+    const defaultConcurrency = gpuMode ? 2 : Math.min(4, Math.max(1, os.cpus().length >> 1));
+    const concurrency = parseInt(process.env.ATS_PREPROCESS_CONCURRENCY || String(defaultConcurrency), 10);
 
-      const fileBuffer = fs.readFileSync(originalPath);
-      const cacheKey = crypto
-        .createHash('sha1')
-        .update(fileBuffer)
-        .update(`${targetWidth}x${targetHeight}:${isPreview ? 'preview' : 'prod'}`)
-        .digest('hex')
-        .slice(0, 16);
-      const processedPath = path.join(
-        jobUploadsDir,
-        `processed_${cacheKey}-${instrumentName}.mp4`,
-      );
+    await new Promise((resolve, reject) => {
+      let active = 0;
+      let idx = 0;
+      let rejected = false;
 
-      if (fs.existsSync(processedPath)) {
-        console.log(`[Job ${jobId}] Cache hit: ${instrumentName}`);
-      } else {
-        await preprocessVideo(
-          originalPath,
-          processedPath,
-          `${targetWidth}x${targetHeight}`,
-          {
-            performanceMode: true,
-            quality: isPreview ? 'low' : 'high',
-            memoryLimit: 4,
-          },
-        );
+      function next() {
+        if (rejected) return;
+        if (idx >= videoFiles.length && active === 0) { resolve(); return; }
+        while (active < concurrency && idx < videoFiles.length) {
+          const file = videoFiles[idx++];
+          active++;
+          processOne(file)
+            .then(() => {
+              active--;
+              processedCount++;
+              updateJob(jobId, { progress: 5 + Math.round((processedCount / totalVideos) * 40) });
+              next();
+            })
+            .catch((err) => {
+              rejected = true;
+              reject(err);
+            });
+        }
       }
 
-      videos[instrumentName] = {
-        path: path.resolve(processedPath),
-        isDrum: instrumentName.toLowerCase().includes('drum'),
-        notes: [],
-        layout: { x: 0, y: 0, width: targetWidth, height: targetHeight },
-      };
+      async function processOne(file) {
+        const instrumentName = path.parse(file.originalname).name;
+        const originalPath = file.path;
+        tempFiles.push(originalPath);
 
-      // Clean up the raw upload once preprocessed
-      try { fs.unlinkSync(originalPath); } catch { /* ignore */ }
-      // Remove from tempFiles since it's already gone
-      const idx = tempFiles.indexOf(originalPath);
-      if (idx !== -1) tempFiles.splice(idx, 1);
+        const cacheKey = await new Promise((res, rej) => {
+          const hash = crypto.createHash('sha1');
+          hash.update(`${PREPROCESS_VERSION}:${targetWidth}x${targetHeight}:${isPreview ? 'preview' : 'prod'}:`);
+          const stream = fs.createReadStream(originalPath);
+          stream.on('data', (chunk) => hash.update(chunk));
+          stream.on('end', () => res(hash.digest('hex').slice(0, 16)));
+          stream.on('error', rej);
+        });
 
-      processedCount++;
-      updateJob(jobId, { progress: 5 + Math.round((processedCount / totalVideos) * 40) }); // 5→45%
-    }
+        const processedPath = path.join(
+          jobUploadsDir,
+          `processed_${cacheKey}-${instrumentName}.mp4`,
+        );
+
+        if (fs.existsSync(processedPath)) {
+          console.log(`[Job ${jobId}] Cache hit: ${instrumentName}`);
+        } else {
+          await preprocessVideo(
+            originalPath,
+            processedPath,
+            `${targetWidth}x${targetHeight}`,
+            { performanceMode: true, quality: isPreview ? 'low' : 'high', memoryLimit: 4 },
+          );
+        }
+
+        videos[instrumentName] = {
+          path: path.resolve(processedPath),
+          isDrum: instrumentName.toLowerCase().includes('drum'),
+          notes: [],
+          layout: { x: 0, y: 0, width: targetWidth, height: targetHeight },
+        };
+
+        // Clean up raw upload immediately after this task finishes
+        try { fs.unlinkSync(originalPath); } catch { /* ignore */ }
+        const idx2 = tempFiles.indexOf(originalPath);
+        if (idx2 !== -1) tempFiles.splice(idx2, 1);
+      }
+
+      next();
+    });
 
     // ── 4. Map MIDI notes to videos ───────────────────────────────────────
     const normalizeInstrumentName = (name) =>
@@ -344,39 +374,36 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     updateJob(jobId, { progress: 50 });
 
     // ── 5. Build config & run Python ─────────────────────────────────────
-    const trackVolumes = midiData.trackVolumes || {};
     const config = {
       tracks: midiData.tracks,
       header: midiData.header,
       gridArrangement: midiData.gridArrangement,
-      trackVolumes,
+      trackVolumes: midiData.trackVolumes || {},
       compositionStyle: midiData.compositionStyle || {},
       clipStyles: midiData.clipStyles || {},
-      videos,
-      preview: isPreview,
     };
-    const configPath = path.join(os.tmpdir(), `video-config-${jobId}.json`);
-    fs.writeFileSync(configPath, JSON.stringify(config));
-    tempFiles.push(configPath);
 
-    const result = await runPythonProcessor(configPath, {
+    const result = await runPythonProcessorDirect(config, videos, {
+      isPreview,
+      jobId,
+      outputDir: jobUploadsDir,
       onProgress: (pct) =>
         updateJob(jobId, { progress: 50 + Math.round(pct * 0.4) }), // 50→90%
     });
 
-    // Clean up config
-    try { fs.unlinkSync(configPath); } catch { /* ignore */ }
-    const cfgIdx = tempFiles.indexOf(configPath);
-    if (cfgIdx !== -1) tempFiles.splice(cfgIdx, 1);
-
-    // ── 6. Move output to permanent location ─────────────────────────────
+    // ── 6. Atomic rename to permanent location ────────────────────────────
     permanentOutputPath = path.join(
       jobUploadsDir,
       `final_output_${jobId}.mp4`,
     );
     if (result.outputPath && fs.existsSync(result.outputPath)) {
-      fs.copyFileSync(result.outputPath, permanentOutputPath);
-      try { fs.unlinkSync(result.outputPath); } catch { /* ignore */ }
+      try {
+        fs.renameSync(result.outputPath, permanentOutputPath);
+      } catch (renameErr) {
+        // Cross-device fallback (outputDir on different partition than tmpdir)
+        fs.copyFileSync(result.outputPath, permanentOutputPath);
+        try { fs.unlinkSync(result.outputPath); } catch { /* ignore */ }
+      }
     }
     if (!fs.existsSync(permanentOutputPath)) {
       throw new Error('Composed video file not found after processing');

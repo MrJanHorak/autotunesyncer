@@ -39,49 +39,66 @@ class VideoComposerWrapper:
         
     def _transform_midi_data(self, midi_data: dict) -> dict:
         """
-        Transform MIDI data format to match VideoComposer expectations
-        Convert 'start'/'end' fields to 'time' fields and ensure proper structure
+        Transform MIDI data format to match VideoComposer expectations.
+        Convert 'start'/'end' fields to 'time'/'duration' fields.
+        Avoids full JSON round-trip by performing targeted per-note copies.
         """
         try:
             self.logger.info("Transforming MIDI data format for VideoComposer compatibility")
-            
-            # Create a copy to avoid modifying original data
-            transformed_data = json.loads(json.dumps(midi_data))
-            
-            # Ensure tracks is a list
+
+            # Shallow-copy the top-level dict and tracks list so callers keep their references
+            transformed_data = {**midi_data}
+
             if 'tracks' in transformed_data:
-                tracks = transformed_data['tracks']
-                
-                # If tracks is a dict, convert to list
-                if isinstance(tracks, dict):
+                raw_tracks = transformed_data['tracks']
+
+                # Normalise tracks: dict → list
+                if isinstance(raw_tracks, dict):
                     track_list = []
-                    for track_id, track_data in tracks.items():
+                    for track_id, track_data in raw_tracks.items():
                         if isinstance(track_data, dict):
-                            track_data['id'] = track_id
-                            track_list.append(track_data)
-                    transformed_data['tracks'] = track_list
-                
-                # Transform note format for each track
-                for track in transformed_data['tracks']:
-                    if 'notes' in track and isinstance(track['notes'], list):
-                        for note in track['notes']:
-                            # Convert start/end to time field if needed
+                            track_copy = {**track_data, 'id': track_id}
+                            track_list.append(track_copy)
+                    raw_tracks = track_list
+
+                new_tracks = []
+                for track in raw_tracks:
+                    if 'notes' not in track or not isinstance(track['notes'], list):
+                        new_tracks.append(track)
+                        continue
+
+                    new_notes = []
+                    for note in track['notes']:
+                        # Only copy note objects that actually need field additions
+                        needs_copy = (
+                            ('start' in note and 'time' not in note)
+                            or ('end' in note and 'duration' not in note)
+                            or 'time' not in note
+                            or 'duration' not in note
+                            or 'pitch' not in note
+                        )
+                        if needs_copy:
+                            note = dict(note)  # shallow copy only mutated notes
                             if 'start' in note and 'time' not in note:
                                 note['time'] = note['start']
                             if 'end' in note and 'duration' not in note:
                                 note['duration'] = note['end'] - note.get('start', 0)
-                            
-                            # Ensure required fields exist
                             if 'time' not in note:
                                 note['time'] = 0.0
                             if 'duration' not in note:
                                 note['duration'] = 1.0
                             if 'pitch' not in note:
                                 note['pitch'] = 60  # Middle C default
-            
+                        new_notes.append(note)
+
+                    # Only build a new track dict when notes changed
+                    new_tracks.append({**track, 'notes': new_notes})
+
+                transformed_data['tracks'] = new_tracks
+
             self.logger.info(f"Transformed {len(transformed_data.get('tracks', []))} tracks for VideoComposer")
             return transformed_data
-            
+
         except Exception as e:
             self.logger.error(f"Failed to transform MIDI data: {e}")
             return midi_data  # Return original if transformation fails

@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import os from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -114,104 +115,10 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
       fs.writeFileSync(midiJsonPath, JSON.stringify(midiData));
       fs.writeFileSync(videoJsonPath, JSON.stringify(config.videos || {}));
 
-      // Use the enhanced video processor
-      const pythonScript = path.join(__dirname, '../utils/video_processor.py');
-      const pythonArgs = [
-        pythonScript,
-        '--midi-json',
-        midiJsonPath,
-        '--video-files-json',
-        videoJsonPath,
-        '--output-path',
-        outputPath,
-        '--performance-mode',
-        '--memory-limit',
-        '4',
-      ];
-
-      if (config.preview === true) {
-        console.log(
-          'Python Bridge - Adding --preview flag for faster processing',
-        );
-        pythonArgs.push('--preview');
-      }
-
-      const pythonProcess = spawn('python', pythonArgs);
-      let output = '';
-      const stderrRing = makeRingBuffer();
-      let settled = false;
-
-      const finish = (resolveFn, rejectFn, value, isError) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutHandle);
-        cleanup();
-        if (isError) rejectFn(value);
-        else resolveFn(value);
-      };
-
-      // Hard timeout — kill the entire process tree (not just the Python parent,
-      // which would leave FFmpeg grandchildren running on Windows).
-      const timeoutHandle = setTimeout(() => {
-        console.error(
-          `Python Bridge - composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes`,
-        );
-        killProcessTree(pythonProcess);
-        finish(
-          resolve,
-          reject,
-          new Error(
-            `Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${stderrRing.get()}`,
-          ),
-          true,
-        );
-      }, COMPOSITION_TIMEOUT_MS);
-
-      pythonProcess.stdout.on('data', (data) => {
-        const message = data.toString();
-        console.log(`Python output: ${message}`);
-        output += message;
-        const progressMatch = message.match(/PROGRESS:(\d+)/);
-        if (progressMatch && onProgress) {
-          onProgress(parseInt(progressMatch[1], 10));
-        }
-      });
-
-      pythonProcess.stderr.on('data', (data) => {
-        const message = data.toString();
-        console.error(`Python error: ${message}`);
-        stderrRing.push(message);
-      });
-
-      pythonProcess.once('error', (err) => {
-        finish(
-          resolve,
-          reject,
-          new Error(
-            `Failed to spawn Python process: ${err.message}\n${stderrRing.get()}`,
-          ),
-          true,
-        );
-      });
-
-      pythonProcess.on('close', (code) => {
-        if (code !== 0) {
-          finish(
-            resolve,
-            reject,
-            new Error(
-              `Python process failed (code ${code})\n${stderrRing.get()}`,
-            ),
-            true,
-          );
-        } else {
-          finish(
-            resolve,
-            reject,
-            { success: true, outputPath, message: output.trim() },
-            false,
-          );
-        }
+      _spawnPythonProcessor({
+        midiJsonPath, videoJsonPath, outputPath,
+        isPreview: config.preview === true,
+        onProgress, cleanup, resolve, reject,
       });
     } catch (error) {
       cleanup();
@@ -219,6 +126,152 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
     }
   });
 };
+
+/**
+ * Skip the intermediate config-file layer.  processVideos.js should call
+ * this variant to avoid writing + re-reading the same JSON three times.
+ *
+ * @param {object} midiData  - { tracks, gridArrangement, trackVolumes, compositionStyle, clipStyles }
+ * @param {object} videos    - instrument → { path, isDrum, notes, layout }
+ * @param {object} options   - { isPreview, jobId, outputDir, onProgress }
+ * @returns {Promise<{ success, outputPath }>}
+ */
+export const runPythonProcessorDirect = (
+  midiData,
+  videos,
+  { isPreview = false, jobId, outputDir, onProgress } = {},
+) => {
+  return new Promise((resolve, reject) => {
+    // Validate before touching disk
+    if (!midiData?.gridArrangement || Object.keys(midiData.gridArrangement).length === 0) {
+      reject(new Error('Grid arrangement is required but was not provided'));
+      return;
+    }
+
+    const baseName = `video-config-${jobId || Date.now()}`;
+    const jsonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ats-bridge-'));
+    const midiJsonPath = path.join(jsonDir, `${baseName}-midi.json`);
+    const videoJsonPath = path.join(jsonDir, `${baseName}-videos.json`);
+    // Output lands in outputDir (same device as permanentOutputPath for atomic rename)
+    const outputPath = path.join(outputDir || jsonDir, `${baseName}-output.mp4`);
+
+    const cleanup = () => {
+      for (const p of [midiJsonPath, videoJsonPath]) {
+        try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (_) {}
+      }
+      try { fs.rmdirSync(jsonDir); } catch (_) {}
+    };
+
+    try {
+      fs.writeFileSync(midiJsonPath, JSON.stringify({
+        tracks: midiData.tracks || [],
+        gridArrangement: midiData.gridArrangement || {},
+        trackVolumes: midiData.trackVolumes || {},
+        compositionStyle: midiData.compositionStyle || {},
+        clipStyles: midiData.clipStyles || {},
+      }));
+      fs.writeFileSync(videoJsonPath, JSON.stringify(videos || {}));
+
+      console.log(
+        'Python Bridge (direct) — grid positions:',
+        Object.keys(midiData.gridArrangement).length,
+      );
+
+      _spawnPythonProcessor({
+        midiJsonPath, videoJsonPath, outputPath,
+        isPreview, onProgress, cleanup, resolve, reject,
+      });
+    } catch (error) {
+      cleanup();
+      reject(new Error(`Failed to setup Python processor: ${error.message}`));
+    }
+  });
+};
+
+/**
+ * Shared internal: spawn video_processor.py and wire up all event handlers.
+ * Preserves: progress parsing, timeout + process-tree kill, cleanup on exit.
+ */
+function _spawnPythonProcessor({ midiJsonPath, videoJsonPath, outputPath, isPreview, onProgress, cleanup, resolve, reject }) {
+  const pythonScript = path.join(__dirname, '../utils/video_processor.py');
+  const pythonArgs = [
+    pythonScript,
+    '--midi-json', midiJsonPath,
+    '--video-files-json', videoJsonPath,
+    '--output-path', outputPath,
+    '--performance-mode',
+    '--memory-limit', '4',
+  ];
+
+  if (isPreview) {
+    console.log('Python Bridge - Adding --preview flag for faster processing');
+    pythonArgs.push('--preview');
+  }
+
+  const pythonProcess = spawn('python', pythonArgs);
+  let output = '';
+  const stderrRing = makeRingBuffer();
+  let settled = false;
+
+  const finish = (resolveFn, rejectFn, value, isError) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutHandle);
+    cleanup();
+    if (isError) rejectFn(value);
+    else resolveFn(value);
+  };
+
+  const timeoutHandle = setTimeout(() => {
+    console.error(
+      `Python Bridge - composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes`,
+    );
+    killProcessTree(pythonProcess);
+    finish(
+      resolve, reject,
+      new Error(`Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${stderrRing.get()}`),
+      true,
+    );
+  }, COMPOSITION_TIMEOUT_MS);
+
+  pythonProcess.stdout.on('data', (data) => {
+    const message = data.toString();
+    console.log(`Python output: ${message}`);
+    output += message;
+    const progressMatch = message.match(/PROGRESS:(\d+)/);
+    if (progressMatch && onProgress) {
+      onProgress(parseInt(progressMatch[1], 10));
+    }
+  });
+
+  pythonProcess.stderr.on('data', (data) => {
+    const message = data.toString();
+    console.error(`Python error: ${message}`);
+    stderrRing.push(message);
+  });
+
+  pythonProcess.once('error', (err) => {
+    finish(resolve, reject,
+      new Error(`Failed to spawn Python process: ${err.message}\n${stderrRing.get()}`),
+      true,
+    );
+  });
+
+  pythonProcess.on('close', (code) => {
+    if (code !== 0) {
+      finish(resolve, reject,
+        new Error(`Python process failed (code ${code})\n${stderrRing.get()}`),
+        true,
+      );
+    } else {
+      finish(resolve, reject,
+        { success: true, outputPath, message: output.trim() },
+        false,
+      );
+    }
+  });
+}
+
 
 export const preprocessVideo = async (
   inputPath,

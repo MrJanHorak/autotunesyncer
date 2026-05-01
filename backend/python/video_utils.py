@@ -8,13 +8,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from processing_utils import encoder_queue, GPUManager
 
-# Import our GPU acceleration functions
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
-from ffmpeg_gpu import ffmpeg_gpu_encode, gpu_batch_process, gpu_note_synchronized_encode
-from gpu_config import FFMPEG_GPU_CONFIG
+from ffmpeg_gpu import gpu_batch_process  # LEGACY: gpu_batch_process still used in batch_encode_videos
+from ffmpeg_profiles import get_video_encode_args
 
 gpu_manager = GPUManager()
 
@@ -157,27 +156,19 @@ def performance_monitor(operation_name):
 def get_optimized_ffmpeg_params(use_gpu=True, preset="fast", quality="high"):
     """Get optimized FFmpeg parameters based on system capabilities"""
     
+    encode_mode = "production" if quality == "high" else "preview"
+
     # Enable GPU encoding (NVENC encode-only, no forced CUDA decode for compatibility)
     if use_gpu and gpu_manager.has_gpu:
-        # Use NVENC encoding without forced CUDA decode (better WebM/VP8/VP9 compatibility on Windows)
         params = {
             # No 'hwaccel' key - avoid forced CUDA decode which fails on WebM
-            'video_codec': FFMPEG_GPU_CONFIG['encoder'],
-            'preset': FFMPEG_GPU_CONFIG['preset'],
-            'crf': 23 if quality == "high" else 28,
-            'gpu_options': [
-                '-b:v', FFMPEG_GPU_CONFIG['bitrate'],
-                '-maxrate', FFMPEG_GPU_CONFIG['max_bitrate'],
-                '-bufsize', FFMPEG_GPU_CONFIG['buffer_size']
-            ]
+            'video_encode_args': get_video_encode_args(mode=encode_mode, use_gpu=True),
         }
     else:
         # CPU fallback with optimized settings
         cpu_count = psutil.cpu_count(logical=False)
         params = {
-            'video_codec': 'libx264',
-            'preset': preset,
-            'crf': 23 if quality == "high" else 28,
+            'video_encode_args': get_video_encode_args(mode=encode_mode, use_gpu=False),
             'cpu_options': [
                 '-threads', str(min(cpu_count, 8)),
                 '-tune', 'fastdecode'
@@ -187,7 +178,6 @@ def get_optimized_ffmpeg_params(use_gpu=True, preset="fast", quality="high"):
     # Common optimizations
     params['common_options'] = [
         '-movflags', '+faststart',  # Progressive download
-        '-pix_fmt', 'yuv420p',      # Compatibility
         '-g', '30',                 # GOP size for better seeking
         '-bf', '3',                 # B-frames for efficiency
         '-refs', '3'                # Reference frames
@@ -198,29 +188,11 @@ def get_optimized_ffmpeg_params(use_gpu=True, preset="fast", quality="high"):
 def get_optimized_ffmpeg_params_list(use_gpu=True, preset="fast", quality="high"):
     """Get optimized FFmpeg parameters as a list for legacy compatibility"""
     params = get_optimized_ffmpeg_params(use_gpu, preset, quality)
-    base_params = []
-    
-    if use_gpu and gpu_manager.has_gpu:
-        # NVENC encode-only (no forced CUDA decode for WebM compatibility)
-        base_params.extend([
-            '-c:v', params['video_codec'],
-            '-preset', params['preset'],
-            '-crf', str(params['crf'])
-        ])
-        if 'gpu_options' in params:
-            base_params.extend(params['gpu_options'])
-    else:
-        base_params.extend([
-            '-c:v', params['video_codec'],
-            '-preset', params['preset'],
-            '-crf', str(params['crf'])
-        ])
-        if 'cpu_options' in params:
-            base_params.extend(params['cpu_options'])
-    
+    base_params = list(params.get('video_encode_args', []))
+    if 'cpu_options' in params:
+        base_params.extend(params['cpu_options'])
     if 'common_options' in params:
         base_params.extend(params['common_options'])
-    
     return base_params
 
 async def run_ffmpeg_command_async(cmd, timeout=300):
@@ -431,10 +403,7 @@ def encode_video(cmd):
         elif '-preset' not in cmd:
             optimized_cmd.extend(['-preset', 'fast'])
         
-        # Use our GPU encoding function for GPU-enabled commands
-        if gpu_manager.has_gpu:
-            return ffmpeg_gpu_encode(optimized_cmd)
-        
+        # Run the full command through the encoder queue (GPU or CPU)
         result = encoder_queue.encode(optimized_cmd)
         if result.returncode != 0:
             logging.error(f"Encoding failed: {result.stderr}")

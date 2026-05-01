@@ -36,6 +36,8 @@ export function useProjectSync({
   const clipBlobCache = useRef({});
   const clipsLoadingVersion = useRef(0);
   const saveArrangementTimeoutRef = useRef(null);
+  // In-memory shadow of the last saved project state — avoids GET-before-POST on every save
+  const shadowStateRef = useRef(null);
 
   // ── 1. On project switch: load clip list + restore state ─────────────────
   useEffect(() => {
@@ -49,6 +51,7 @@ export function useProjectSync({
     });
     setVideoFiles({});
     if (precachedKeysRef) precachedKeysRef.current = new Set();
+    shadowStateRef.current = null; // reset shadow on project switch
 
     if (!currentProject) {
       setSavedClipKeys(new Set());
@@ -67,6 +70,7 @@ export function useProjectSync({
     loadProjectState(currentProject.id)
       .then((state) => {
         if (clipsLoadingVersion.current !== version) return;
+        shadowStateRef.current = state || {};  // seed shadow from server
         if (state?.midiFileBase64) {
           const [header, data] = state.midiFileBase64.split(',');
           const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
@@ -137,12 +141,9 @@ export function useProjectSync({
     const reader = new FileReader();
     reader.onload = async () => {
       try {
-        const currentState = await loadProjectState(projectId).catch(() => null);
-        await saveProjectState({
-          ...(currentState || {}),
-          midiFileBase64: reader.result,
-          midiFileName: midiFile.name,
-        });
+        const patch = { midiFileBase64: reader.result, midiFileName: midiFile.name };
+        shadowStateRef.current = { ...(shadowStateRef.current || {}), ...patch };
+        await saveProjectState(shadowStateRef.current);
       } catch (err) {
         console.warn('[clips] Failed to save MIDI to project state:', err);
       }
@@ -157,8 +158,9 @@ export function useProjectSync({
     clearTimeout(saveArrangementTimeoutRef.current);
     saveArrangementTimeoutRef.current = setTimeout(async () => {
       try {
-        const currentState = await loadProjectState(currentProject.id).catch(() => null);
-        await saveProjectState({ ...(currentState || {}), gridArrangement, trackVolumes, compositionStyle, clipStyles });
+        const patch = { gridArrangement, trackVolumes, compositionStyle, clipStyles };
+        shadowStateRef.current = { ...(shadowStateRef.current || {}), ...patch };
+        await saveProjectState(shadowStateRef.current);
       } catch (err) {
         console.warn('[state] Failed to save arrangement:', err);
       }

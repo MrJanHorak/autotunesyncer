@@ -12,9 +12,10 @@ const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
 const PYTHON_DIR = resolve(join(__dirname, '../python'));
 
 // In-process queue for pre-cache jobs.
-// Concurrency is capped at 1 so only one Python process writes to
-// cache_index.json at a time, preventing cross-process corruption.
+// Entries are keyed by filePath so that multiple requests for the same
+// source clip are merged into a single Python invocation.
 const precacheQueue = [];
+const queuedPaths = new Map(); // filePath → queue entry (for note merging)
 let isProcessing = false;
 
 const processQueue = () => {
@@ -22,6 +23,7 @@ const processQueue = () => {
   isProcessing = true;
 
   const { filePath, midiNotes } = precacheQueue.shift();
+  queuedPaths.delete(filePath); // allow new requests to create a fresh entry
 
   const payload = JSON.stringify({ video_path: filePath, midi_notes: midiNotes });
   const scriptPath = join(PYTHON_DIR, 'precache_cli.py');
@@ -39,7 +41,7 @@ const processQueue = () => {
       console.error(`[precache] Python exited with code ${code} for ${filePath}`);
     }
     isProcessing = false;
-    processQueue(); // process next job if any
+    processQueue();
   });
 };
 
@@ -80,8 +82,18 @@ export const handlePrecache = (req, res) => {
       return res.status(400).json({ error: 'Invalid file path' });
     }
 
-    precacheQueue.push({ filePath: resolved, midiNotes });
-    console.log(`[precache] Queued: ${filePath} (${midiNotes.length} notes, queue depth: ${precacheQueue.length})`);
+    // Merge notes if another job for the same source clip is already queued
+    if (queuedPaths.has(resolved)) {
+      const existing = queuedPaths.get(resolved);
+      const merged = [...new Set([...existing.midiNotes, ...midiNotes])];
+      existing.midiNotes = merged;
+      console.log(`[precache] Merged ${midiNotes.length} notes into existing queue entry for ${filePath} (total: ${merged.length})`);
+    } else {
+      const entry = { filePath: resolved, midiNotes };
+      precacheQueue.push(entry);
+      queuedPaths.set(resolved, entry);
+      console.log(`[precache] Queued: ${filePath} (${midiNotes.length} notes, queue depth: ${precacheQueue.length})`);
+    }
     processQueue();
 
     return res.status(202).json({ message: 'Pre-cache job queued', notes: midiNotes.length });

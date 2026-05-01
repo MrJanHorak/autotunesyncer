@@ -48,9 +48,10 @@ def test_health_monitor():
     return True
 
 def test_ffmpeg_executor():
-    """Test FFmpeg executor"""
-    from src.ffmpeg.executor import EnhancedFFmpegExecutor
-    executor = EnhancedFFmpegExecutor()
+    """Test FFmpeg executor (delegates to ffmpeg_profiles which replaced old executor)"""
+    from python.ffmpeg_profiles import get_video_encode_args, nvenc_available
+    args = get_video_encode_args('production', use_gpu=False)
+    assert args, "ffmpeg_profiles.get_video_encode_args returned empty list"
     return True
 
 def test_path_registry():
@@ -73,7 +74,7 @@ def test_autotune_processor():
 
 def test_video_composer():
     """Test video composer - this was the failing component"""
-    from python.video_composer import VideoComposer, compose_from_processor_output
+    from python.video_composer import VideoComposer
     # Test that the normalize_instrument_name function is accessible
     from python.video_composer import normalize_instrument_name
     

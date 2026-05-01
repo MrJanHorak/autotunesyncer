@@ -529,13 +529,50 @@ def process_audio(audio, sr, target_midi_note=60):
     detected_pitch = _detect_fundamental_pitch(mono_audio, sr)
     print(f"Detected pitch: {detected_pitch:.2f} Hz" if detected_pitch > 0 else "Pitch undetectable — using 0-semitone shift")
 
+    return process_audio_predetected(audio, sr, detected_pitch, target_midi_note,
+                                     _mono_audio=mono_audio,
+                                     _original_gated_rms=original_gated_rms)
+
+
+def process_audio_predetected(audio, sr, detected_pitch, target_midi_note=60,
+                               *, _mono_audio=None, _original_gated_rms=None):
+    """
+    Pitch-shift audio to *target_midi_note* using a pre-computed *detected_pitch*.
+
+    Skips the expensive librosa.pyin detection step; call this when you have
+    already detected the fundamental pitch for the source clip (e.g. during
+    batch pre-caching where the same source audio is shifted to many notes).
+
+    Parameters
+    ----------
+    audio : np.ndarray
+        Raw audio array as returned by soundfile.read (shape: [samples, channels]).
+    sr : int
+        Sample rate.
+    detected_pitch : float
+        Detected fundamental frequency in Hz (0 = undetectable, pass through).
+    target_midi_note : int
+        Target MIDI note (default 60 = Middle C).
+    _mono_audio, _original_gated_rms : internal
+        Pre-computed values from process_audio() to avoid redundant work.
+    """
+    audio = validate_audio(audio, sr)
+    mono_audio = _mono_audio if _mono_audio is not None else np.mean(audio, axis=1).astype(np.float32)
+    original_length = len(mono_audio)
+
+    if original_length < sr * 0.1:
+        raise ValueError(f"Audio too short: {original_length} samples")
+
+    original_gated_rms = _original_gated_rms if _original_gated_rms is not None else _compute_gated_rms(mono_audio, sr)
+
     # --- Single-pass pitch shift ---
+    target_freq = 440.0 * (2.0 ** ((target_midi_note - 69) / 12.0))
     if detected_pitch > 20.0:
         shift_semitones = 12.0 * np.log2(target_freq / detected_pitch)
     else:
         shift_semitones = 0.0  # no detectable pitch; pass through
 
-    print(f"Pitch shift: {shift_semitones:+.2f} semitones")
+    print(f"Pitch shift: {shift_semitones:+.2f} semitones (target MIDI {target_midi_note})")
 
     shifted = mono_audio  # default: passthrough
     try:
@@ -586,7 +623,7 @@ def process_audio(audio, sr, target_midi_note=60):
     dummy_pitch = np.array([detected_pitch] if detected_pitch > 0 else [0.0])
     return stereo_output, dummy_pitch, dummy_pitch
 
-def main():
+
     # Set proper encoding for Windows
     import sys
     import io

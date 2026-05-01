@@ -185,11 +185,3 @@
     max-width: 100%;
   }
 }
-@media (max-width: 768px) {
-  .controls-section {
-    margin-top: 1rem;
-    min-height: 260px;
-  }
-
-  .action-buttons-wrapper {
-    min-height: 140px;

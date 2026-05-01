@@ -2,6 +2,10 @@ import subprocess
 import os
 import sys
 
+# LEGACY MODULE — kept for gpu_batch_process() which is still called from video_utils.py
+# (batch_encode_videos path).  For new code use ffmpeg_profiles.get_video_encode_args()
+# instead of calling functions from this module directly.
+
 def ffmpeg_gpu_encode(input_path, output_path, scale=None, framerate=None, codec='h264_nvenc', extra_args=None):
     """
     Encode a video using ffmpeg with GPU acceleration (NVENC).

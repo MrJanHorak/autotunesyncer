@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from video_utils import run_ffmpeg_command, validate_video, performance_monitor, get_optimized_ffmpeg_params
 from processing_utils import encoder_queue, GPUManager
+from ffmpeg_profiles import get_video_encode_args
 
 # Enhanced logging with performance monitoring
 logging.basicConfig(
@@ -62,17 +63,14 @@ class VideoPreprocessor:
                     )
                     cmd.extend(['-vf', scale_filter])
                 
-                # Video encoding settings
-                cmd.extend([
-                    '-c:v', ffmpeg_params['video_codec'],
-                    '-preset', ffmpeg_params['preset'],
-                    '-crf', str(ffmpeg_params.get('crf', 23)),
-                    '-pix_fmt', 'yuv420p'
-                ])
+                # Video encoding — use shared profile to ensure correct args per codec
+                encode_mode = "preview" if quality == "low" else "production"
+                cmd.extend(get_video_encode_args(mode=encode_mode))
                 
-                # Add GPU-specific options
+                # GPU-specific extra options (bitrate cap etc.) from the old params dict
                 if 'gpu_options' in ffmpeg_params:
                     cmd.extend(ffmpeg_params['gpu_options'])
+
                 
                 # Audio settings
                 cmd.extend([

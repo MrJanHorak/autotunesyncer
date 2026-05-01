@@ -1,5 +1,7 @@
 # GPU Configuration for AutoTuneSyncer
-# Optimized settings for your RTX 3050 Laptop GPU
+# LEGACY — these constants are imported by video_utils.py but the active
+# hot path now uses ffmpeg_profiles.get_video_encode_args() instead.
+# Do not add new callers; migrate existing callers to ffmpeg_profiles.
 
 # GPU Hardware Detection
 GPU_ENABLED = True

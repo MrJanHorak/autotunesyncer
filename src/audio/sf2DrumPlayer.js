@@ -1,5 +1,6 @@
 import { CONFIG } from '../../config.js';
 import { Synthesizer } from 'js-synthesizer';
+import * as Tone from 'tone';
 
 class Sf2DrumPlayer {
   constructor() {
@@ -41,12 +42,9 @@ class Sf2DrumPlayer {
 
   async init() {
     if (this.audioContext) return;
-    // Reuse Tone's AudioContext if present, else create a new one
     try {
-      // Lazy require to avoid hard dependency
-      const tone = await import('tone');
       this.audioContext =
-        tone.Tone?.context?.rawContext ||
+        Tone.getContext?.().rawContext ||
         new (window.AudioContext || window.webkitAudioContext)();
     } catch (_) {
       this.audioContext = new (
