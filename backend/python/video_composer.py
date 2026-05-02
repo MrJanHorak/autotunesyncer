@@ -4274,40 +4274,23 @@ class VideoComposer:
         font_path = self._get_windows_font_path(label_font)
         current = input_label
 
-        # ── 1. Scale to cell dimensions, letterbox ───────────────────────────
-        # When bg_color is None (default) or transparentBg is on, use the global
-        # composition background so the letterbox padding blends into the canvas.
+        # ── 1. Scale to cell dimensions, zoom-to-fill ───────────────────────
+        # Always zoom-to-fill: scale up so the video covers the full cell in
+        # both dimensions, then center-crop to the exact cell size.
+        # This matches preprocessing (also zoom-to-fill) and works for any
+        # cell aspect ratio without letterbox bars or composition-bg bleed.
         comp_bg_color = getattr(self, 'composition_style', {}).get('backgroundColor', '#0a0a0f')
-        if transparent_bg:
-            pad_color = self._hex_to_ffmpeg_color(comp_bg_color)
-            logging.info(f"[style] cell={track_id!r} transparentBg=True → pad color={comp_bg_color}")
-        elif not bg_color:
-            # Default: no explicit clip bg — letterbox with composition background
-            pad_color = self._hex_to_ffmpeg_color(comp_bg_color)
-        else:
-            pad_color = self._hex_to_ffmpeg_color(bg_color)
 
-        # With zoom-to-fill (transparent_bg), video always fills the full cell —
-        # borders/rounded corners always apply to the full cell bounds.
+        # Video always fills the full cell — borders/rounded corners apply to
+        # full cell bounds regardless of the transparentBg flag.
         content_x, content_y, content_w, content_h = 0, 0, cell_w, cell_h
 
-        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_color)
         next_label = f'v_pad_{output_label[1:-1]}'
-        if transparent_bg:
-            # Zoom-to-fill: scale so the video fills the entire cell in both dimensions,
-            # then center-crop. This eliminates ALL black margins — both letterbox bars
-            # added by FFmpeg and any black bars baked into the recording itself.
-            filter_parts.append(
-                f"{current}scale={cell_w}:{cell_h}:force_original_aspect_ratio=increase,"
-                f"crop={cell_w}:{cell_h}[{next_label}]"
-            )
-            logging.info(f"[style] cell={track_id!r} transparentBg zoom-to-fill → {cell_w}x{cell_h}")
-        else:
-            # Letterbox: scale to fit, pad remaining area with per-clip bg color
-            filter_parts.append(
-                f"{current}scale={cell_w}:{cell_h}:force_original_aspect_ratio=decrease,"
-                f"pad={cell_w}:{cell_h}:-1:-1:color={pad_color}[{next_label}]"
-            )
+        filter_parts.append(
+            f"{current}scale={cell_w}:{cell_h}:force_original_aspect_ratio=increase,"
+            f"crop={cell_w}:{cell_h}[{next_label}]"
+        )
+        logging.info(f"[style] cell={track_id!r} zoom-to-fill → {cell_w}x{cell_h}")
         current = f'[{next_label}]'
 
         # ── 2. Color grade (note-active windows only) ────────────────────────
@@ -4474,16 +4457,11 @@ class VideoComposer:
 
         # ── 7. Rounded corners (staircase drawbox approximation of curve) ───────
         if rounded_corners and corner_radius > 0:
-            # When transparent bg is on, round the actual video content corners;
-            # corner fill uses the global bg so they blend into the canvas.
-            if transparent_bg:
-                rx, ry, rw, rh = content_x, content_y, content_w, content_h
-                corner_fill = self._hex_to_ffmpeg_color(comp_bg_color)
-            else:
-                rx, ry, rw, rh = 0, 0, cell_w, cell_h
-                # Fall back to the composition background when no explicit clip bg is set
-                # so rounded corners blend into the canvas instead of going black.
-                corner_fill = self._hex_to_ffmpeg_color(bg_color or comp_bg_color)
+            # Video now always fills the full cell (zoom-to-fill), so rounded
+            # corners always apply to the video itself. Fill corners with the
+            # composition background so they blend seamlessly into the canvas.
+            rx, ry, rw, rh = content_x, content_y, content_w, content_h
+            corner_fill = self._hex_to_ffmpeg_color(comp_bg_color)
             r = min(corner_radius, rw // 4, rh // 4)
             if r > 0:
                 next_label = f'v_rnd_{output_label[1:-1]}'
