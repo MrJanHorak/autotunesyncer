@@ -11,7 +11,7 @@ import { authenticateToken } from '../middleware/auth.js';
 import { requireProjectOwnership } from '../middleware/projectOwnership.js';
 
 // Bump when preprocessing algorithm or encoding settings change.
-const PREPROCESS_VERSION = 'v1';
+const PREPROCESS_VERSION = 'v2'; // v2: zoom-to-fill (crop) instead of letterbox+pad
 
 const router = express.Router();
 

@@ -57,9 +57,11 @@ class VideoPreprocessor:
                 # Add video filters for resizing
                 if target_size:
                     width, height = target_size.split('x')
+                    # Zoom-to-fill: scale so video fills the entire cell, then center-crop.
+                    # This works for any cell aspect ratio without black letterbox bars.
                     scale_filter = (
-                        f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
-                        f'pad=w={width}:h={height}:x=(ow-iw)/2:y=(oh-ih)/2:color=black'
+                        f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+                        f'crop={width}:{height}'
                     )
                     cmd.extend(['-vf', scale_filter])
                 
@@ -115,9 +117,10 @@ class VideoPreprocessor:
             
             if target_size:
                 width, height = target_size.split('x')
+                # Zoom-to-fill: scale so video fills the entire cell, then center-crop.
                 scale_filter = (
-                    f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
-                    f'pad=w={width}:h={height}:x=(ow-iw)/2:y=(oh-ih)/2:color=black'
+                    f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+                    f'crop={width}:{height}'
                 )
                 cmd.extend(['-vf', scale_filter])
             
@@ -293,8 +296,8 @@ def preprocess_video(input_path, output_path, target_size=None):
             else:
                 width, height = target_size.split('x')
             scale_filter = (
-                f'scale={width}:{height}:force_original_aspect_ratio=decrease,'
-                f'pad=w={width}:h={height}:x=(ow-iw)/2:y=(oh-ih)/2:color=black'
+                f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+                f'crop={width}:{height}'
             )
             cmd.extend(['-vf', scale_filter])
             
