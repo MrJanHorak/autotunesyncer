@@ -28,7 +28,14 @@ export const DEFAULT_COMPOSITION_STYLE = {
   titleColor: '#ffffff',
   titleFont: 'default',
   titlePosition: 'top-center', // 'top-center' | 'bottom-center' | 'center'
+  titleSubtitleText: '',
+  titleSubtitleFontSize: 24,
+  titleSubtitleColor: '#d8d8e6',
   titleAnimated: true,
+  titleDuration: 4, // seconds to show before fade-out; set to 0 for permanent
+  titleBackgroundEnabled: false,
+  titleBackgroundColor: '#120b24',
+  titleBackgroundOpacity: 0.82,
 
   // Tagline / lower-third
   taglineEnabled: false,
@@ -37,6 +44,10 @@ export const DEFAULT_COMPOSITION_STYLE = {
   taglineColor: '#cccccc',
   taglineFont: 'default',
   taglinePosition: 'bottom-center',
+  taglineBackgroundEnabled: false,
+  taglineBackgroundColor: '#0c1220',
+  taglineBackgroundOpacity: 0.72,
+  taglineAccentColor: '#ff4db8',
 
   // Watermark
   watermarkEnabled: false,
@@ -75,9 +86,10 @@ export const DEFAULT_CLIP_STYLE = {
   borderColor: '#7c3aed',
   borderWidth: 0, // 0 = no border
 
-  // null = use composition background (seamlessly transparent);
-  // set a hex color to give the clip its own distinct background.
-  bgColor: null,
+  // bgColorEnabled: user must explicitly toggle this on.
+  // bgColor: the chosen color (preserved when toggled off so it can be restored).
+  bgColorEnabled: false,
+  bgColor: '#1a1a2e',
 
   roundedCorners: false,
   cornerRadius: 12,
@@ -103,27 +115,27 @@ export const DEFAULT_CLIP_STYLE = {
 export const COLOR_THEMES = {
   dark: {
     backgroundColor: '#0a0a0f',
-    clipDefaults: { borderColor: '#7c3aed', bgColor: '#1a1a2e', colorGrade: 'none' },
+    clipDefaults: { borderColor: '#7c3aed', bgColor: '#1a1a2e', bgColorEnabled: false, colorGrade: 'none' },
     titleColor: '#ffffff', taglineColor: '#cccccc', watermarkColor: '#ffffff',
   },
   neon: {
     backgroundColor: '#050510',
-    clipDefaults: { borderColor: '#00ffff', bgColor: '#0a0a1a', colorGrade: 'vivid' },
+    clipDefaults: { borderColor: '#00ffff', bgColor: '#0a0a1a', bgColorEnabled: false, colorGrade: 'vivid' },
     titleColor: '#00ffff', taglineColor: '#ff00ff', watermarkColor: '#00ffff',
   },
   vintage: {
     backgroundColor: '#1a0f00',
-    clipDefaults: { borderColor: '#d4a044', bgColor: '#2a1500', colorGrade: 'vintage' },
+    clipDefaults: { borderColor: '#d4a044', bgColor: '#2a1500', bgColorEnabled: false, colorGrade: 'vintage' },
     titleColor: '#f5deb3', taglineColor: '#d4a044', watermarkColor: '#d4a044',
   },
   cyberpunk: {
     backgroundColor: '#0d0221',
-    clipDefaults: { borderColor: '#ff00ff', bgColor: '#0d0221', colorGrade: 'cyberpunk' },
+    clipDefaults: { borderColor: '#ff00ff', bgColor: '#0d0221', bgColorEnabled: false, colorGrade: 'cyberpunk' },
     titleColor: '#ff00ff', taglineColor: '#00ffff', watermarkColor: '#ff00ff',
   },
   minimal: {
     backgroundColor: '#f5f5f5',
-    clipDefaults: { borderColor: '#e0e0e0', bgColor: '#ffffff', colorGrade: 'none' },
+    clipDefaults: { borderColor: '#e0e0e0', bgColor: '#ffffff', bgColorEnabled: false, colorGrade: 'none' },
     titleColor: '#111111', taglineColor: '#555555', watermarkColor: '#888888',
   },
 };

@@ -15,10 +15,46 @@ import {
   rectSortingStrategy,
 } from '@dnd-kit/sortable';
 import { SortableItem } from './SortableItems';
+import { DEFAULT_COMPOSITION_STYLE } from '../../js/styleDefaults';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
 import './Grid.css';
 
-const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, onClipStyleChange, instrumentVideos, isPreviewPlaying, activeLevels }) => {
+const FONT_FAMILY_MAP = {
+  default:   'inherit',
+  arial:     'Arial, sans-serif',
+  verdana:   'Verdana, sans-serif',
+  impact:    'Impact, sans-serif',
+  courier:   '"Courier New", monospace',
+  times:     '"Times New Roman", serif',
+  georgia:   'Georgia, serif',
+  trebuchet: '"Trebuchet MS", sans-serif',
+  comic:     '"Comic Sans MS", cursive',
+};
+const getFontFamily = (font) => FONT_FAMILY_MAP[font] || 'inherit';
+const hexToRgba = (hex, alpha = 1) => {
+  const normalized = (hex || '').replace('#', '');
+  const safe = normalized.length === 3
+    ? normalized.split('').map((char) => char + char).join('')
+    : normalized.padEnd(6, '0').slice(0, 6);
+  const value = Number.parseInt(safe, 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+};
+
+const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, onClipStyleChange, instrumentVideos, isPreviewPlaying, activeLevels, compositionStyle }) => {
+  const previewStyle = { ...DEFAULT_COMPOSITION_STYLE, ...(compositionStyle || {}) };
+  const titleText = previewStyle.titleText?.trim() || previewStyle.introCardText?.trim() || '';
+  const titleSubtitleText = previewStyle.titleSubtitleText?.trim() || previewStyle.introCardSubtext?.trim() || '';
+  const taglineText = previewStyle.taglineText?.trim() || '';
+  const titleFont = previewStyle.titleFont || previewStyle.introCardFont || 'default';
+  const titleColor = previewStyle.titleColor || previewStyle.introCardTextColor || '#ffffff';
+  const titleCardBg = previewStyle.titleBackgroundColor || previewStyle.introCardBg || '#120b24';
+  const titleCardOpacity = previewStyle.titleBackgroundOpacity ?? 0.82;
+  const titleUsesCard = Boolean(previewStyle.titleBackgroundEnabled);
+  const introDuration = previewStyle.introCardEnabled ? (previewStyle.introCardDuration ?? 3) : 0;
+
   // 1. Process MIDI data first
   const processedData = useMemo(() => {
     const trackData = [];
@@ -108,6 +144,24 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
     calculateOptimalColumns[0] || 4
   );
   const arrangementRestoredRef = useRef(false);
+
+  // Intro card preview playback state
+  const [showIntroCard, setShowIntroCard] = useState(false);
+  const introTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (isPreviewPlaying && previewStyle.introCardEnabled && titleText) {
+      setShowIntroCard(true);
+      introTimerRef.current = setTimeout(() => {
+        setShowIntroCard(false);
+      }, introDuration * 1000);
+    } else if (!isPreviewPlaying) {
+      clearTimeout(introTimerRef.current);
+      setShowIntroCard(false);
+    }
+    return () => clearTimeout(introTimerRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [introDuration, isPreviewPlaying, previewStyle.introCardEnabled, titleText]);
 
   // Restore saved drag order once (on first non-empty initialArrangement)
   useEffect(() => {
@@ -264,6 +318,30 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
     }
   }, [items, columnCount, onArrangementChange]);
 
+  const getTitlePositionStyle = () => {
+    switch (previewStyle.titlePosition) {
+      case 'bottom-center':
+        return { left: '50%', bottom: '16px', transform: 'translateX(-50%)' };
+      case 'center':
+        return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' };
+      default:
+        return { left: '50%', top: '14px', transform: 'translateX(-50%)' };
+    }
+  };
+
+  const getWatermarkPositionStyle = () => {
+    switch (previewStyle.watermarkPosition) {
+      case 'bottom-left':
+        return { left: '12px', bottom: '12px' };
+      case 'top-right':
+        return { right: '12px', top: '12px' };
+      case 'top-left':
+        return { left: '12px', top: '12px' };
+      default:
+        return { right: '12px', bottom: '12px' };
+    }
+  };
+
   return (
     <div className='grid-container'>
       <DndContext
@@ -272,50 +350,178 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
         onDragEnd={handleDragEnd}
       >
         <div
-          className='grid'
-          style={{
-            display: 'grid',
-            gridTemplateColumns: `repeat(${columnCount}, 1fr)`,
-            gap: '8px',
-            aspectRatio: '16/9',
-            width: '100%',
-            height: 'auto',
-            maxHeight: '100%',
-          }}
+          className='grid-preview-stage'
+          style={{ background: previewStyle.backgroundColor || '#0a0a0f' }}
         >
-          <SortableContext items={items} strategy={rectSortingStrategy}>
-            {items.map((item) => {
-              const intensity = getHeatIntensity(item.count);
-              // Derive the instrumentVideos key from the item id/name
-              const videoKey = item.id.startsWith('drum-')
-                ? item.id.replace('drum-', '')
-                : (item.name || '').toLowerCase().replace(/\s+/g, '_');
-              const videoUrl = instrumentVideos?.[videoKey] || null;
-              return (
-                <SortableItem
-                  key={item.id}
-                  id={item.id}
-                  item={item}
-                  getHeatColor={
-                    item.isEmpty
-                      ? 'transparent'
-                      : getHeatColor(intensity)
-                  }
-                  accentColor={
-                    item.isEmpty
-                      ? '#9ca3af'
-                      : getAccentColor(intensity)
-                  }
-                  isEmpty={item.isEmpty}
-                  clipStyle={clipStyles?.[item.id]}
-                  onClipStyleChange={(newStyle) => onClipStyleChange?.(item.id, newStyle)}
-                  videoUrl={videoUrl}
-                  isPreviewPlaying={isPreviewPlaying}
-                  activeLevel={activeLevels?.[videoKey]}
-                />
-              );
-            })}
-          </SortableContext>
+          <div
+            className='grid'
+            style={{
+              display: 'grid',
+              gridTemplateColumns: `repeat(${columnCount}, 1fr)`,
+              gap: '8px',
+              aspectRatio: '16/9',
+              width: '100%',
+              height: 'auto',
+              maxHeight: '100%',
+            }}
+          >
+            <SortableContext items={items} strategy={rectSortingStrategy}>
+              {items.map((item) => {
+                const intensity = getHeatIntensity(item.count);
+                // Derive the instrumentVideos key from the item id/name
+                const videoKey = item.id.startsWith('drum-')
+                  ? item.id.replace('drum-', '')
+                  : (item.name || '').toLowerCase().replace(/\s+/g, '_');
+                const videoUrl = instrumentVideos?.[videoKey] || null;
+                return (
+                  <SortableItem
+                    key={item.id}
+                    id={item.id}
+                    item={item}
+                    getHeatColor={
+                      item.isEmpty
+                        ? 'transparent'
+                        : getHeatColor(intensity)
+                    }
+                    accentColor={
+                      item.isEmpty
+                        ? '#9ca3af'
+                        : getAccentColor(intensity)
+                    }
+                    isEmpty={item.isEmpty}
+                    clipStyle={clipStyles?.[item.id]}
+                    onClipStyleChange={(newStyle) => onClipStyleChange?.(item.id, newStyle)}
+                    videoUrl={videoUrl}
+                    isPreviewPlaying={isPreviewPlaying}
+                    activeLevel={activeLevels?.[videoKey]}
+                  />
+                );
+              })}
+            </SortableContext>
+          </div>
+
+          <div className='grid-preview-overlay' aria-hidden='true'>
+            {previewStyle.vignetteEnabled && (
+              <div
+                className='grid-preview-vignette'
+                style={{ opacity: Math.min(Math.max(previewStyle.vignetteStrength ?? 0.5, 0.1), 1) }}
+              />
+            )}
+
+            {previewStyle.glitchEnabled && (
+              <div
+                className={`grid-preview-glitch grid-preview-glitch--${previewStyle.glitchIntensity || 'subtle'}`}
+              />
+            )}
+
+            {previewStyle.titleEnabled && titleText && !showIntroCard && (
+              <div
+                className={[
+                  titleUsesCard ? 'grid-preview-title-card' : 'grid-preview-title',
+                  previewStyle.titleAnimated ? 'grid-preview-title--fade-in' : '',
+                  (previewStyle.titleDuration ?? 0) > 0 ? 'grid-preview-title--fade-out' : '',
+                ].filter(Boolean).join(' ')}
+                style={{
+                  ...getTitlePositionStyle(),
+                  color: titleColor,
+                  fontSize: `${previewStyle.titleFontSize}px`,
+                  fontFamily: getFontFamily(titleFont),
+                  ...(titleUsesCard && {
+                    background: hexToRgba(titleCardBg, titleCardOpacity),
+                    border: '1px solid rgba(255,255,255,0.16)',
+                    borderRadius: '18px',
+                    padding: '0.75rem 1.1rem',
+                    boxShadow: '0 18px 48px rgba(0,0,0,0.28)',
+                    backdropFilter: 'blur(14px)',
+                  }),
+                  ...((previewStyle.titleDuration ?? 0) > 0 && {
+                    '--title-fade-out-delay': `${introDuration + previewStyle.titleDuration}s`,
+                  }),
+                }}
+              >
+                <span className='grid-preview-title__text'>{titleText}</span>
+                {titleSubtitleText && (
+                  <span
+                    className='grid-preview-title__subtext'
+                    style={{
+                      color: previewStyle.titleSubtitleColor || '#d8d8e6',
+                      fontSize: `${previewStyle.titleSubtitleFontSize ?? Math.max(14, Math.round(previewStyle.titleFontSize * 0.43))}px`,
+                      fontFamily: getFontFamily(titleFont),
+                    }}
+                  >
+                    {titleSubtitleText}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {previewStyle.taglineEnabled && taglineText && !showIntroCard && (
+              <div
+                className='grid-preview-tagline'
+                style={{
+                  color: previewStyle.taglineColor,
+                  fontSize: `${previewStyle.taglineFontSize}px`,
+                  fontFamily: getFontFamily(previewStyle.taglineFont),
+                  ...(previewStyle.taglineBackgroundEnabled && {
+                    background: hexToRgba(previewStyle.taglineBackgroundColor || '#0c1220', previewStyle.taglineBackgroundOpacity ?? 0.72),
+                    borderTop: `3px solid ${previewStyle.taglineAccentColor || '#ff4db8'}`,
+                    padding: '0.65rem 1rem 0.7rem',
+                    borderRadius: '14px 14px 0 0',
+                    minWidth: 'min(72%, 720px)',
+                    textAlign: 'center',
+                    boxShadow: '0 -10px 32px rgba(0, 0, 0, 0.22)',
+                  }),
+                }}
+              >
+                {taglineText}
+              </div>
+            )}
+
+            {previewStyle.watermarkEnabled && previewStyle.watermarkText?.trim() && (
+              <div
+                className='grid-preview-watermark'
+                style={{
+                  ...getWatermarkPositionStyle(),
+                  color: previewStyle.watermarkColor,
+                  fontSize: `${previewStyle.watermarkFontSize}px`,
+                  fontFamily: getFontFamily(previewStyle.watermarkFont),
+                  opacity: Math.min(Math.max(previewStyle.watermarkOpacity ?? 0.5, 0.1), 1),
+                }}
+              >
+                {previewStyle.watermarkText}
+              </div>
+            )}
+
+            {/* Intro card: full-screen overlay at start of preview playback */}
+            {showIntroCard && (
+              <div
+                className={`grid-intro-card${previewStyle.introCardAnimated ? ' grid-intro-card--animated' : ''}`}
+                style={{ background: hexToRgba(titleCardBg, Math.min(titleCardOpacity + 0.13, 0.95)) }}
+              >
+                <p
+                  className='grid-intro-card__title'
+                  style={{
+                    color: titleColor,
+                    fontFamily: getFontFamily(titleFont),
+                  }}
+                >
+                  {titleText || 'Untitled'}
+                </p>
+                {titleSubtitleText && (
+                  <p
+                    className='grid-intro-card__subtext'
+                    style={{
+                      color: previewStyle.titleSubtitleColor || '#d8d8e6',
+                      fontFamily: getFontFamily(titleFont),
+                      fontSize: `${previewStyle.titleSubtitleFontSize ?? 24}px`,
+                    }}
+                  >
+                    {titleSubtitleText}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </DndContext>
     </div>
@@ -340,6 +546,7 @@ Grid.propTypes = {
   instrumentVideos: PropTypes.object,
   isPreviewPlaying: PropTypes.bool,
   activeLevels: PropTypes.object,
+  compositionStyle: PropTypes.object,
 };
 
 export default Grid;

@@ -4618,10 +4618,20 @@ class VideoComposer:
         reused by the combined compress+overlay finalization pass.
         """
         cs = getattr(self, 'composition_style', {}) or {}
-        has_title     = bool(cs.get('titleEnabled')     and cs.get('titleText',     '').strip())
-        has_tagline   = bool(cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip())
+        title_text    = (cs.get('titleText') or cs.get('introCardText') or '').strip()
+        title_subtext = (cs.get('titleSubtitleText') or cs.get('introCardSubtext') or '').strip()
+        tagline_text  = (cs.get('taglineText') or '').strip()
+        title_font    = cs.get('titleFont') or cs.get('introCardFont', 'default')
+        title_color   = cs.get('titleColor') or cs.get('introCardTextColor', '#ffffff')
+        title_subcolor = cs.get('titleSubtitleColor', '#d8d8e6')
+        title_subsize = int(cs.get('titleSubtitleFontSize', 24))
+        title_bg      = cs.get('titleBackgroundColor') or cs.get('introCardBg', '#000000')
+        title_bg_opacity = float(cs.get('titleBackgroundOpacity', 0.82) or 0.82)
+        title_has_bg  = bool(cs.get('titleBackgroundEnabled'))
+        has_title     = bool(cs.get('titleEnabled') and title_text)
+        has_tagline   = bool(cs.get('taglineEnabled') and tagline_text)
         has_watermark = bool(cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip())
-        has_intro     = bool(cs.get('introCardEnabled'))
+        has_intro     = bool(cs.get('introCardEnabled') and title_text)
         if not (has_title or has_tagline or has_watermark or has_intro):
             return None
 
@@ -4655,10 +4665,10 @@ class VideoComposer:
         # ── Intro card (solid background fill + title + subtitle at video start) ──
         if has_intro:
             intro_dur  = max(1.0, float(cs.get('introCardDuration', 3)))
-            bg_col     = self._hex_to_ffmpeg_color(cs.get('introCardBg', '#000000'))
-            txt_col    = cs.get('introCardTextColor', '#ffffff')
-            animated   = bool(cs.get('introCardAnimated', True))
-            ic_font    = cs.get('introCardFont', 'default')
+            bg_col     = self._hex_to_ffmpeg_color(title_bg)
+            txt_col    = title_color
+            animated   = bool(cs.get('titleAnimated', cs.get('introCardAnimated', True)))
+            ic_font    = title_font
             d          = f'{intro_dur:.3f}'
             fade_out   = f'{intro_dur - 0.3:.3f}'
             alpha_expr = (
@@ -4669,15 +4679,11 @@ class VideoComposer:
             nxt = f'v_to_{len(filter_parts)}'
             filter_parts.append(
                 f"[{current_label}]drawbox=x=0:y=0:w=iw:h=ih"
-                f":color={bg_col}@1.0:t=fill:enable='lt(t,{d})'[{nxt}]"
+                f":color={bg_col}@{min(title_bg_opacity + 0.13, 0.95):.3f}:t=fill:enable='lt(t,{d})'[{nxt}]"
             )
             current_label = nxt
-            ic_title = (cs.get('introCardText') or '').strip()
-            ic_sub   = (cs.get('introCardSubtext') or '').strip()
-            # When both are blank the user probably hasn't configured the card;
-            # fall back to a generic title so the card is visibly present.
-            if not ic_title and not ic_sub:
-                ic_title = 'AutoTune Composition'
+            ic_title = title_text or 'AutoTune Composition'
+            ic_sub   = title_subtext
             if ic_title:
                 add_drawtext(ic_title, '(w-text_w)/2', '(h-text_h)/2', 72, txt_col,
                              alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
@@ -4693,38 +4699,103 @@ class VideoComposer:
         if has_title:
             pos  = cs.get('titlePosition', 'top-center')
             size = int(cs.get('titleFontSize', 56))
-            color = cs.get('titleColor', '#ffffff')
+            color = title_color
             animated = bool(cs.get('titleAnimated', True))
-            if animated:
+            title_duration = float(cs.get('titleDuration', 0) or 0)
+            start_at = max(0.0, float(cs.get('introCardDuration', 3))) if has_intro else 0.0
+            enabled = '1'
+            if title_duration > 0:
+                fin = 0.6 if animated else 0.0
+                fout = 0.8 if animated else 0.0
+                T_end = min(start_at + title_duration + fout, total_duration)
+                if animated:
+                    fade_in_end = start_at + fin
+                    hold_end = max(fade_in_end, min(start_at + title_duration, T_end - fout))
+                    ai = f"if(lt(t,{start_at:.3f}),0,if(lt(t,{fade_in_end:.3f}),(t-{start_at:.3f})/{max(fin,0.001):.3f},1))"
+                    ao = f"if(lt(t,{hold_end:.3f}),1,max(0,1-(t-{hold_end:.3f})/{max(fout,0.001):.3f}))"
+                    alpha = f"({ai})*({ao})"
+                else:
+                    alpha = '1'
+                enabled = f"between(t,{start_at:.3f},{T_end:.3f})"
+            elif animated:
                 fin  = 2.0
                 fout = 2.0
                 hold = min(max(total_duration * 0.15, 3.0), 8.0)
-                T_end = min(fin + hold + fout, total_duration)
+                T_end = min(start_at + fin + hold + fout, total_duration)
                 if T_end > total_duration:
                     hold = max(0.0, total_duration - fin - fout)
                     T_end = total_duration
-                F  = f'{fin:.3f}'
+                F  = f'{(start_at + fin):.3f}'
                 Te = f'{T_end:.3f}'
                 Fo = f'{fout:.3f}'
                 ai = f"(t+{F}-abs(t-{F}))/(2*{F})"
                 pu = f"(({Te}-t)+abs({Te}-t))/2"
                 ao = f"(({pu})+{Fo}-abs(({pu})-{Fo}))/(2*{Fo})"
                 alpha   = f"({ai})*({ao})"
-                enabled = f"lte(t,{Te})"
+                enabled = f"between(t,{start_at:.3f},{Te})"
             else:
                 alpha, enabled = '1', '1'
-            y = (str(max(20, size // 2)) if pos == 'top-center'
-                 else f'h-{size * 2}'   if pos == 'bottom-center'
-                 else '(h-text_h)/2')
-            add_drawtext(cs['titleText'], '(w-text_w)/2', y, size, color,
+            if title_has_bg:
+                box_color = self._hex_to_ffmpeg_color(title_bg)
+                if pos == 'bottom-center':
+                    box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.72', 'w*0.68', 'h*0.18'
+                    title_y = 'h*0.765'
+                    tag_y = 'h*0.835'
+                elif pos == 'center':
+                    box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.39', 'w*0.68', 'h*0.22'
+                    title_y = 'h*0.455'
+                    tag_y = 'h*0.53'
+                else:
+                    box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.04', 'w*0.68', 'h*0.18'
+                    title_y = 'h*0.095'
+                    tag_y = 'h*0.16'
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]drawbox=x={box_x}:y={box_y}:w={box_w}:h={box_h}"
+                    f":color={box_color}@{title_bg_opacity:.3f}:t=fill:enable='{enabled}'[{nxt}]"
+                )
+                current_label = nxt
+                y = title_y
+            else:
+                y = (str(max(20, size // 2)) if pos == 'top-center'
+                     else f'h-{size * 2}'   if pos == 'bottom-center'
+                     else '(h-text_h)/2')
+            add_drawtext(title_text, '(w-text_w)/2', y, size, color,
                          alpha_expr=alpha, enabled=enabled,
-                         font_key=cs.get('titleFont', 'default'))
+                         font_key=title_font)
+            if title_subtext:
+                subtitle_y = tag_y if title_has_bg else (
+                    'h*0.58' if pos == 'center' else f'{y}+{max(title_subsize + 10, size // 2)}'
+                )
+                add_drawtext(title_subtext, '(w-text_w)/2', subtitle_y,
+                             int(max(16, title_subsize)),
+                             title_subcolor,
+                             alpha_expr=alpha, enabled=enabled,
+                             font_key=title_font)
 
         # ── Tagline ───────────────────────────────────────────────────────────
         if has_tagline:
             size  = int(cs.get('taglineFontSize', 24))
             color = cs.get('taglineColor', '#cccccc')
-            add_drawtext(cs['taglineText'], '(w-text_w)/2', f'h-{size * 2 + 10}',
+            tagline_bg_enabled = bool(cs.get('taglineBackgroundEnabled'))
+            tagline_bg = self._hex_to_ffmpeg_color(cs.get('taglineBackgroundColor', '#0c1220'))
+            tagline_bg_opacity = float(cs.get('taglineBackgroundOpacity', 0.72) or 0.72)
+            tagline_accent = self._hex_to_ffmpeg_color(cs.get('taglineAccentColor', '#ff4db8'))
+            text_y = f'h-{size * 2 + 18}' if tagline_bg_enabled else f'h-{size * 2 + 10}'
+            if tagline_bg_enabled:
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]drawbox=x=w*0.14:y=h*0.84:w=w*0.72:h=h*0.10"
+                    f":color={tagline_bg}@{tagline_bg_opacity:.3f}:t=fill[{nxt}]"
+                )
+                current_label = nxt
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]drawbox=x=w*0.14:y=h*0.84:w=w*0.72:h=4"
+                    f":color={tagline_accent}@1.0:t=fill[{nxt}]"
+                )
+                current_label = nxt
+            add_drawtext(tagline_text, '(w-text_w)/2', text_y,
                          size, color, font_key=cs.get('taglineFont', 'default'))
 
         # ── Watermark ─────────────────────────────────────────────────────────

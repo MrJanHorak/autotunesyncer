@@ -12,10 +12,11 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.6rem 0.75rem;
+  padding: 0.75rem 0.8rem;
   border-bottom: 1px solid rgba(192, 132, 252, 0.12);
-  min-height: 44px;
+  min-height: 52px;
   flex-shrink: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
 }
 
 .instrument-sidebar__title {
@@ -34,8 +35,9 @@
   font-weight: 600;
   color: var(--color-accent);
   background: rgba(192, 132, 252, 0.1);
+  border: 1px solid rgba(192, 132, 252, 0.18);
   border-radius: 999px;
-  padding: 0.1rem 0.45rem;
+  padding: 0.2rem 0.5rem;
   white-space: nowrap;
 }
 
@@ -51,8 +53,11 @@
 /* ── Progress bar ───────────────────────────────────────────────── */
 .instrument-sidebar__progress-bar {
   position: relative;
-  height: 20px;
+  height: 24px;
+  margin: 0.6rem 0.65rem 0;
   background: rgba(192, 132, 252, 0.08);
+  border: 1px solid rgba(192, 132, 252, 0.12);
+  border-radius: 999px;
   border-bottom: 1px solid rgba(192, 132, 252, 0.1);
   flex-shrink: 0;
   overflow: hidden;
@@ -84,9 +89,27 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 0.4rem 0;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(192,132,252,0.3) transparent;
+  padding: 0.65rem;
+}
+
+.instrument-sidebar__list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.instrument-sidebar__list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.instrument-sidebar__list::-webkit-scrollbar-thumb {
+  background: rgba(192,132,252,0.24);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.instrument-sidebar__list::-webkit-scrollbar-thumb:hover {
+  background: rgba(192,132,252,0.38);
+  background-clip: padding-box;
 }
 
 .instrument-sidebar__item {
@@ -94,15 +117,17 @@
   align-items: center;
   gap: 0.45rem;
   width: 100%;
-  padding: 0.5rem 0.75rem;
+  padding: 0.7rem 0.75rem;
   background: none;
   border: none;
-  border-bottom: 1px solid rgba(192, 132, 252, 0.06);
+  border: 1px solid rgba(192, 132, 252, 0.08);
+  border-radius: 14px;
+  margin-bottom: 0.45rem;
   color: var(--color-text-muted);
   font-size: 0.82rem;
   cursor: pointer;
   text-align: left;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.12s, color 0.12s, border-color 0.12s, transform 0.12s;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -110,6 +135,8 @@
 .instrument-sidebar__item:hover {
   background: rgba(192, 132, 252, 0.08);
   color: var(--color-text-main);
+  border-color: rgba(192, 132, 252, 0.18);
+  transform: translateX(2px);
 }
 
 .instrument-sidebar__item--recorded {
@@ -142,14 +169,17 @@
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .instrument-sidebar__hint {
-  font-size: 0.67rem;
+  font-size: 0.7rem;
   color: var(--color-text-muted);
   opacity: 0.65;
   flex-shrink: 0;
+  background: rgba(255,255,255,0.04);
+  border-radius: 999px;
+  padding: 0.15rem 0.42rem;
 }
 
 .instrument-sidebar__empty {

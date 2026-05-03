@@ -5,6 +5,25 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { DEFAULT_CLIP_STYLE, COLOR_GRADE_LABELS } from '../../js/styleDefaults';
 
+const getClipColorFilter = (colorGrade) => {
+  switch (colorGrade) {
+    case 'warm':
+      return 'saturate(1.12) sepia(0.14) hue-rotate(-8deg)';
+    case 'cool':
+      return 'saturate(1.06) hue-rotate(12deg) brightness(1.02)';
+    case 'vintage':
+      return 'sepia(0.48) contrast(0.95) saturate(0.86)';
+    case 'cyberpunk':
+      return 'saturate(1.4) hue-rotate(24deg) contrast(1.06)';
+    case 'bw':
+      return 'grayscale(1) contrast(1.03)';
+    case 'vivid':
+      return 'saturate(1.55) contrast(1.08)';
+    default:
+      return 'none';
+  }
+};
+
 const ClipStylePopover = ({ style, onChange, onClose, instrumentName, anchorRef }) => {
   const set = (k, v) => onChange({ ...style, [k]: v });
   const popoverRef = useRef(null);
@@ -66,15 +85,15 @@ const ClipStylePopover = ({ style, onChange, onClose, instrumentName, anchorRef 
           <label className='csp-toggle' style={{ marginRight: '0.5rem' }}>
             <input
               type='checkbox'
-              checked={style.bgColor != null}
-              onChange={(e) => set('bgColor', e.target.checked ? '#1a1a2e' : null)}
+              checked={!!style.bgColorEnabled}
+              onChange={(e) => set('bgColorEnabled', e.target.checked)}
               title='Enable custom idle background color'
             />
             <span className='csp-toggle__slider' />
           </label>
-          {style.bgColor != null ? (
+          {style.bgColorEnabled ? (
             <>
-              <input type='color' value={style.bgColor} onChange={(e) => set('bgColor', e.target.value)} title='Background color when clip is idle' />
+              <input type='color' value={style.bgColor || '#1a1a2e'} onChange={(e) => set('bgColor', e.target.value)} title='Background color when clip is idle' />
               <span className='clip-style-hint' style={{ color: 'var(--color-text-muted)', fontSize: '0.72rem' }}>when idle</span>
             </>
           ) : (
@@ -205,14 +224,17 @@ export const SortableItem = memo(function SortableItem({
 
   // Opacity logic:
   //   idle (no preview)      → 0.35, looping
-  //   preview + note active  → 0.7, playing from note start
-  //   preview + note silent  → 0, hidden
+  //   preview + note active  → 0.78, visible
+  //   preview + note silent  → 0, hidden (video paused too, so no frozen frame)
   const ACTIVE_THRESHOLD_DB = -45;
   const isInstrumentActive = isPreviewPlaying
     ? (activeLevel !== undefined && activeLevel > ACTIVE_THRESHOLD_DB)
     : false;
 
-  const videoOpacity = !isPreviewPlaying ? 0.35 : isInstrumentActive ? 0.7 : 0;
+  // Not playing → dim idle loop (0.35)
+  // Preview + active → full brightness (1)
+  // Preview + silent → hidden (0)
+  const videoOpacity = !isPreviewPlaying ? 0.35 : isInstrumentActive ? 1 : 0;
 
   // Start idle loop on initial mount (once video is ready)
   useEffect(() => {
@@ -228,20 +250,22 @@ export const SortableItem = memo(function SortableItem({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoUrl]);
 
-  // When preview toggles: restore idle loop or pause to wait for first note
+  // When preview toggles: restore idle loop or pause+hide to wait for first note.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoUrl) return;
+    wasActiveRef.current = false;
     if (!isPreviewPlaying) {
-      wasActiveRef.current = false;
       video.play().catch(() => {});
     } else {
       video.pause();
-      wasActiveRef.current = false;
+      video.currentTime = 0;
     }
   }, [isPreviewPlaying, videoUrl]);
 
-  // Note onset/release during preview — reset to 0 on each new note
+  // Note onset/release during preview.
+  // On note start: jump to beginning and play. On note end: pause and reset so
+  // no frozen frame is visible when opacity drops back to 0.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoUrl || !isPreviewPlaying) return;
@@ -249,23 +273,30 @@ export const SortableItem = memo(function SortableItem({
     const isActive = activeLevel !== undefined && activeLevel > ACTIVE_THRESHOLD_DB;
 
     if (isActive && !wasActiveRef.current) {
-      // Note just started — jump to beginning and play
       video.currentTime = 0;
       video.play().catch(() => {});
     } else if (!isActive && wasActiveRef.current) {
-      // Note just ended — pause the clip
       video.pause();
+      video.currentTime = 0;
     }
 
     wasActiveRef.current = isActive;
   }, [activeLevel, isPreviewPlaying, videoUrl]);
 
   const cs = clipStyle || DEFAULT_CLIP_STYLE;
+  const videoFilter = getClipColorFilter(cs.colorGrade);
+  const beatFlashOpacity = isPreviewPlaying && isInstrumentActive && cs.beatFlashEnabled
+    ? Math.min(Math.max(cs.beatFlashIntensity ?? 0.4, 0), 1)
+    : 0;
 
   const cellStyle = {
     transform: transform ? CSS.Transform.toString(transform) : '',
-    transition,
-    background: isEmpty ? '#f3f4f6' : getHeatColor,
+    transition: isPreviewPlaying ? 'none' : transition,
+    background: isPreviewPlaying
+      ? (isEmpty ? 'transparent' : (cs.bgColorEnabled && cs.bgColor) ? cs.bgColor : 'transparent')
+      : isEmpty
+        ? '#f3f4f6'
+        : getHeatColor,
     borderRadius: cs.roundedCorners ? `${cs.cornerRadius}px` : '12px',
     aspectRatio: '16/9',
     border: cs.borderWidth > 0 ? `${cs.borderWidth}px solid ${cs.borderColor}` : 'none',
@@ -282,11 +313,12 @@ export const SortableItem = memo(function SortableItem({
     <div
       ref={setNodeRef}
       style={cellStyle}
-      className={`grid-cell ${isEmpty ? 'empty' : ''}`}
+      className={`grid-cell ${isEmpty ? 'empty' : ''} ${isPreviewPlaying ? 'preview-active' : ''}`}
       {...attributes}
       {...listeners}
     >
-      {/* Semi-transparent video overlay — pointer events disabled so DnD works */}
+      {/* Video — use display:none (not opacity:0) when hidden so the browser's
+           default black video background can't bleed through transparent cells */}
       {!isEmpty && videoUrl && (
         <video
           ref={videoRef}
@@ -301,33 +333,50 @@ export const SortableItem = memo(function SortableItem({
             width: '100%',
             height: '100%',
             objectFit: 'cover',
-            opacity: videoOpacity,
+            display: (isPreviewPlaying && !isInstrumentActive) ? 'none' : 'block',
+            opacity: !isPreviewPlaying ? 0.35 : 1,
             transition: 'opacity 0.08s ease',
             pointerEvents: 'none',
             zIndex: 0,
             borderRadius: 'inherit',
+            filter: videoFilter,
+          }}
+        />
+      )}
+
+      {!isEmpty && (
+        <div
+          className='clip-beat-flash'
+          style={{
+            background: cs.beatFlashColor || '#ffffff',
+            opacity: beatFlashOpacity,
           }}
         />
       )}
 
       {!isEmpty && (
         <>
-          <div className='cell-content' style={{ ...cellContentStyle, position: 'relative', zIndex: 1 }}>
-            <span className='cell-name'>{item.name}</span>
-            <span className='cell-count'>{item.count} notes</span>
-          </div>
+          {/* Text and style button — hidden during preview for a clean stage look */}
+          {!isPreviewPlaying && (
+            <>
+              <div className='cell-content' style={{ ...cellContentStyle, position: 'relative', zIndex: 1 }}>
+                <span className='cell-name'>{item.name}</span>
+                <span className='cell-count'>{item.count} notes</span>
+              </div>
 
-          {/* Palette button — stops drag propagation */}
-          <button
-            ref={btnRef}
-            className='cell-style-btn'
-            title='Style this clip'
-            style={{ position: 'relative', zIndex: 2 }}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); setShowStylePicker((s) => !s); }}
-          >
-            🎨
-          </button>
+              {/* Palette button — stops drag propagation */}
+              <button
+                ref={btnRef}
+                className='cell-style-btn'
+                title='Style this clip'
+                style={{ position: 'relative', zIndex: 2 }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); setShowStylePicker((s) => !s); }}
+              >
+                🎨
+              </button>
+            </>
+          )}
 
           {showStylePicker && (
             <ClipStylePopover

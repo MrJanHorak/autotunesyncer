@@ -118,6 +118,21 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoFiles, instruments]);
 
+  // Cleanup on unmount (e.g. tab switch) — stop transport and notify App so the
+  // grid restores its idle heatmap state without needing a page refresh.
+  useEffect(() => {
+    return () => {
+      if (isPlayingRef.current) {
+        Tone.Transport.stop();
+        Tone.Transport.cancel();
+        isPlayingRef.current = false;
+        stopMeterLoop();
+        onPlayStateChange?.(false);
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 2. Update volumes/mute/solo in real-time
   useEffect(() => {
     const hasSolo = soloTrack !== null;

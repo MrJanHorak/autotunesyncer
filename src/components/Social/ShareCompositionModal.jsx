@@ -8,8 +8,8 @@ function getToken() {
   return localStorage.getItem('auth_token');
 }
 
-const ShareCompositionModal = ({ blob, onClose, onShared }) => {
-  const [title, setTitle] = useState('');
+const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared }) => {
+  const [title, setTitle] = useState(suggestedTitle);
   const [description, setDescription] = useState('');
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
@@ -36,6 +36,10 @@ const ShareCompositionModal = ({ blob, onClose, onShared }) => {
       if (videoObjectUrlRef.current) URL.revokeObjectURL(videoObjectUrlRef.current);
     };
   }, [blob]);
+
+  useEffect(() => {
+    setTitle((current) => (current ? current : suggestedTitle));
+  }, [suggestedTitle]);
 
   // Revoke thumbnail preview URL when it changes
   useEffect(() => {
@@ -145,7 +149,7 @@ const ShareCompositionModal = ({ blob, onClose, onShared }) => {
                 type='text'
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder='Give your composition a name'
+                placeholder={suggestedTitle || 'Give your composition a name'}
                 maxLength={120}
                 autoFocus
               />
@@ -256,6 +260,7 @@ const ShareCompositionModal = ({ blob, onClose, onShared }) => {
 
 ShareCompositionModal.propTypes = {
   blob: PropTypes.instanceOf(Blob).isRequired,
+  suggestedTitle: PropTypes.string,
   onClose: PropTypes.func.isRequired,
   onShared: PropTypes.func,
 };

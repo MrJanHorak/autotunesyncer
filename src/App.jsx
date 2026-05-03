@@ -31,7 +31,6 @@ import ProjectManager from './components/Projects/ProjectManager';
 import MidiUploader from './components/MidiUploader/';
 import MidiInfoDisplay from './components/MidiInfoDisplay/MidiInfoDisplay';
 import RecordingSection from './components/RecordingSection/RecordingSection';
-import AudioContextInitializer from './components/AudioContextInitializer/AudioContextInitializer';
 import CompositionSection from './components/CompositionSection/CompositionSection';
 import MidiParser from './components/MidiParser/MidiParser';
 import ProgressBar from './components/ProgressBar/ProgressBar';
@@ -416,7 +415,6 @@ function MainApp({ onChangeProject, onLogout }) {
     setInstrumentVideos,
     isReadyToCompose,
     setIsReadyToCompose,
-    audioContextStarted,
     isAudioContextReady,
     error,
     startAudioContext,
@@ -779,14 +777,14 @@ function MainApp({ onChangeProject, onLogout }) {
           disabled={!canUndo}
           title='Undo (Ctrl+Z)'
           aria-label='Undo'
-        ><Undo2 size={16} /></button>
+        ><Undo2 size={16} /><span className='editor-topbar__icon-label'>Undo</span></button>
         <button
           className='editor-topbar__icon-btn'
           onClick={redoHistory}
           disabled={!canRedo}
           title='Redo (Ctrl+Y)'
           aria-label='Redo'
-        ><Redo2 size={16} /></button>
+        ><Redo2 size={16} /><span className='editor-topbar__icon-label'>Redo</span></button>
 
         {/* Export / Import */}
         {currentProject && (
@@ -797,14 +795,14 @@ function MainApp({ onChangeProject, onLogout }) {
               disabled={exportLoading}
               title='Export project as ZIP'
               aria-label='Export project'
-            ><Download size={16} /></button>
+            ><Download size={16} /><span className='editor-topbar__icon-label'>Export</span></button>
             <button
               className='editor-topbar__icon-btn'
               onClick={() => importInputRef.current?.click()}
               disabled={importLoading}
               title='Import project from ZIP'
               aria-label='Import project'
-            ><Upload size={16} /></button>
+            ><Upload size={16} /><span className='editor-topbar__icon-label'>Import</span></button>
             <input
               ref={importInputRef}
               type='file'
@@ -815,10 +813,6 @@ function MainApp({ onChangeProject, onLogout }) {
           </>
         )}
 
-        <AudioContextInitializer
-          audioContextStarted={audioContextStarted}
-          onInitialize={startAudioContext}
-        />
       </div>
 
       {/* ── 3-panel body ─────────────────────────────────────────── */}
@@ -853,6 +847,7 @@ function MainApp({ onChangeProject, onLogout }) {
                 midiData={parsedMidiData}
                 onArrangementChange={setGridArrangement}
                 initialArrangement={gridArrangement}
+                compositionStyle={compositionStyle}
                 clipStyles={clipStyles}
                 instrumentVideos={instrumentVideos}
                 isPreviewPlaying={isPreviewPlaying}
@@ -876,6 +871,7 @@ function MainApp({ onChangeProject, onLogout }) {
                   soloTrack={soloTrack}
                   compositionStyle={compositionStyle}
                   clipStyles={clipStyles}
+                  projectName={currentProject?.name || ''}
                 />
               )}
             </>

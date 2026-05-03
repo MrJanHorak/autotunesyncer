@@ -7,7 +7,7 @@ import './RightPanel.css';
 
 const TABS = [
   { id: 'style', icon: '🎨', label: 'Style' },
-  { id: 'mix',   icon: '🎚', label: 'Mix' },
+  { id: 'mix', icon: '🎚', label: 'Mix' },
 ];
 
 export default function RightPanel({
@@ -41,7 +41,9 @@ export default function RightPanel({
   };
 
   return (
-    <div className={`right-panel${isOpen ? '' : ' right-panel--collapsed'} editor-right${isOpen ? '' : ' editor-right--collapsed'}`}>
+    <div
+      className={`right-panel${isOpen ? '' : ' right-panel--collapsed'} editor-right${isOpen ? '' : ' editor-right--collapsed'}`}
+    >
       {/* Tab strip */}
       <div className='right-panel__tabs'>
         {TABS.map((tab) => (
@@ -52,7 +54,9 @@ export default function RightPanel({
             title={tab.label}
           >
             <span className='right-panel__tab-icon'>{tab.icon}</span>
-            {isOpen && <span className='right-panel__tab-label'>{tab.label}</span>}
+            {isOpen && (
+              <span className='right-panel__tab-label'>{tab.label}</span>
+            )}
           </button>
         ))}
         <div className='right-panel__tabs-spacer' />
@@ -105,7 +109,9 @@ export default function RightPanel({
                   )}
                 </>
               ) : (
-                <p className='right-panel__empty'>Load a MIDI to see mix controls</p>
+                <p className='right-panel__empty'>
+                  Load a MIDI to see mix controls
+                </p>
               )}
             </div>
           )}

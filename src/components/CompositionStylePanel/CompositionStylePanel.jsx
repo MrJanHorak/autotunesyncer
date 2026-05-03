@@ -1,6 +1,6 @@
 import { useState, useId, cloneElement, isValidElement } from 'react';
 import PropTypes from 'prop-types';
-import { COLOR_THEMES, COLOR_GRADE_LABELS, DEFAULT_COMPOSITION_STYLE, FONT_OPTIONS } from '../../js/styleDefaults';
+import { COLOR_THEMES, DEFAULT_COMPOSITION_STYLE, FONT_OPTIONS } from '../../js/styleDefaults';
 import { useStylePresets } from '../../hooks/useStylePresets';
 import './CompositionStylePanel.css';
 
@@ -171,7 +171,7 @@ const CompositionStylePanel = ({ style, onChange }) => {
       </Section>
 
       {/* Title */}
-      <Section title='Song Title Overlay' icon='🎬'>
+      <Section title='Title / Intro Card' icon='🎬'>
         <Field label='Enable'>
           <Toggle checked={style.titleEnabled} onChange={(v) => set('titleEnabled', v)} />
         </Field>
@@ -198,22 +198,65 @@ const CompositionStylePanel = ({ style, onChange }) => {
               <input type='color' value={style.titleColor} onChange={(e) => set('titleColor', e.target.value)} />
               <span className='csp-color-hex'>{style.titleColor}</span>
             </Field>
-            <Field label='Fade In'>
+            <Field label='Subtitle'>
+              <input className='csp-input' type='text' value={style.titleSubtitleText ?? ''} onChange={(e) => set('titleSubtitleText', e.target.value)} placeholder='Optional line below the title' maxLength={120} />
+            </Field>
+            {Boolean(style.titleSubtitleText?.trim()) && (
+              <>
+                <Field label='Subtitle Size'>
+                  <input className='csp-range' type='range' min={14} max={40} value={style.titleSubtitleFontSize ?? 24} onChange={(e) => set('titleSubtitleFontSize', +e.target.value)} />
+                  <span className='csp-range-val'>{style.titleSubtitleFontSize ?? 24}px</span>
+                </Field>
+                <Field label='Subtitle Color'>
+                  <input type='color' value={style.titleSubtitleColor || '#d8d8e6'} onChange={(e) => set('titleSubtitleColor', e.target.value)} />
+                  <span className='csp-color-hex'>{style.titleSubtitleColor || '#d8d8e6'}</span>
+                </Field>
+              </>
+            )}
+            <Field label='Background'>
+              <Toggle checked={style.titleBackgroundEnabled ?? false} onChange={(v) => set('titleBackgroundEnabled', v)} />
+            </Field>
+            {style.titleBackgroundEnabled && (
+              <>
+                <Field label='Card Color'>
+                  <input type='color' value={style.titleBackgroundColor || '#120b24'} onChange={(e) => set('titleBackgroundColor', e.target.value)} />
+                  <span className='csp-color-hex'>{style.titleBackgroundColor || '#120b24'}</span>
+                </Field>
+                <Field label='Card Opacity'>
+                  <input className='csp-range' type='range' min={0.1} max={1} step={0.05} value={style.titleBackgroundOpacity ?? 0.82} onChange={(e) => set('titleBackgroundOpacity', +e.target.value)} />
+                  <span className='csp-range-val'>{Math.round((style.titleBackgroundOpacity ?? 0.82) * 100)}%</span>
+                </Field>
+              </>
+            )}
+            <Field label='Show at Start'>
+              <Toggle checked={style.introCardEnabled} onChange={(v) => set('introCardEnabled', v)} />
+            </Field>
+            {style.introCardEnabled && (
+              <Field label='Card Duration'>
+                <input className='csp-range' type='range' min={1} max={8} step={0.5} value={style.introCardDuration} onChange={(e) => set('introCardDuration', +e.target.value)} />
+                <span className='csp-range-val'>{style.introCardDuration}s</span>
+              </Field>
+            )}
+            <Field label='Animate'>
               <Toggle checked={style.titleAnimated} onChange={(v) => set('titleAnimated', v)} />
+            </Field>
+            <Field label='Overlay Duration'>
+              <input className='csp-range' type='range' min={0} max={15} step={0.5} value={style.titleDuration ?? 0} onChange={(e) => set('titleDuration', +e.target.value)} />
+              <span className='csp-range-val'>{(style.titleDuration ?? 0) === 0 ? 'Permanent' : `${style.titleDuration}s`}</span>
             </Field>
           </>
         )}
       </Section>
 
       {/* Tagline */}
-      <Section title='Tagline / Lower Third' icon='💬'>
+      <Section title='Tagline / Info Bar' icon='💬'>
         <Field label='Enable'>
           <Toggle checked={style.taglineEnabled} onChange={(v) => set('taglineEnabled', v)} />
         </Field>
         {style.taglineEnabled && (
           <>
-            <Field label='Text'>
-              <input className='csp-input' type='text' value={style.taglineText} onChange={(e) => set('taglineText', e.target.value)} placeholder='A short description…' maxLength={120} />
+            <Field label='Tagline'>
+              <input className='csp-input' type='text' value={style.taglineText} onChange={(e) => set('taglineText', e.target.value)} placeholder='Persistent lower-third info bar text…' maxLength={120} />
             </Field>
             <Field label='Font Size'>
               <input className='csp-range' type='range' min={14} max={48} value={style.taglineFontSize} onChange={(e) => set('taglineFontSize', +e.target.value)} />
@@ -225,6 +268,25 @@ const CompositionStylePanel = ({ style, onChange }) => {
             <Field label='Color'>
               <input type='color' value={style.taglineColor} onChange={(e) => set('taglineColor', e.target.value)} />
             </Field>
+            <Field label='Background'>
+              <Toggle checked={style.taglineBackgroundEnabled ?? false} onChange={(v) => set('taglineBackgroundEnabled', v)} />
+            </Field>
+            {style.taglineBackgroundEnabled && (
+              <>
+                <Field label='Bar Color'>
+                  <input type='color' value={style.taglineBackgroundColor || '#0c1220'} onChange={(e) => set('taglineBackgroundColor', e.target.value)} />
+                  <span className='csp-color-hex'>{style.taglineBackgroundColor || '#0c1220'}</span>
+                </Field>
+                <Field label='Bar Opacity'>
+                  <input className='csp-range' type='range' min={0.1} max={1} step={0.05} value={style.taglineBackgroundOpacity ?? 0.72} onChange={(e) => set('taglineBackgroundOpacity', +e.target.value)} />
+                  <span className='csp-range-val'>{Math.round((style.taglineBackgroundOpacity ?? 0.72) * 100)}%</span>
+                </Field>
+                <Field label='Accent Line'>
+                  <input type='color' value={style.taglineAccentColor || '#ff4db8'} onChange={(e) => set('taglineAccentColor', e.target.value)} />
+                  <span className='csp-color-hex'>{style.taglineAccentColor || '#ff4db8'}</span>
+                </Field>
+              </>
+            )}
           </>
         )}
       </Section>
@@ -278,39 +340,6 @@ const CompositionStylePanel = ({ style, onChange }) => {
             <Field label='Height'>
               <input className='csp-range' type='range' min={30} max={120} value={style.waveformHeight} onChange={(e) => set('waveformHeight', +e.target.value)} />
               <span className='csp-range-val'>{style.waveformHeight}px</span>
-            </Field>
-          </>
-        )}
-      </Section>
-
-      {/* Intro Card */}
-      <Section title='Intro Title Card' icon='🎞'>
-        <Field label='Enable'>
-          <Toggle checked={style.introCardEnabled} onChange={(v) => set('introCardEnabled', v)} />
-        </Field>
-        {style.introCardEnabled && (
-          <>
-            <Field label='Duration'>
-              <input className='csp-range' type='range' min={1} max={8} step={0.5} value={style.introCardDuration} onChange={(e) => set('introCardDuration', +e.target.value)} />
-              <span className='csp-range-val'>{style.introCardDuration}s</span>
-            </Field>
-            <Field label='Background'>
-              <input type='color' value={style.introCardBg} onChange={(e) => set('introCardBg', e.target.value)} />
-            </Field>
-            <Field label='Title Text'>
-              <input className='csp-input' type='text' value={style.introCardText} onChange={(e) => set('introCardText', e.target.value)} placeholder='Defaults to song title' maxLength={80} />
-            </Field>
-            <Field label='Subtitle'>
-              <input className='csp-input' type='text' value={style.introCardSubtext} onChange={(e) => set('introCardSubtext', e.target.value)} placeholder='Artist / description…' maxLength={120} />
-            </Field>
-            <Field label='Text Color'>
-              <input type='color' value={style.introCardTextColor} onChange={(e) => set('introCardTextColor', e.target.value)} />
-            </Field>
-            <Field label='Font'>
-              <FontSelect value={style.introCardFont} onChange={(v) => set('introCardFont', v)} />
-            </Field>
-            <Field label='Animated'>
-              <Toggle checked={style.introCardAnimated} onChange={(v) => set('introCardAnimated', v)} />
             </Field>
           </>
         )}

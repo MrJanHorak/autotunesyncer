@@ -17,6 +17,7 @@ const VideoComposer = ({
   soloTrack = null,
   compositionStyle = null,
   clipStyles = null,
+  projectName = '',
   onProgress = null,
   onError = null,
   onStart = null,
@@ -294,11 +295,12 @@ const VideoComposer = ({
       {showShareModal && composedBlob && (
         <ShareCompositionModal
           blob={composedBlob}
+          suggestedTitle={compositionStyle?.titleText?.trim() || projectName || ''}
           onClose={() => setShowShareModal(false)}
           onShared={() => setShowShareModal(false)}
         />
       )}
-      <div className='flex gap-4 mb-4 flex-wrap'>
+      <div className='flex gap-4 mb-6 flex-wrap justify-center items-center'>
         <button
           onClick={() => startComposition(true)}
           disabled={isProcessing || !canCompose}
