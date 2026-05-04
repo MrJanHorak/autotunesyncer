@@ -397,7 +397,8 @@ export const SortableItem = memo(function SortableItem({
       ? cs.bgColor
       : 'transparent';
   const fadeDuration = Math.max(cs.fadeDuration ?? 0.15, 0.05);
-  const videoVisible = !isPreviewPlaying || isInstrumentActive || cs.fadeEnabled;
+  const videoVisible =
+    !isPreviewPlaying || isInstrumentActive || cs.fadeEnabled;
   const previewLabelText = (cs.labelText || item.name || '').trim();
   const videoEffectFilter = [
     videoFilter !== 'none' ? videoFilter : '',
