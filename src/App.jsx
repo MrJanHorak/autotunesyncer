@@ -1,10 +1,26 @@
 /* eslint-disable no-unused-vars */
 import { useEffect, useCallback, useState, useRef } from 'react';
 import PropTypes from 'prop-types';
-import { Film, Music, Grid3x3, FolderOpen, LogOut, Bell, Settings, User, Download, Upload, Undo2, Redo2 } from 'lucide-react';
+import {
+  Film,
+  Music,
+  Grid3x3,
+  FolderOpen,
+  LogOut,
+  Bell,
+  Settings,
+  User,
+  Download,
+  Upload,
+  Undo2,
+  Redo2,
+} from 'lucide-react';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
-import { DEFAULT_COMPOSITION_STYLE, DEFAULT_CLIP_STYLE } from './js/styleDefaults';
+import {
+  DEFAULT_COMPOSITION_STYLE,
+  DEFAULT_CLIP_STYLE,
+} from './js/styleDefaults';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 import InstrumentSidebar from './components/InstrumentSidebar/InstrumentSidebar';
 import RecordingModal from './components/RecordingModal/RecordingModal';
@@ -49,11 +65,14 @@ import './components/Social/Social.css';
 
 import './App.css';
 
-const normalizeInstrumentName = (name) => name.toLowerCase().replace(/\s+/g, '_');
+const normalizeInstrumentName = (name) =>
+  name.toLowerCase().replace(/\s+/g, '_');
 
 const toInstrumentKey = (instrument) => {
   if (instrument.isDrum) {
-    const name = (instrument.group || instrument.name || '').toLowerCase().replace(/\s+/g, '_');
+    const name = (instrument.group || instrument.name || '')
+      .toLowerCase()
+      .replace(/\s+/g, '_');
     return `drum_${name}`;
   }
   return normalizeInstrumentName(instrument.name || '');
@@ -113,12 +132,18 @@ function App() {
   useEffect(() => {
     if (!userMenuOpen) return;
     const handler = (e) => {
-      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) setUserMenuOpen(false);
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target))
+        setUserMenuOpen(false);
     };
-    const keyHandler = (e) => { if (e.key === 'Escape') setUserMenuOpen(false); };
+    const keyHandler = (e) => {
+      if (e.key === 'Escape') setUserMenuOpen(false);
+    };
     document.addEventListener('mousedown', handler);
     document.addEventListener('keydown', keyHandler);
-    return () => { document.removeEventListener('mousedown', handler); document.removeEventListener('keydown', keyHandler); };
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', keyHandler);
+    };
   }, [userMenuOpen]);
 
   // Notifications panel
@@ -129,14 +154,19 @@ function App() {
     if (!isAuthenticated) return;
     try {
       const token = localStorage.getItem('auth_token');
-      const res = await fetch('http://localhost:3000/api/social/notifications/unread-count', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        'http://localhost:3000/api/social/notifications/unread-count',
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       if (res.ok) {
         const data = await res.json();
         setUnreadCount(data.count || 0);
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [isAuthenticated]);
 
   useEffect(() => {
@@ -151,9 +181,44 @@ function App() {
   // Auth modal wrapper
   function AuthPageModal({ onClose }) {
     return (
-      <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ position: 'relative', background: '#181828', borderRadius: 12, padding: 32, minWidth: 340 }}>
-          <button onClick={onClose} style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: '#fff', fontSize: 22, cursor: 'pointer' }}>×</button>
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          background: 'rgba(0,0,0,0.7)',
+          zIndex: 1000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <div
+          style={{
+            position: 'relative',
+            background: '#181828',
+            borderRadius: 12,
+            padding: 32,
+            minWidth: 340,
+          }}
+        >
+          <button
+            onClick={onClose}
+            style={{
+              position: 'absolute',
+              top: 12,
+              right: 12,
+              background: 'none',
+              border: 'none',
+              color: '#fff',
+              fontSize: 22,
+              cursor: 'pointer',
+            }}
+          >
+            ×
+          </button>
           <AuthPage />
         </div>
       </div>
@@ -193,7 +258,9 @@ function App() {
       <>
         <nav className='app-nav'>
           <button className='app-nav__brand' onClick={() => setShowAuth(true)}>
-            <span className='app-nav__brand-icon'><Film size={28} /></span>
+            <span className='app-nav__brand-icon'>
+              <Film size={28} />
+            </span>
             Symphovie
           </button>
           <div className='app-nav__tabs'>
@@ -218,9 +285,14 @@ function App() {
       {/* Logo = Home: clicking goes back to compose root */}
       <button
         className='app-nav__brand'
-        onClick={() => { setAppView('compose'); setSocialNav({ page: 'feed', id: null }); }}
+        onClick={() => {
+          setAppView('compose');
+          setSocialNav({ page: 'feed', id: null });
+        }}
       >
-        <span className='app-nav__brand-icon'><Film size={28} /></span>
+        <span className='app-nav__brand-icon'>
+          <Film size={28} />
+        </span>
         Symphovie
       </button>
 
@@ -233,7 +305,10 @@ function App() {
         </button>
         <button
           className={`app-nav__tab${appView === 'feed' ? ' app-nav__tab--active' : ''}`}
-          onClick={() => { setAppView('feed'); setSocialNav({ page: 'feed', id: null }); }}
+          onClick={() => {
+            setAppView('feed');
+            setSocialNav({ page: 'feed', id: null });
+          }}
         >
           <Grid3x3 className='app-nav__tab-icon' /> Feed
         </button>
@@ -256,48 +331,76 @@ function App() {
             {/* Bell icon with unread dot */}
             <button
               className='app-nav__bell-btn'
-              onClick={() => { setNotifOpen((v) => !v); setUserMenuOpen(false); }}
+              onClick={() => {
+                setNotifOpen((v) => !v);
+                setUserMenuOpen(false);
+              }}
               aria-label='Notifications'
             >
               <Bell size={18} />
-              {unreadCount > 0 && <span className='app-nav__notif-dot'>{unreadCount > 9 ? '9+' : unreadCount}</span>}
+              {unreadCount > 0 && (
+                <span className='app-nav__notif-dot'>
+                  {unreadCount > 9 ? '9+' : unreadCount}
+                </span>
+              )}
             </button>
 
             <div className='app-nav__user-menu' ref={userMenuRef}>
               <button
                 className='app-nav__avatar-btn'
-                onClick={() => { setUserMenuOpen((v) => !v); setNotifOpen(false); }}
+                onClick={() => {
+                  setUserMenuOpen((v) => !v);
+                  setNotifOpen(false);
+                }}
                 aria-label='User menu'
                 aria-expanded={userMenuOpen}
               >
-                {user.profileImageUrl
-                  ? <img src={user.profileImageUrl} alt={user.username} className='app-nav__avatar-img' />
-                  : <span className='app-nav__avatar-initials'>{user.username?.[0]?.toUpperCase() || 'U'}</span>
-                }
+                {user.profileImageUrl ? (
+                  <img
+                    src={user.profileImageUrl}
+                    alt={user.username}
+                    className='app-nav__avatar-img'
+                  />
+                ) : (
+                  <span className='app-nav__avatar-initials'>
+                    {user.username?.[0]?.toUpperCase() || 'U'}
+                  </span>
+                )}
               </button>
               {userMenuOpen && (
                 <div className='app-nav__dropdown'>
                   <div className='app-nav__dropdown-header'>
-                    <span className='app-nav__dropdown-username'>@{user.username}</span>
+                    <span className='app-nav__dropdown-username'>
+                      @{user.username}
+                    </span>
                   </div>
-                  <button className='app-nav__dropdown-item' onClick={() => {
-                    setAppView('feed');
-                    setSocialNav({ page: 'profile', id: user.id });
-                    setUserMenuOpen(false);
-                  }}>
+                  <button
+                    className='app-nav__dropdown-item'
+                    onClick={() => {
+                      setAppView('feed');
+                      setSocialNav({ page: 'profile', id: user.id });
+                      setUserMenuOpen(false);
+                    }}
+                  >
                     <User size={15} /> My Profile
                   </button>
-                  <button className='app-nav__dropdown-item' onClick={() => {
-                    setSettingsOpen(true);
-                    setUserMenuOpen(false);
-                  }}>
+                  <button
+                    className='app-nav__dropdown-item'
+                    onClick={() => {
+                      setSettingsOpen(true);
+                      setUserMenuOpen(false);
+                    }}
+                  >
                     <Settings size={15} /> Settings
                   </button>
                   <div className='app-nav__dropdown-divider' />
-                  <button className='app-nav__dropdown-item app-nav__dropdown-item--danger' onClick={() => {
-                    setUserMenuOpen(false);
-                    logout();
-                  }}>
+                  <button
+                    className='app-nav__dropdown-item app-nav__dropdown-item--danger'
+                    onClick={() => {
+                      setUserMenuOpen(false);
+                      logout();
+                    }}
+                  >
                     <LogOut size={15} /> Sign Out
                   </button>
                 </div>
@@ -314,7 +417,10 @@ function App() {
       {notifOpen && (
         <div className='notif-panel-wrap'>
           <Notifications
-            onClose={() => { setNotifOpen(false); setUnreadCount(0); }}
+            onClose={() => {
+              setNotifOpen(false);
+              setUnreadCount(0);
+            }}
             onSelectComposition={(id) => {
               setAppView('feed');
               setSocialNav({ page: 'detail', id });
@@ -387,10 +493,20 @@ function App() {
       );
     }
     return (
-      <div style={{ minHeight: '100vh', background: 'var(--color-bg-dark)', display: 'flex', flexDirection: 'column' }}>
+      <div
+        style={{
+          minHeight: '100vh',
+          background: 'var(--color-bg-dark)',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
         {navBar}
         {overlays}
-        <MainApp onChangeProject={() => selectProject(null)} onLogout={logout} />
+        <MainApp
+          onChangeProject={() => selectProject(null)}
+          onLogout={logout}
+        />
       </div>
     );
   }
@@ -426,12 +542,13 @@ function MainApp({ onChangeProject, onLogout }) {
   const [gridArrangement, setGridArrangement] = useState({});
   const [trackVolumes, setTrackVolumes] = useState({});
   const [muteStates, setMuteStates] = useState({});
-  const [compositionStyle, setCompositionStyle] = useState(() => ({ ...DEFAULT_COMPOSITION_STYLE }));
+  const [compositionStyle, setCompositionStyle] = useState(() => ({
+    ...DEFAULT_COMPOSITION_STYLE,
+  }));
   const [clipStyles, setClipStyles] = useState({}); // keyed by item.id (e.g. 'drum-drum_snare_drum')
   const [soloTrack, setSoloTrack] = useState(null);
   const [activeLevels, setActiveLevels] = useState({});
   const lastMeterStateRef = useRef(0);
-
 
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -481,7 +598,14 @@ function MainApp({ onChangeProject, onLogout }) {
     redo: redoHistory,
     reset: resetHistory,
     isProgrammaticRef,
-  } = useUndoRedo({ gridArrangement, compositionStyle, clipStyles, trackVolumes, muteStates, soloTrack });
+  } = useUndoRedo({
+    gridArrangement,
+    compositionStyle,
+    clipStyles,
+    trackVolumes,
+    muteStates,
+    soloTrack,
+  });
 
   const pushUndoDebounceRef = useRef(null);
 
@@ -493,9 +617,23 @@ function MainApp({ onChangeProject, onLogout }) {
     }
     clearTimeout(pushUndoDebounceRef.current);
     pushUndoDebounceRef.current = setTimeout(() => {
-      pushSnapshot({ gridArrangement, compositionStyle, clipStyles, trackVolumes, muteStates, soloTrack });
+      pushSnapshot({
+        gridArrangement,
+        compositionStyle,
+        clipStyles,
+        trackVolumes,
+        muteStates,
+        soloTrack,
+      });
     }, 400);
-  }, [gridArrangement, compositionStyle, clipStyles, trackVolumes, muteStates, soloTrack]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [
+    gridArrangement,
+    compositionStyle,
+    clipStyles,
+    trackVolumes,
+    muteStates,
+    soloTrack,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Apply snapshot when undo/redo changes it.
   const prevSnapshotRef = useRef(undoSnapshot);
@@ -513,7 +651,14 @@ function MainApp({ onChangeProject, onLogout }) {
 
   // Reset undo history when switching projects (prevents undo into a previous project's state).
   useEffect(() => {
-    resetHistory({ gridArrangement: {}, compositionStyle: { ...DEFAULT_COMPOSITION_STYLE }, clipStyles: {}, trackVolumes: {}, muteStates: {}, soloTrack: null });
+    resetHistory({
+      gridArrangement: {},
+      compositionStyle: { ...DEFAULT_COMPOSITION_STYLE },
+      clipStyles: {},
+      trackVolumes: {},
+      muteStates: {},
+      soloTrack: null,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
 
@@ -689,7 +834,11 @@ function MainApp({ onChangeProject, onLogout }) {
     setInstrumentVideos((prev) => {
       // Revoke the old URL for this key before overwriting
       if (prev[instrumentKey] && prev[instrumentKey] !== videoUrl) {
-        try { URL.revokeObjectURL(prev[instrumentKey]); } catch { /* ignore */ }
+        try {
+          URL.revokeObjectURL(prev[instrumentKey]);
+        } catch {
+          /* ignore */
+        }
       }
       return { ...prev, [instrumentKey]: videoUrl };
     });
@@ -720,25 +869,34 @@ function MainApp({ onChangeProject, onLogout }) {
     }
   }, [currentProject]);
 
-  const handleImport = useCallback(async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    e.target.value = '';
-    setImportLoading(true);
-    try {
-      const { project } = await importProjectFromZip(file);
-      onChangeProject(project);
-    } catch (err) {
-      alert(`Import failed: ${err.message}`);
-    } finally {
-      setImportLoading(false);
-    }
-  }, [onChangeProject]);
+  const handleImport = useCallback(
+    async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      e.target.value = '';
+      setImportLoading(true);
+      try {
+        const { project } = await importProjectFromZip(file);
+        onChangeProject(project);
+      } catch (err) {
+        alert(`Import failed: ${err.message}`);
+      } finally {
+        setImportLoading(false);
+      }
+    },
+    [onChangeProject],
+  );
 
   return (
     <div className='editor-shell'>
       {/* Non-rendering helpers always present */}
-      {midiFile && <MidiParser file={midiFile} onParsed={handleParsedMidi} onError={handleMidiParseError} />}
+      {midiFile && (
+        <MidiParser
+          file={midiFile}
+          onParsed={handleParsedMidi}
+          onError={handleMidiParseError}
+        />
+      )}
       {midiParseError && (
         <div
           role='alert'
@@ -777,14 +935,20 @@ function MainApp({ onChangeProject, onLogout }) {
           disabled={!canUndo}
           title='Undo (Ctrl+Z)'
           aria-label='Undo'
-        ><Undo2 size={16} /><span className='editor-topbar__icon-label'>Undo</span></button>
+        >
+          <Undo2 size={16} />
+          <span className='editor-topbar__icon-label'>Undo</span>
+        </button>
         <button
           className='editor-topbar__icon-btn'
           onClick={redoHistory}
           disabled={!canRedo}
           title='Redo (Ctrl+Y)'
           aria-label='Redo'
-        ><Redo2 size={16} /><span className='editor-topbar__icon-label'>Redo</span></button>
+        >
+          <Redo2 size={16} />
+          <span className='editor-topbar__icon-label'>Redo</span>
+        </button>
 
         {/* Export / Import */}
         {currentProject && (
@@ -795,14 +959,20 @@ function MainApp({ onChangeProject, onLogout }) {
               disabled={exportLoading}
               title='Export project as ZIP'
               aria-label='Export project'
-            ><Download size={16} /><span className='editor-topbar__icon-label'>Export</span></button>
+            >
+              <Download size={16} />
+              <span className='editor-topbar__icon-label'>Export</span>
+            </button>
             <button
               className='editor-topbar__icon-btn'
               onClick={() => importInputRef.current?.click()}
               disabled={importLoading}
               title='Import project from ZIP'
               aria-label='Import project'
-            ><Upload size={16} /><span className='editor-topbar__icon-label'>Import</span></button>
+            >
+              <Upload size={16} />
+              <span className='editor-topbar__icon-label'>Import</span>
+            </button>
             <input
               ref={importInputRef}
               type='file'
@@ -812,14 +982,14 @@ function MainApp({ onChangeProject, onLogout }) {
             />
           </>
         )}
-
       </div>
 
       {/* ── 3-panel body ─────────────────────────────────────────── */}
       <div className='editor-body'>
-
         {/* LEFT: Instrument sidebar */}
-        <div className={`editor-left${leftPanelOpen ? '' : ' editor-left--collapsed'}`}>
+        <div
+          className={`editor-left${leftPanelOpen ? '' : ' editor-left--collapsed'}`}
+        >
           <InstrumentSidebar
             instruments={instruments}
             instrumentVideos={instrumentVideos}
@@ -855,7 +1025,11 @@ function MainApp({ onChangeProject, onLogout }) {
                 onClipStyleChange={(itemId, newStyle) =>
                   setClipStyles((prev) => ({
                     ...prev,
-                    [itemId]: { ...DEFAULT_CLIP_STYLE, ...prev[itemId], ...newStyle },
+                    [itemId]: {
+                      ...DEFAULT_CLIP_STYLE,
+                      ...prev[itemId],
+                      ...newStyle,
+                    },
                   }))
                 }
               />
@@ -903,6 +1077,7 @@ function MainApp({ onChangeProject, onLogout }) {
           videoFiles={videoFiles}
           onMeterUpdate={handleMeterUpdate}
           onPlayStateChange={setIsPreviewPlaying}
+          isPreviewPlaying={isPreviewPlaying}
         />
       </div>
 

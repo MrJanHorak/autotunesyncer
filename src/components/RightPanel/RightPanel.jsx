@@ -29,8 +29,10 @@ export default function RightPanel({
   videoFiles,
   onMeterUpdate,
   onPlayStateChange,
+  isPreviewPlaying = false,
 }) {
   const [activeTab, setActiveTab] = useState('style');
+  const [previewElapsed, setPreviewElapsed] = useState(0);
 
   const handleTabClick = (tabId) => {
     if (!isOpen) {
@@ -38,6 +40,15 @@ export default function RightPanel({
       onToggle();
     }
     setActiveTab(tabId);
+  };
+
+  const handlePreviewToggleFromMixer = () => {
+    const button = document.querySelector(
+      '.right-panel__preview .preview-player__button',
+    );
+    if (button && !button.disabled) {
+      button.click();
+    }
   };
 
   return (
@@ -92,6 +103,10 @@ export default function RightPanel({
                     onMuteChange={onMuteChange}
                     onSoloChange={onSoloChange}
                     activeLevels={activeLevels}
+                    onTogglePreview={handlePreviewToggleFromMixer}
+                    isPreviewPlaying={isPreviewPlaying}
+                    previewElapsed={previewElapsed}
+                    previewDuration={midiData?.duration || 0}
                   />
                   {midiData && (
                     <div className='right-panel__preview'>
@@ -104,6 +119,7 @@ export default function RightPanel({
                         instruments={instruments}
                         onMeterUpdate={onMeterUpdate}
                         onPlayStateChange={onPlayStateChange}
+                        onTransportTimeUpdate={setPreviewElapsed}
                       />
                     </div>
                   )}
@@ -138,4 +154,5 @@ RightPanel.propTypes = {
   videoFiles: PropTypes.object,
   onMeterUpdate: PropTypes.func.isRequired,
   onPlayStateChange: PropTypes.func,
+  isPreviewPlaying: PropTypes.bool,
 };

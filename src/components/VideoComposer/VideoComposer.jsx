@@ -6,6 +6,7 @@ import {
 } from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 import { shareComposition } from '../../services/apiService.js';
+import './VideoComposer.css';
 
 const VideoComposer = ({
   videoFiles,
@@ -295,37 +296,49 @@ const VideoComposer = ({
       {showShareModal && composedBlob && (
         <ShareCompositionModal
           blob={composedBlob}
-          suggestedTitle={compositionStyle?.titleText?.trim() || projectName || ''}
+          suggestedTitle={
+            compositionStyle?.titleText?.trim() || projectName || ''
+          }
           onClose={() => setShowShareModal(false)}
           onShared={() => setShowShareModal(false)}
         />
       )}
-      <div className='flex gap-4 mb-6 flex-wrap justify-center items-center'>
+      <div className='composition-actions'>
         <button
           onClick={() => startComposition(true)}
           disabled={isProcessing || !canCompose}
-          className='px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 disabled:opacity-50 font-medium'
+          className='composition-btn composition-btn--preview'
+          title='Generate fast preview at lower quality'
         >
-          {isProcessing && processingMode === 'preview'
-            ? 'Generating Preview…'
-            : 'Generate Preview (Fast)'}
+          <span className='composition-btn__icon'>⚡</span>
+          <span className='composition-btn__text'>
+            {isProcessing && processingMode === 'preview'
+              ? 'Generating Preview…'
+              : 'Generate Preview (Fast)'}
+          </span>
         </button>
         <button
           onClick={() => startComposition(false)}
           disabled={isProcessing || !canCompose}
-          className='px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 font-medium'
+          className='composition-btn composition-btn--full'
+          title='Render full high-quality composition'
         >
-          {isProcessing && processingMode === 'full'
-            ? 'Processing Full Video…'
-            : 'Start Full Composition'}
+          <span className='composition-btn__icon'>✓</span>
+          <span className='composition-btn__text'>
+            {isProcessing && processingMode === 'full'
+              ? 'Processing Full Video…'
+              : 'Start Full Composition'}
+          </span>
         </button>
         {isProcessing && (
           <button
             onClick={() => abortRef.current?.abort()}
-            className='px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 font-medium'
+            className='composition-btn composition-btn--cancel'
             aria-label='Cancel composition'
+            title='Cancel current operation'
           >
-            ✕ Cancel
+            <span className='composition-btn__icon'>✕</span>
+            <span className='composition-btn__text'>Cancel</span>
           </button>
         )}
       </div>
@@ -527,17 +540,43 @@ const VideoComposer = ({
                 {shareLoading ? '⏳ Uploading…' : '🔗 Get Share Link'}
               </button>
               {shareUrl && (
-                <div style={{ width: '100%', marginTop: '0.5rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <div
+                  style={{
+                    width: '100%',
+                    marginTop: '0.5rem',
+                    display: 'flex',
+                    gap: '0.5rem',
+                    alignItems: 'center',
+                  }}
+                >
                   <input
                     readOnly
                     value={shareUrl}
-                    style={{ flex: 1, padding: '0.4rem 0.6rem', borderRadius: '6px', border: '1px solid #7c3aed', fontSize: '0.8rem' }}
+                    style={{
+                      flex: 1,
+                      padding: '0.4rem 0.6rem',
+                      borderRadius: '6px',
+                      border: '1px solid #7c3aed',
+                      fontSize: '0.8rem',
+                    }}
                     onClick={(e) => e.target.select()}
                   />
                   <button
-                    onClick={() => { navigator.clipboard.writeText(shareUrl); }}
-                    style={{ padding: '0.4rem 0.75rem', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}
-                  >Copy</button>
+                    onClick={() => {
+                      navigator.clipboard.writeText(shareUrl);
+                    }}
+                    style={{
+                      padding: '0.4rem 0.75rem',
+                      background: '#7c3aed',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                    }}
+                  >
+                    Copy
+                  </button>
                 </div>
               )}
             </div>

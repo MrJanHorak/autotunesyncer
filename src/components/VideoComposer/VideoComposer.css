@@ -1,0 +1,211 @@
+/* ────────────────────────────────────────────────────────────────────────
+   Composition Actions Button Group
+   ──────────────────────────────────────────────────────────────────────── */
+
+.composition-actions {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  justify-content: center;
+  align-items: stretch;
+  flex-wrap: wrap;
+  max-width: 800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.composition-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 180px;
+  max-width: 280px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* Before pseudo-element for shimmer effect on hover */
+.composition-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.3),
+    transparent
+  );
+  transform: translateX(-100%);
+  transition: transform 0.6s ease;
+  pointer-events: none;
+}
+
+.composition-btn:hover::before {
+  transform: translateX(100%);
+}
+
+.composition-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.composition-btn--preview {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+  color: white;
+}
+
+.composition-btn--preview:hover:not(:disabled) {
+  background: linear-gradient(135deg, #f59e0b 0%, #f97316 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(245, 158, 11, 0.35);
+}
+
+.composition-btn--preview:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+}
+
+.composition-btn--full {
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  color: white;
+}
+
+.composition-btn--full:hover:not(:disabled) {
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
+}
+
+.composition-btn--full:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+}
+
+.composition-btn--cancel {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+  flex: 0 0 auto;
+  min-width: 140px;
+  max-width: 180px;
+}
+
+.composition-btn--cancel:hover:not(:disabled) {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(220, 38, 38, 0.35);
+}
+
+.composition-btn--cancel:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.25);
+}
+
+.composition-btn__icon {
+  font-size: 1.2em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.composition-btn__text {
+  display: inline;
+  letter-spacing: 0.3px;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Progress Display
+   ──────────────────────────────────────────────────────────────────────── */
+
+.video-composer {
+  width: 100%;
+}
+
+.progress-container {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.02);
+  border-radius: 10px;
+}
+
+.progress-bar-wrapper {
+  width: 100%;
+  height: 8px;
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: all 0.3s ease;
+}
+
+.progress-text {
+  font-size: 0.9rem;
+  color: #666;
+  text-align: center;
+  font-weight: 500;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+   Responsive Design
+   ──────────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .composition-actions {
+    gap: 0.75rem;
+  }
+
+  .composition-btn {
+    padding: 0.75rem 1rem;
+    font-size: 0.95rem;
+    min-width: 160px;
+    max-width: 240px;
+  }
+
+  .composition-btn--cancel {
+    min-width: 130px;
+    max-width: 160px;
+  }
+
+  .composition-btn__icon {
+    font-size: 1.1em;
+  }
+}
+
+@media (max-width: 600px) {
+  .composition-actions {
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .composition-btn {
+    width: 100%;
+    min-width: auto;
+    max-width: none;
+    padding: 0.8rem 1rem;
+  }
+
+  .composition-btn--cancel {
+    min-width: auto;
+    max-width: none;
+  }
+
+  .composition-btn__text {
+    display: inline;
+  }
+}

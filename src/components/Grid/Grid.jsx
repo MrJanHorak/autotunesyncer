@@ -20,22 +20,26 @@ import { isDrumTrack, getDrumName } from '../../js/drumUtils';
 import './Grid.css';
 
 const FONT_FAMILY_MAP = {
-  default:   'inherit',
-  arial:     'Arial, sans-serif',
-  verdana:   'Verdana, sans-serif',
-  impact:    'Impact, sans-serif',
-  courier:   '"Courier New", monospace',
-  times:     '"Times New Roman", serif',
-  georgia:   'Georgia, serif',
+  default: 'inherit',
+  arial: 'Arial, sans-serif',
+  verdana: 'Verdana, sans-serif',
+  impact: 'Impact, sans-serif',
+  courier: '"Courier New", monospace',
+  times: '"Times New Roman", serif',
+  georgia: 'Georgia, serif',
   trebuchet: '"Trebuchet MS", sans-serif',
-  comic:     '"Comic Sans MS", cursive',
+  comic: '"Comic Sans MS", cursive',
 };
 const getFontFamily = (font) => FONT_FAMILY_MAP[font] || 'inherit';
 const hexToRgba = (hex, alpha = 1) => {
   const normalized = (hex || '').replace('#', '');
-  const safe = normalized.length === 3
-    ? normalized.split('').map((char) => char + char).join('')
-    : normalized.padEnd(6, '0').slice(0, 6);
+  const safe =
+    normalized.length === 3
+      ? normalized
+          .split('')
+          .map((char) => char + char)
+          .join('')
+      : normalized.padEnd(6, '0').slice(0, 6);
   const value = Number.parseInt(safe, 16);
   const red = (value >> 16) & 255;
   const green = (value >> 8) & 255;
@@ -43,17 +47,57 @@ const hexToRgba = (hex, alpha = 1) => {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 };
 
-const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, onClipStyleChange, instrumentVideos, isPreviewPlaying, activeLevels, compositionStyle }) => {
-  const previewStyle = { ...DEFAULT_COMPOSITION_STYLE, ...(compositionStyle || {}) };
-  const titleText = previewStyle.titleText?.trim() || previewStyle.introCardText?.trim() || '';
-  const titleSubtitleText = previewStyle.titleSubtitleText?.trim() || previewStyle.introCardSubtext?.trim() || '';
+const Grid = ({
+  midiData,
+  onArrangementChange,
+  initialArrangement,
+  clipStyles,
+  onClipStyleChange,
+  instrumentVideos,
+  isPreviewPlaying,
+  activeLevels,
+  compositionStyle,
+}) => {
+  const previewStyle = {
+    ...DEFAULT_COMPOSITION_STYLE,
+    ...(compositionStyle || {}),
+  };
+  const titleText = previewStyle.titleText?.trim() || '';
+  const titleSubtitleText = previewStyle.titleSubtitleText?.trim() || '';
+  const introTitleText = previewStyle.introCardText?.trim() || titleText;
+  const introTitleSubtitleText =
+    previewStyle.introCardSubtext?.trim() || titleSubtitleText;
   const taglineText = previewStyle.taglineText?.trim() || '';
-  const titleFont = previewStyle.titleFont || previewStyle.introCardFont || 'default';
-  const titleColor = previewStyle.titleColor || previewStyle.introCardTextColor || '#ffffff';
-  const titleCardBg = previewStyle.titleBackgroundColor || previewStyle.introCardBg || '#120b24';
+  const titleFont =
+    previewStyle.titleFont || previewStyle.introCardFont || 'default';
+  const titleColor =
+    previewStyle.titleColor || previewStyle.introCardTextColor || '#ffffff';
+  const titleCardBg =
+    previewStyle.titleBackgroundColor || previewStyle.introCardBg || '#120b24';
   const titleCardOpacity = previewStyle.titleBackgroundOpacity ?? 0.82;
   const titleUsesCard = Boolean(previewStyle.titleBackgroundEnabled);
-  const introDuration = previewStyle.introCardEnabled ? (previewStyle.introCardDuration ?? 3) : 0;
+  const titleUsesFullscreenBackground =
+    titleUsesCard && previewStyle.titleBackgroundMode === 'fullscreen';
+  const introDuration = previewStyle.introCardEnabled
+    ? (previewStyle.introCardDuration ?? 3)
+    : 0;
+  const previewDuration = useMemo(() => {
+    const tracks = Array.isArray(midiData?.tracks) ? midiData.tracks : [];
+    let maxTime = 0;
+
+    tracks.forEach((track) => {
+      track?.notes?.forEach((note) => {
+        const start = Number(
+          note?.time ?? note?.start ?? note?.startTime ?? note?.ticks ?? 0,
+        );
+        const duration = Number(note?.duration ?? 0);
+        const end = Number(note?.end ?? note?.endTime ?? start + duration);
+        maxTime = Math.max(maxTime, Number.isFinite(end) ? end : 0);
+      });
+    });
+
+    return maxTime;
+  }, [midiData]);
 
   // 1. Process MIDI data first
   const processedData = useMemo(() => {
@@ -132,7 +176,7 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
         name: '',
         count: 0,
         isEmpty: true,
-      })
+      }),
     );
 
     return [...processedData, ...emptySpaces];
@@ -141,32 +185,58 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
   // 4. Initialize state
   const [items, setItems] = useState(initialGridData);
   const [columnCount, setColumnCount] = useState(
-    calculateOptimalColumns[0] || 4
+    calculateOptimalColumns[0] || 4,
   );
   const arrangementRestoredRef = useRef(false);
 
   // Intro card preview playback state
   const [showIntroCard, setShowIntroCard] = useState(false);
+  const [introCardFadingOut, setIntroCardFadingOut] = useState(false);
   const introTimerRef = useRef(null);
+  const fadeOutTimerRef = useRef(null);
 
   useEffect(() => {
-    if (isPreviewPlaying && previewStyle.introCardEnabled && titleText) {
+    if (
+      isPreviewPlaying &&
+      previewStyle.titleEnabled &&
+      previewStyle.introCardEnabled &&
+      introTitleText
+    ) {
+      setIntroCardFadingOut(false);
       setShowIntroCard(true);
       introTimerRef.current = setTimeout(() => {
-        setShowIntroCard(false);
+        // Start fade-out animation
+        setIntroCardFadingOut(true);
+        // Remove after fade-out completes (500ms matches CSS animation)
+        fadeOutTimerRef.current = setTimeout(() => {
+          setShowIntroCard(false);
+          setIntroCardFadingOut(false);
+        }, 500);
       }, introDuration * 1000);
     } else if (!isPreviewPlaying) {
       clearTimeout(introTimerRef.current);
+      clearTimeout(fadeOutTimerRef.current);
       setShowIntroCard(false);
+      setIntroCardFadingOut(false);
     }
-    return () => clearTimeout(introTimerRef.current);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [introDuration, isPreviewPlaying, previewStyle.introCardEnabled, titleText]);
+    return () => {
+      clearTimeout(introTimerRef.current);
+      clearTimeout(fadeOutTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    introTitleText,
+    introDuration,
+    isPreviewPlaying,
+    previewStyle.titleEnabled,
+    previewStyle.introCardEnabled,
+  ]);
 
   // Restore saved drag order once (on first non-empty initialArrangement)
   useEffect(() => {
     if (arrangementRestoredRef.current) return;
-    if (!initialArrangement || Object.keys(initialArrangement).length === 0) return;
+    if (!initialArrangement || Object.keys(initialArrangement).length === 0)
+      return;
     arrangementRestoredRef.current = true;
     setItems((current) =>
       [...current].sort((a, b) => {
@@ -175,7 +245,7 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
         const posA = initialArrangement[idA]?.position ?? Infinity;
         const posB = initialArrangement[idB]?.position ?? Infinity;
         return posA - posB;
-      })
+      }),
     );
   }, [initialArrangement]);
 
@@ -184,7 +254,7 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
-    })
+    }),
   );
 
   // Handlers
@@ -220,7 +290,11 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
             position: index,
             row: Math.floor(index / columnCount),
             column: index % columnCount,
-            type: item.isEmpty ? 'empty' : (item.id.startsWith('drum-') ? 'drum' : 'track'),
+            type: item.isEmpty
+              ? 'empty'
+              : item.id.startsWith('drum-')
+                ? 'drum'
+                : 'track',
             isEmpty: item.isEmpty || false,
           };
           return acc;
@@ -236,7 +310,7 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
     setColumnCount(newColumnCount);
     document.documentElement.style.setProperty(
       '--column-count',
-      newColumnCount
+      newColumnCount,
     );
   };
 
@@ -293,7 +367,7 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
       setColumnCount(optimalColumnCount);
       document.documentElement.style.setProperty(
         '--column-count',
-        optimalColumnCount
+        optimalColumnCount,
       );
     }
   }, [calculateOptimalColumns]);
@@ -309,7 +383,11 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
           position: index,
           row: Math.floor(index / columnCount),
           column: index % columnCount,
-          type: item.isEmpty ? 'empty' : (item.id.startsWith('drum-') ? 'drum' : 'track'),
+          type: item.isEmpty
+            ? 'empty'
+            : item.id.startsWith('drum-')
+              ? 'drum'
+              : 'track',
           isEmpty: item.isEmpty || false,
         };
         return acc;
@@ -319,14 +397,106 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
   }, [items, columnCount, onArrangementChange]);
 
   const getTitlePositionStyle = () => {
+    if (titleUsesFullscreenBackground) {
+      return {
+        inset: '0',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center',
+      };
+    }
+
     switch (previewStyle.titlePosition) {
       case 'bottom-center':
-        return { left: '50%', bottom: '16px', transform: 'translateX(-50%)' };
+        return {
+          left: '50%',
+          bottom: '16px',
+          transform: 'translateX(-50%)',
+        };
       case 'center':
-        return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' };
+        return {
+          left: '50%',
+          top: '50%',
+          transform: 'translate(-50%, -50%)',
+        };
       default:
         return { left: '50%', top: '14px', transform: 'translateX(-50%)' };
     }
+  };
+
+  const getTaglinePositionStyle = () => {
+    const width = `${Math.max(20, Math.min(100, previewStyle.taglineWidth ?? 72))}%`;
+
+    switch (previewStyle.taglinePosition) {
+      case 'bottom-left':
+        return {
+          left: '14px',
+          bottom: '14px',
+          transform: 'none',
+          width,
+        };
+      case 'bottom-right':
+        return {
+          right: '14px',
+          bottom: '14px',
+          left: 'auto',
+          transform: 'none',
+          width,
+        };
+      default:
+        return {
+          left: '50%',
+          bottom: '14px',
+          transform: 'translateX(-50%)',
+          width,
+        };
+    }
+  };
+
+  const getTaglineAnimationStyle = () => {
+    if (!isPreviewPlaying || previewDuration <= 0) {
+      return {
+        className: '',
+        style: {
+          '--grid-tagline-transform':
+            getTaglinePositionStyle().transform || 'none',
+        },
+      };
+    }
+
+    const fadeInDuration = Math.max(
+      0,
+      Number(previewStyle.taglineFadeInDuration ?? 0.5),
+    );
+    const fadeOutDuration = Math.max(
+      0,
+      Number(previewStyle.taglineFadeOutDuration ?? 0.5),
+    );
+    const startAt = previewStyle.introCardEnabled ? introDuration : 0;
+    const fadeOutStart = Math.max(
+      startAt + fadeInDuration,
+      previewDuration - fadeOutDuration,
+    );
+
+    return {
+      className: [
+        fadeInDuration > 0 ? 'grid-preview-tagline--fade-in' : '',
+        fadeOutDuration > 0 && previewDuration > startAt
+          ? 'grid-preview-tagline--fade-out'
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
+      style: {
+        '--grid-tagline-transform':
+          getTaglinePositionStyle().transform || 'none',
+        '--tagline-fade-in-delay': `${startAt}s`,
+        '--tagline-fade-in-duration': `${fadeInDuration}s`,
+        '--tagline-fade-out-delay': `${fadeOutStart}s`,
+        '--tagline-fade-out-duration': `${fadeOutDuration}s`,
+      },
+    };
   };
 
   const getWatermarkPositionStyle = () => {
@@ -379,18 +549,16 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
                     id={item.id}
                     item={item}
                     getHeatColor={
-                      item.isEmpty
-                        ? 'transparent'
-                        : getHeatColor(intensity)
+                      item.isEmpty ? 'transparent' : getHeatColor(intensity)
                     }
                     accentColor={
-                      item.isEmpty
-                        ? '#9ca3af'
-                        : getAccentColor(intensity)
+                      item.isEmpty ? '#9ca3af' : getAccentColor(intensity)
                     }
                     isEmpty={item.isEmpty}
                     clipStyle={clipStyles?.[item.id]}
-                    onClipStyleChange={(newStyle) => onClipStyleChange?.(item.id, newStyle)}
+                    onClipStyleChange={(newStyle) =>
+                      onClipStyleChange?.(item.id, newStyle)
+                    }
                     videoUrl={videoUrl}
                     isPreviewPlaying={isPreviewPlaying}
                     activeLevel={activeLevels?.[videoKey]}
@@ -404,7 +572,12 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
             {previewStyle.vignetteEnabled && (
               <div
                 className='grid-preview-vignette'
-                style={{ opacity: Math.min(Math.max(previewStyle.vignetteStrength ?? 0.5, 0.1), 1) }}
+                style={{
+                  opacity: Math.min(
+                    Math.max(previewStyle.vignetteStrength ?? 0.5, 0.1),
+                    1,
+                  ),
+                }}
               />
             )}
 
@@ -414,61 +587,104 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
               />
             )}
 
-            {previewStyle.titleEnabled && titleText && !showIntroCard && (
-              <div
-                className={[
-                  titleUsesCard ? 'grid-preview-title-card' : 'grid-preview-title',
-                  previewStyle.titleAnimated ? 'grid-preview-title--fade-in' : '',
-                  (previewStyle.titleDuration ?? 0) > 0 ? 'grid-preview-title--fade-out' : '',
-                ].filter(Boolean).join(' ')}
-                style={{
-                  ...getTitlePositionStyle(),
-                  color: titleColor,
-                  fontSize: `${previewStyle.titleFontSize}px`,
-                  fontFamily: getFontFamily(titleFont),
-                  ...(titleUsesCard && {
-                    background: hexToRgba(titleCardBg, titleCardOpacity),
-                    border: '1px solid rgba(255,255,255,0.16)',
-                    borderRadius: '18px',
-                    padding: '0.75rem 1.1rem',
-                    boxShadow: '0 18px 48px rgba(0,0,0,0.28)',
-                    backdropFilter: 'blur(14px)',
-                  }),
-                  ...((previewStyle.titleDuration ?? 0) > 0 && {
-                    '--title-fade-out-delay': `${introDuration + previewStyle.titleDuration}s`,
-                  }),
-                }}
-              >
-                <span className='grid-preview-title__text'>{titleText}</span>
-                {titleSubtitleText && (
-                  <span
-                    className='grid-preview-title__subtext'
-                    style={{
-                      color: previewStyle.titleSubtitleColor || '#d8d8e6',
-                      fontSize: `${previewStyle.titleSubtitleFontSize ?? Math.max(14, Math.round(previewStyle.titleFontSize * 0.43))}px`,
-                      fontFamily: getFontFamily(titleFont),
-                    }}
-                  >
-                    {titleSubtitleText}
-                  </span>
-                )}
-              </div>
-            )}
+            {previewStyle.titleEnabled &&
+              titleText &&
+              !showIntroCard &&
+              (!previewStyle.introCardEnabled || !isPreviewPlaying) && (
+                <div
+                  className={[
+                    titleUsesFullscreenBackground
+                      ? 'grid-preview-title grid-preview-title--fullscreen'
+                      : titleUsesCard
+                        ? 'grid-preview-title-card'
+                        : 'grid-preview-title',
+                    previewStyle.titleAnimated
+                      ? 'grid-preview-title--fade-in'
+                      : '',
+                    (previewStyle.titleDuration ?? 0) > 0
+                      ? 'grid-preview-title--fade-out'
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  style={{
+                    ...getTitlePositionStyle(),
+                    '--grid-title-transform': titleUsesFullscreenBackground
+                      ? 'translateY(0)'
+                      : getTitlePositionStyle().transform || 'translateX(-50%)',
+                    color: titleColor,
+                    fontSize: `${previewStyle.titleFontSize}px`,
+                    fontFamily: getFontFamily(titleFont),
+                    ...(previewStyle.titleGlowEnabled && {
+                      textShadow: `0 0 ${previewStyle.titleGlowSize || 8}px ${previewStyle.titleGlowColor || '#ffffff'}, 
+                                 0 ${previewStyle.titleShadowSize || 2}px ${previewStyle.titleShadowSize || 2}px rgba(0,0,0,0.5)`,
+                    }),
+                    ...(!previewStyle.titleGlowEnabled &&
+                      previewStyle.titleShadowEnabled && {
+                        textShadow: `0 ${previewStyle.titleShadowSize || 2}px ${previewStyle.titleShadowSize || 2}px rgba(0,0,0,0.55)`,
+                      }),
+                    ...(titleUsesCard &&
+                      !titleUsesFullscreenBackground && {
+                        background: hexToRgba(titleCardBg, titleCardOpacity),
+                        border: '1px solid rgba(255,255,255,0.16)',
+                        borderRadius: '18px',
+                        padding: '0.75rem 1.1rem',
+                        boxShadow: '0 18px 48px rgba(0,0,0,0.28)',
+                        backdropFilter: 'blur(14px)',
+                      }),
+                    ...(titleUsesFullscreenBackground && {
+                      background: hexToRgba(titleCardBg, titleCardOpacity),
+                      padding: '2rem',
+                      backdropFilter: 'blur(14px)',
+                    }),
+                    ...((previewStyle.titleDuration ?? 0) > 0 && {
+                      '--title-fade-out-delay': `${previewStyle.titleDuration}s`,
+                    }),
+                  }}
+                >
+                  <span className='grid-preview-title__text'>{titleText}</span>
+                  {titleSubtitleText && (
+                    <span
+                      className='grid-preview-title__subtext'
+                      style={{
+                        color: previewStyle.titleSubtitleColor || '#d8d8e6',
+                        fontSize: `${previewStyle.titleSubtitleFontSize ?? Math.max(14, Math.round(previewStyle.titleFontSize * 0.43))}px`,
+                        fontFamily: getFontFamily(titleFont),
+                      }}
+                    >
+                      {titleSubtitleText}
+                    </span>
+                  )}
+                </div>
+              )}
 
             {previewStyle.taglineEnabled && taglineText && !showIntroCard && (
               <div
-                className='grid-preview-tagline'
+                className={[
+                  'grid-preview-tagline',
+                  getTaglineAnimationStyle().className,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
                 style={{
+                  ...getTaglinePositionStyle(),
+                  ...getTaglineAnimationStyle().style,
                   color: previewStyle.taglineColor,
                   fontSize: `${previewStyle.taglineFontSize}px`,
                   fontFamily: getFontFamily(previewStyle.taglineFont),
+                  textAlign: previewStyle.taglineAlignment || 'center',
+                  maxWidth: 'calc(100% - 28px)',
+                  ...(previewStyle.taglineShadowEnabled && {
+                    textShadow: `0 ${previewStyle.taglineShadowSize || 2}px ${previewStyle.taglineShadowSize || 2}px ${hexToRgba(previewStyle.taglineShadowColor || '#000000', 0.55)}`,
+                  }),
                   ...(previewStyle.taglineBackgroundEnabled && {
-                    background: hexToRgba(previewStyle.taglineBackgroundColor || '#0c1220', previewStyle.taglineBackgroundOpacity ?? 0.72),
+                    background: hexToRgba(
+                      previewStyle.taglineBackgroundColor || '#0c1220',
+                      previewStyle.taglineBackgroundOpacity ?? 0.72,
+                    ),
                     borderTop: `3px solid ${previewStyle.taglineAccentColor || '#ff4db8'}`,
                     padding: '0.65rem 1rem 0.7rem',
                     borderRadius: '14px 14px 0 0',
-                    minWidth: 'min(72%, 720px)',
-                    textAlign: 'center',
                     boxShadow: '0 -10px 32px rgba(0, 0, 0, 0.22)',
                   }),
                 }}
@@ -477,48 +693,77 @@ const Grid = ({ midiData, onArrangementChange, initialArrangement, clipStyles, o
               </div>
             )}
 
-            {previewStyle.watermarkEnabled && previewStyle.watermarkText?.trim() && (
-              <div
-                className='grid-preview-watermark'
-                style={{
-                  ...getWatermarkPositionStyle(),
-                  color: previewStyle.watermarkColor,
-                  fontSize: `${previewStyle.watermarkFontSize}px`,
-                  fontFamily: getFontFamily(previewStyle.watermarkFont),
-                  opacity: Math.min(Math.max(previewStyle.watermarkOpacity ?? 0.5, 0.1), 1),
-                }}
-              >
-                {previewStyle.watermarkText}
-              </div>
-            )}
+            {previewStyle.watermarkEnabled &&
+              previewStyle.watermarkText?.trim() && (
+                <div
+                  className='grid-preview-watermark'
+                  style={{
+                    ...getWatermarkPositionStyle(),
+                    color: previewStyle.watermarkColor,
+                    fontSize: `${previewStyle.watermarkFontSize}px`,
+                    fontFamily: getFontFamily(previewStyle.watermarkFont),
+                    opacity: Math.min(
+                      Math.max(previewStyle.watermarkOpacity ?? 0.5, 0.1),
+                      1,
+                    ),
+                  }}
+                >
+                  {previewStyle.watermarkText}
+                </div>
+              )}
 
             {/* Intro card: full-screen overlay at start of preview playback */}
             {showIntroCard && (
               <div
-                className={`grid-intro-card${previewStyle.introCardAnimated ? ' grid-intro-card--animated' : ''}`}
-                style={{ background: hexToRgba(titleCardBg, Math.min(titleCardOpacity + 0.13, 0.95)) }}
+                className={`grid-intro-card${previewStyle.introCardAnimated ? ' grid-intro-card--animated' : ''}${introCardFadingOut ? ' grid-intro-card--hiding' : ''}${titleUsesFullscreenBackground ? ' grid-intro-card--fullscreen' : ' grid-intro-card--panel'}`}
+                style={{
+                  background: titleUsesFullscreenBackground
+                    ? hexToRgba(
+                        titleCardBg,
+                        Math.min(titleCardOpacity + 0.13, 0.95),
+                      )
+                    : 'transparent',
+                }}
               >
-                <p
-                  className='grid-intro-card__title'
-                  style={{
-                    color: titleColor,
-                    fontFamily: getFontFamily(titleFont),
-                  }}
+                <div
+                  className={
+                    titleUsesFullscreenBackground
+                      ? 'grid-intro-card__content'
+                      : 'grid-intro-card__content grid-intro-card__content--panel'
+                  }
+                  style={
+                    titleUsesFullscreenBackground
+                      ? undefined
+                      : {
+                          background: hexToRgba(
+                            titleCardBg,
+                            Math.min(titleCardOpacity + 0.13, 0.95),
+                          ),
+                        }
+                  }
                 >
-                  {titleText || 'Untitled'}
-                </p>
-                {titleSubtitleText && (
                   <p
-                    className='grid-intro-card__subtext'
+                    className='grid-intro-card__title'
                     style={{
-                      color: previewStyle.titleSubtitleColor || '#d8d8e6',
+                      color: titleColor,
                       fontFamily: getFontFamily(titleFont),
-                      fontSize: `${previewStyle.titleSubtitleFontSize ?? 24}px`,
                     }}
                   >
-                    {titleSubtitleText}
+                    {introTitleText || 'Untitled'}
                   </p>
-                )}
+                  {introTitleSubtitleText && (
+                    <p
+                      className='grid-intro-card__subtext'
+                      style={{
+                        color: previewStyle.titleSubtitleColor || '#d8d8e6',
+                        fontFamily: getFontFamily(titleFont),
+                        fontSize: `${previewStyle.titleSubtitleFontSize ?? 24}px`,
+                      }}
+                    >
+                      {introTitleSubtitleText}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -536,7 +781,7 @@ Grid.propTypes = {
         instrument: PropTypes.shape({
           name: PropTypes.string,
         }),
-      })
+      }),
     ),
   }).isRequired,
   onArrangementChange: PropTypes.func.isRequired,

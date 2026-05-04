@@ -2,8 +2,19 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as Tone from 'tone';
 import PropTypes from 'prop-types';
 import { isDrumTrack, getNoteGroup } from '../../js/drumUtils';
+import './PreviewPlayer.css';
 
-const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates = {}, soloTrack = null, onMeterUpdate, onPlayStateChange }) => {
+const PreviewPlayer = ({
+  midiData,
+  videoFiles,
+  volumes,
+  instruments,
+  muteStates = {},
+  soloTrack = null,
+  onMeterUpdate,
+  onPlayStateChange,
+  onTransportTimeUpdate,
+}) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const samplersRef = useRef({});
@@ -15,6 +26,16 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
 
   // Throttle meter callback to ~15 Hz to avoid excessive re-renders
   const lastMeterCallRef = useRef(0);
+  const readMeterDb = useCallback((meter) => {
+    if (!meter) return -Infinity;
+    const value = meter.getValue();
+    if (Array.isArray(value)) {
+      const numericValues = value.filter((entry) => Number.isFinite(entry));
+      return numericValues.length ? Math.max(...numericValues) : -Infinity;
+    }
+    return Number.isFinite(value) ? value : -Infinity;
+  }, []);
+
   const emitMeterUpdate = useCallback(() => {
     if (!onMeterUpdate) return;
     const now = performance.now();
@@ -22,19 +43,20 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
     lastMeterCallRef.current = now;
     const levels = {};
     Object.entries(metersRef.current).forEach(([key, meter]) => {
-      levels[key] = meter.getValue();
+      levels[key] = readMeterDb(meter);
     });
     onMeterUpdate(levels);
-  }, [onMeterUpdate]);
+  }, [onMeterUpdate, readMeterDb]);
 
   const startMeterLoop = useCallback(() => {
     const tick = () => {
       if (!isPlayingRef.current) return;
       emitMeterUpdate();
+      onTransportTimeUpdate?.(Tone.Transport.seconds || 0);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [emitMeterUpdate]);
+  }, [emitMeterUpdate, onTransportTimeUpdate]);
 
   const stopMeterLoop = useCallback(() => {
     if (rafRef.current) {
@@ -44,10 +66,13 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
     // Zero-out all meters on stop
     if (onMeterUpdate) {
       const zeroed = {};
-      Object.keys(metersRef.current).forEach((k) => { zeroed[k] = -Infinity; });
+      Object.keys(metersRef.current).forEach((k) => {
+        zeroed[k] = -Infinity;
+      });
       onMeterUpdate(zeroed);
     }
-  }, [onMeterUpdate]);
+    onTransportTimeUpdate?.(0);
+  }, [onMeterUpdate, onTransportTimeUpdate]);
 
   // 1. Initialize Tone.js Instruments when videoFiles change
   useEffect(() => {
@@ -78,7 +103,8 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
 
         const fileUrl = URL.createObjectURL(videoFiles[key]);
         const channel = new Tone.Channel(volumes[key] || 0, 0).toDestination();
-        const meter = new Tone.Meter({ smoothing: 0.8 });
+        // Keep levels in dBFS so all UI thresholds and activity logic map to real mixer semantics.
+        const meter = new Tone.Meter({ smoothing: 0.6, normalRange: false });
         channel.connect(meter);
         newChannels[key] = channel;
         newMeters[key] = meter;
@@ -87,7 +113,8 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
           urls: { C4: fileUrl },
           release: 1,
           onload: () => console.log(`Loaded sample for ${key}`),
-          onerror: (err) => console.error(`Failed to load sample for ${key}:`, err),
+          onerror: (err) =>
+            console.error(`Failed to load sample for ${key}:`, err),
         }).connect(channel);
         sampler._blobUrl = fileUrl;
         newSamplers[key] = sampler;
@@ -130,7 +157,7 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
         onPlayStateChange?.(false);
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 2. Update volumes/mute/solo in real-time
@@ -157,6 +184,7 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       stopMeterLoop();
       setIsPlaying(false);
       onPlayStateChange?.(false);
+      onTransportTimeUpdate?.(0);
       return;
     }
 
@@ -181,13 +209,20 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
           if (!sampler?.loaded) return;
 
           const id = Tone.Transport.schedule((time) => {
-            sampler.triggerAttackRelease('C4', note.duration, time, note.velocity);
+            sampler.triggerAttackRelease(
+              'C4',
+              note.duration,
+              time,
+              note.velocity,
+            );
           }, note.time);
           scheduledIdsRef.current.push(id);
         });
       } else {
         // Find matching melodic instrument by normalized name
-        const normalizedTrackName = track.instrument?.name?.toLowerCase().replace(/\s+/g, '_');
+        const normalizedTrackName = track.instrument?.name
+          ?.toLowerCase()
+          .replace(/\s+/g, '_');
         const sampler = samplersRef.current[normalizedTrackName];
         if (!sampler?.loaded) return;
 
@@ -215,6 +250,7 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       stopMeterLoop();
       setIsPlaying(false);
       onPlayStateChange?.(false);
+      onTransportTimeUpdate?.(0);
     }, endTime + 0.1);
 
     isPlayingRef.current = true;
@@ -229,20 +265,32 @@ const PreviewPlayer = ({ midiData, videoFiles, volumes, instruments, muteStates 
       <button
         onClick={togglePlayback}
         disabled={!isLoaded}
-        className={`px-4 py-2 rounded ${isLoaded ? 'bg-green-500 text-white' : 'bg-gray-300'}`}
-        style={{
-          padding: '10px 20px',
-          fontSize: '16px',
-          fontWeight: 'bold',
-          cursor: isLoaded ? 'pointer' : 'not-allowed',
-          backgroundColor: isLoaded ? (isPlaying ? '#e74c3c' : '#2ecc71') : '#95a5a6',
-          color: 'white',
-          border: 'none',
-          borderRadius: '4px',
-          transition: 'background-color 0.3s',
-        }}
+        className={`preview-player__button ${isLoaded ? 'preview-player__button--ready' : 'preview-player__button--loading'} ${isPlaying ? 'preview-player__button--playing' : ''}`}
+        aria-label={
+          !isLoaded
+            ? 'Loading audio samples...'
+            : isPlaying
+              ? 'Stop preview playback'
+              : 'Play preview'
+        }
+        title={
+          !isLoaded
+            ? 'Loading audio samples...'
+            : isPlaying
+              ? 'Stop preview (Space)'
+              : 'Play preview (Space)'
+        }
       >
-        {!isLoaded ? 'Loading Audio...' : isPlaying ? '⏹ Stop Preview' : '▶ Play Preview'}
+        <span className='preview-player__icon'>
+          {!isLoaded ? '↻' : isPlaying ? '⏹' : '▶'}
+        </span>
+        <span className='preview-player__text'>
+          {!isLoaded
+            ? 'Loading Audio…'
+            : isPlaying
+              ? 'Stop Preview'
+              : 'Play Preview'}
+        </span>
       </button>
     </div>
   );
@@ -257,6 +305,7 @@ PreviewPlayer.propTypes = {
   soloTrack: PropTypes.string,
   onMeterUpdate: PropTypes.func,
   onPlayStateChange: PropTypes.func,
+  onTransportTimeUpdate: PropTypes.func,
 };
 
 export default PreviewPlayer;

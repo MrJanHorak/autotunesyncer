@@ -8,7 +8,12 @@ function getToken() {
   return localStorage.getItem('auth_token');
 }
 
-const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared }) => {
+const ShareCompositionModal = ({
+  blob,
+  suggestedTitle = '',
+  onClose,
+  onShared,
+}) => {
   const [title, setTitle] = useState(suggestedTitle);
   const [description, setDescription] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -33,7 +38,8 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
       if (videoRef.current) videoRef.current.src = url;
     }
     return () => {
-      if (videoObjectUrlRef.current) URL.revokeObjectURL(videoObjectUrlRef.current);
+      if (videoObjectUrlRef.current)
+        URL.revokeObjectURL(videoObjectUrlRef.current);
     };
   }, [blob]);
 
@@ -56,12 +62,16 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
     canvas.height = video.videoHeight || 360;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob((b) => {
-      if (!b) return;
-      if (thumbnailPreviewUrl) URL.revokeObjectURL(thumbnailPreviewUrl);
-      setThumbnailBlob(b);
-      setThumbnailPreviewUrl(URL.createObjectURL(b));
-    }, 'image/jpeg', 0.85);
+    canvas.toBlob(
+      (b) => {
+        if (!b) return;
+        if (thumbnailPreviewUrl) URL.revokeObjectURL(thumbnailPreviewUrl);
+        setThumbnailBlob(b);
+        setThumbnailPreviewUrl(URL.createObjectURL(b));
+      },
+      'image/jpeg',
+      0.85,
+    );
   };
 
   const handleImageUpload = (e) => {
@@ -105,16 +115,28 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
         if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
         xhr.upload.onprogress = (ev) => {
-          if (ev.lengthComputable) setUploadPct(Math.round((ev.loaded / ev.total) * 100));
+          if (ev.lengthComputable)
+            setUploadPct(Math.round((ev.loaded / ev.total) * 100));
         };
 
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
-            try { resolve(JSON.parse(xhr.responseText)); }
-            catch { resolve({}); }
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch {
+              resolve({});
+            }
           } else {
-            try { reject(new Error(JSON.parse(xhr.responseText).error || `Upload failed (${xhr.status})`)); }
-            catch { reject(new Error(`Upload failed (${xhr.status})`)); }
+            try {
+              reject(
+                new Error(
+                  JSON.parse(xhr.responseText).error ||
+                    `Upload failed (${xhr.status})`,
+                ),
+              );
+            } catch {
+              reject(new Error(`Upload failed (${xhr.status})`));
+            }
           }
         };
         xhr.onerror = () => reject(new Error('Network error during upload'));
@@ -132,7 +154,10 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
   };
 
   return (
-    <div className='modal-overlay' onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className='modal-overlay'
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
       <div className='modal'>
         <h2 className='modal__title'>🎬 Share to Feed</h2>
 
@@ -195,7 +220,11 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
                     controls
                     muted
                   />
-                  <button type='button' className='modal__capture-btn' onClick={captureFrame}>
+                  <button
+                    type='button'
+                    className='modal__capture-btn'
+                    onClick={captureFrame}
+                  >
                     📸 Capture current frame
                   </button>
                 </div>
@@ -222,12 +251,25 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
 
               {thumbnailPreviewUrl && (
                 <div className='modal__thumb-preview'>
-                  <img src={thumbnailPreviewUrl} alt='Thumbnail preview' className='modal__thumb-img' />
-                  <button type='button' className='modal__thumb-clear' onClick={clearThumbnail} title='Remove'>✕</button>
+                  <img
+                    src={thumbnailPreviewUrl}
+                    alt='Thumbnail preview'
+                    className='modal__thumb-img'
+                  />
+                  <button
+                    type='button'
+                    className='modal__thumb-clear'
+                    onClick={clearThumbnail}
+                    title='Remove'
+                  >
+                    ✕
+                  </button>
                 </div>
               )}
               {!thumbnailPreviewUrl && (
-                <p className='modal__thumb-hint'>No thumbnail chosen — one will be auto-generated.</p>
+                <p className='modal__thumb-hint'>
+                  No thumbnail chosen — one will be auto-generated.
+                </p>
               )}
             </div>
 
@@ -236,18 +278,49 @@ const ShareCompositionModal = ({ blob, suggestedTitle = '', onClose, onShared })
 
             {uploading && (
               <div style={{ margin: '0.75rem 0' }}>
-                <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: 4, height: 6, overflow: 'hidden' }}>
-                  <div style={{ width: `${uploadPct}%`, height: '100%', background: 'var(--social-accent)', transition: 'width 0.3s' }} />
+                <div
+                  style={{
+                    background: 'rgba(255,255,255,0.1)',
+                    borderRadius: 4,
+                    height: 6,
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${uploadPct}%`,
+                      height: '100%',
+                      background: 'var(--social-accent)',
+                      transition: 'width 0.3s',
+                    }}
+                  />
                 </div>
-                <p style={{ fontSize: '0.8rem', color: 'var(--social-text-muted)', marginTop: 4 }}>Uploading… {uploadPct}%</p>
+                <p
+                  style={{
+                    fontSize: '0.8rem',
+                    color: 'var(--social-text-muted)',
+                    marginTop: 4,
+                  }}
+                >
+                  Uploading… {uploadPct}%
+                </p>
               </div>
             )}
             {error && <p className='modal__error'>{error}</p>}
             <div className='modal__actions'>
-              <button type='button' className='modal__btn modal__btn--cancel' onClick={onClose} disabled={uploading}>
+              <button
+                type='button'
+                className='modal__btn modal__btn--cancel'
+                onClick={onClose}
+                disabled={uploading}
+              >
                 Cancel
               </button>
-              <button type='submit' className='modal__btn modal__btn--submit' disabled={uploading}>
+              <button
+                type='submit'
+                className='modal__btn modal__btn--submit'
+                disabled={uploading}
+              >
                 {uploading ? 'Sharing…' : 'Share'}
               </button>
             </div>
@@ -266,4 +339,3 @@ ShareCompositionModal.propTypes = {
 };
 
 export default ShareCompositionModal;
-

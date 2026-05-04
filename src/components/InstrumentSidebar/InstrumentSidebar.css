@@ -16,7 +16,11 @@
   border-bottom: 1px solid rgba(192, 132, 252, 0.12);
   min-height: 52px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0)
+  );
 }
 
 .instrument-sidebar__title {
@@ -66,7 +70,11 @@
 .instrument-sidebar__progress-fill {
   position: absolute;
   inset: 0 auto 0 0;
-  background: linear-gradient(90deg, rgba(192, 132, 252, 0.5) 0%, rgba(244, 114, 182, 0.5) 100%);
+  background: linear-gradient(
+    90deg,
+    rgba(192, 132, 252, 0.5) 0%,
+    rgba(244, 114, 182, 0.5) 100%
+  );
   transition: width 0.4s ease;
 }
 
@@ -80,7 +88,7 @@
   font-weight: 700;
   letter-spacing: 0.05em;
   color: #fff;
-  text-shadow: 0 0 6px rgba(0,0,0,0.8);
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.8);
   pointer-events: none;
 }
 
@@ -101,14 +109,14 @@
 }
 
 .instrument-sidebar__list::-webkit-scrollbar-thumb {
-  background: rgba(192,132,252,0.24);
+  background: rgba(192, 132, 252, 0.24);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 .instrument-sidebar__list::-webkit-scrollbar-thumb:hover {
-  background: rgba(192,132,252,0.38);
+  background: rgba(192, 132, 252, 0.38);
   background-clip: padding-box;
 }
 
@@ -127,7 +135,11 @@
   font-size: 0.82rem;
   cursor: pointer;
   text-align: left;
-  transition: background 0.12s, color 0.12s, border-color 0.12s, transform 0.12s;
+  transition:
+    background 0.12s,
+    color 0.12s,
+    border-color 0.12s,
+    transform 0.12s;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -177,7 +189,7 @@
   color: var(--color-text-muted);
   opacity: 0.65;
   flex-shrink: 0;
-  background: rgba(255,255,255,0.04);
+  background: rgba(255, 255, 255, 0.04);
   border-radius: 999px;
   padding: 0.15rem 0.42rem;
 }

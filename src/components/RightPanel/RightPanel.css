@@ -15,7 +15,11 @@
   border-bottom: 1px solid rgba(192, 132, 252, 0.12);
   flex-shrink: 0;
   min-height: 52px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0)
+  );
 }
 
 .right-panel__tab {
@@ -30,7 +34,11 @@
   font-size: 0.8rem;
   font-weight: 500;
   cursor: pointer;
-  transition: color 0.12s, background 0.12s, border-color 0.12s, transform 0.12s;
+  transition:
+    color 0.12s,
+    background 0.12s,
+    border-color 0.12s,
+    transform 0.12s;
   white-space: nowrap;
 }
 
@@ -56,11 +64,15 @@
   font-weight: 600;
 }
 
-.right-panel__tabs-spacer { flex: 1; }
+.right-panel__tabs-spacer {
+  flex: 1;
+}
 
 /* ── Panel body ─────────────────────────────────────────────────── */
 .right-panel__body {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 0.75rem;
@@ -75,14 +87,14 @@
 }
 
 .right-panel__body::-webkit-scrollbar-thumb {
-  background: rgba(192,132,252,0.24);
+  background: rgba(192, 132, 252, 0.24);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 .right-panel__body::-webkit-scrollbar-thumb:hover {
-  background: rgba(192,132,252,0.38);
+  background: rgba(192, 132, 252, 0.38);
   background-clip: padding-box;
 }
 
@@ -91,9 +103,26 @@
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: hidden;
+}
+
+.right-panel__mix > .mixer-container {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+  margin: 0;
+  padding: 1rem;
+  max-width: none;
 }
 
 .right-panel__preview {
+  flex-shrink: 0;
   border: 1px solid rgba(192, 132, 252, 0.12);
   border-radius: 0.9rem;
   padding: 0.9rem;
@@ -124,4 +153,6 @@
   justify-content: center;
 }
 
-.right-panel--collapsed .right-panel__tabs-spacer { flex: 1; }
+.right-panel--collapsed .right-panel__tabs-spacer {
+  flex: 1;
+}

@@ -4618,8 +4618,10 @@ class VideoComposer:
         reused by the combined compress+overlay finalization pass.
         """
         cs = getattr(self, 'composition_style', {}) or {}
-        title_text    = (cs.get('titleText') or cs.get('introCardText') or '').strip()
-        title_subtext = (cs.get('titleSubtitleText') or cs.get('introCardSubtext') or '').strip()
+        title_text    = (cs.get('titleText') or '').strip()
+        title_subtext = (cs.get('titleSubtitleText') or '').strip()
+        intro_title_text = (cs.get('introCardText') or title_text or '').strip()
+        intro_title_subtext = (cs.get('introCardSubtext') or title_subtext or '').strip()
         tagline_text  = (cs.get('taglineText') or '').strip()
         title_font    = cs.get('titleFont') or cs.get('introCardFont', 'default')
         title_color   = cs.get('titleColor') or cs.get('introCardTextColor', '#ffffff')
@@ -4628,10 +4630,11 @@ class VideoComposer:
         title_bg      = cs.get('titleBackgroundColor') or cs.get('introCardBg', '#000000')
         title_bg_opacity = float(cs.get('titleBackgroundOpacity', 0.82) or 0.82)
         title_has_bg  = bool(cs.get('titleBackgroundEnabled'))
+        title_bg_mode = cs.get('titleBackgroundMode', 'card')
         has_title     = bool(cs.get('titleEnabled') and title_text)
         has_tagline   = bool(cs.get('taglineEnabled') and tagline_text)
         has_watermark = bool(cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip())
-        has_intro     = bool(cs.get('introCardEnabled') and title_text)
+        has_intro     = bool(cs.get('titleEnabled') and cs.get('introCardEnabled') and intro_title_text)
         if not (has_title or has_tagline or has_watermark or has_intro):
             return None
 
@@ -4682,8 +4685,8 @@ class VideoComposer:
                 f":color={bg_col}@{min(title_bg_opacity + 0.13, 0.95):.3f}:t=fill:enable='lt(t,{d})'[{nxt}]"
             )
             current_label = nxt
-            ic_title = title_text or 'AutoTune Composition'
-            ic_sub   = title_subtext
+            ic_title = intro_title_text or 'AutoTune Composition'
+            ic_sub   = intro_title_subtext
             if ic_title:
                 add_drawtext(ic_title, '(w-text_w)/2', '(h-text_h)/2', 72, txt_col,
                              alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
@@ -4735,7 +4738,16 @@ class VideoComposer:
                 enabled = f"between(t,{start_at:.3f},{Te})"
             else:
                 alpha, enabled = '1', '1'
-            if title_has_bg:
+            if title_has_bg and title_bg_mode == 'fullscreen':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]drawbox=x=0:y=0:w=iw:h=ih"
+                    f":color={self._hex_to_ffmpeg_color(title_bg)}@{title_bg_opacity:.3f}:t=fill:enable='{enabled}'[{nxt}]"
+                )
+                current_label = nxt
+                y = '(h-text_h)/2'
+                tag_y = 'h*0.58'
+            elif title_has_bg:
                 box_color = self._hex_to_ffmpeg_color(title_bg)
                 if pos == 'bottom-center':
                     box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.72', 'w*0.68', 'h*0.18'
@@ -4777,26 +4789,68 @@ class VideoComposer:
         if has_tagline:
             size  = int(cs.get('taglineFontSize', 24))
             color = cs.get('taglineColor', '#cccccc')
+            tagline_position = cs.get('taglinePosition', 'bottom-center')
+            tagline_alignment = cs.get('taglineAlignment', 'center')
+            tagline_width_pct = min(100.0, max(20.0, float(cs.get('taglineWidth', 72) or 72)))
+            tagline_fade_in = max(0.0, float(cs.get('taglineFadeInDuration', 0.5) or 0.0))
+            tagline_fade_out = max(0.0, float(cs.get('taglineFadeOutDuration', 0.5) or 0.0))
             tagline_bg_enabled = bool(cs.get('taglineBackgroundEnabled'))
             tagline_bg = self._hex_to_ffmpeg_color(cs.get('taglineBackgroundColor', '#0c1220'))
             tagline_bg_opacity = float(cs.get('taglineBackgroundOpacity', 0.72) or 0.72)
             tagline_accent = self._hex_to_ffmpeg_color(cs.get('taglineAccentColor', '#ff4db8'))
-            text_y = f'h-{size * 2 + 18}' if tagline_bg_enabled else f'h-{size * 2 + 10}'
+            tagline_start = max(0.0, float(cs.get('introCardDuration', 3))) if has_intro else 0.0
+            tagline_fade_out_start = max(tagline_start + tagline_fade_in, total_duration - tagline_fade_out)
+            alpha_in = '1'
+            if tagline_fade_in > 0:
+                alpha_in = (
+                    f"if(lt(t,{tagline_start:.3f}),0,"
+                    f"if(lt(t,{tagline_start + tagline_fade_in:.3f}),(t-{tagline_start:.3f})/{max(tagline_fade_in, 0.001):.3f},1))"
+                )
+            alpha_out = '1'
+            if tagline_fade_out > 0:
+                alpha_out = (
+                    f"if(lt(t,{tagline_fade_out_start:.3f}),1,"
+                    f"max(0,1-(t-{tagline_fade_out_start:.3f})/{max(tagline_fade_out, 0.001):.3f}))"
+                )
+            tagline_alpha = f"({alpha_in})*({alpha_out})"
+            container_w = f'w*{tagline_width_pct / 100.0:.4f}'
+            if tagline_position == 'bottom-left':
+                container_x = '14'
+            elif tagline_position == 'bottom-right':
+                container_x = f'w-{container_w}-14'
+            else:
+                container_x = f'(w-{container_w})/2'
+            if tagline_bg_enabled:
+                box_y = f'h-{size * 2 + 28}'
+                box_h = f'{size * 2 + 14}'
+                text_y = f'{box_y}+{max(8, size // 3)}'
+            else:
+                box_y = None
+                box_h = None
+                text_y = f'h-{size + 18}'
+            if tagline_alignment == 'left':
+                text_x = f'{container_x}+18'
+            elif tagline_alignment == 'right':
+                text_x = f'{container_x}+{container_w}-text_w-18'
+            else:
+                text_x = f'{container_x}+({container_w}-text_w)/2'
             if tagline_bg_enabled:
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]drawbox=x=w*0.14:y=h*0.84:w=w*0.72:h=h*0.10"
-                    f":color={tagline_bg}@{tagline_bg_opacity:.3f}:t=fill[{nxt}]"
+                    f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h={box_h}"
+                    f":color={tagline_bg}@{tagline_bg_opacity:.3f}:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                 )
                 current_label = nxt
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]drawbox=x=w*0.14:y=h*0.84:w=w*0.72:h=4"
-                    f":color={tagline_accent}@1.0:t=fill[{nxt}]"
+                    f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h=4"
+                    f":color={tagline_accent}@1.0:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                 )
                 current_label = nxt
-            add_drawtext(tagline_text, '(w-text_w)/2', text_y,
-                         size, color, font_key=cs.get('taglineFont', 'default'))
+            add_drawtext(tagline_text, text_x, text_y,
+                         size, color, alpha_expr=tagline_alpha,
+                         enabled=f'between(t,{tagline_start:.3f},{total_duration:.3f})',
+                         font_key=cs.get('taglineFont', 'default'))
 
         # ── Watermark ─────────────────────────────────────────────────────────
         if has_watermark:

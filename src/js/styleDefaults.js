@@ -6,15 +6,15 @@
 
 /** Font options available for all text overlays. */
 export const FONT_OPTIONS = [
-  { value: 'default',   label: 'Default (FFmpeg)' },
-  { value: 'arial',     label: 'Arial' },
-  { value: 'verdana',   label: 'Verdana' },
-  { value: 'impact',    label: 'Impact' },
-  { value: 'courier',   label: 'Courier New' },
-  { value: 'times',     label: 'Times New Roman' },
-  { value: 'georgia',   label: 'Georgia' },
+  { value: 'default', label: 'Default (FFmpeg)' },
+  { value: 'arial', label: 'Arial' },
+  { value: 'verdana', label: 'Verdana' },
+  { value: 'impact', label: 'Impact' },
+  { value: 'courier', label: 'Courier New' },
+  { value: 'times', label: 'Times New Roman' },
+  { value: 'georgia', label: 'Georgia' },
   { value: 'trebuchet', label: 'Trebuchet MS' },
-  { value: 'comic',     label: 'Comic Sans MS' },
+  { value: 'comic', label: 'Comic Sans MS' },
 ];
 
 export const DEFAULT_COMPOSITION_STYLE = {
@@ -34,8 +34,16 @@ export const DEFAULT_COMPOSITION_STYLE = {
   titleAnimated: true,
   titleDuration: 4, // seconds to show before fade-out; set to 0 for permanent
   titleBackgroundEnabled: false,
+  titleBackgroundMode: 'card', // 'card' | 'fullscreen'
   titleBackgroundColor: '#120b24',
   titleBackgroundOpacity: 0.82,
+  // Title glow and shadow effects
+  titleGlowEnabled: false,
+  titleGlowColor: '#ffffff',
+  titleGlowSize: 8,
+  titleShadowEnabled: true,
+  titleShadowSize: 2,
+  titleShadowColor: '#000000',
 
   // Tagline / lower-third
   taglineEnabled: false,
@@ -43,11 +51,20 @@ export const DEFAULT_COMPOSITION_STYLE = {
   taglineFontSize: 24,
   taglineColor: '#cccccc',
   taglineFont: 'default',
-  taglinePosition: 'bottom-center',
+  taglinePosition: 'bottom-center', // 'bottom-left' | 'bottom-center' | 'bottom-right'
+  taglineWidth: 72, // percentage (0-100)
   taglineBackgroundEnabled: false,
   taglineBackgroundColor: '#0c1220',
   taglineBackgroundOpacity: 0.72,
   taglineAccentColor: '#ff4db8',
+  // Tagline alignment and shadow
+  taglineAlignment: 'center', // 'left' | 'center' | 'right'
+  taglineShadowEnabled: true,
+  taglineShadowSize: 2,
+  taglineShadowColor: '#000000',
+  // Tagline fade timing (NEW)
+  taglineFadeInDuration: 0.5, // seconds to fade in
+  taglineFadeOutDuration: 0.5, // seconds to fade out after duration
 
   // Watermark
   watermarkEnabled: false,
@@ -115,28 +132,63 @@ export const DEFAULT_CLIP_STYLE = {
 export const COLOR_THEMES = {
   dark: {
     backgroundColor: '#0a0a0f',
-    clipDefaults: { borderColor: '#7c3aed', bgColor: '#1a1a2e', bgColorEnabled: false, colorGrade: 'none' },
-    titleColor: '#ffffff', taglineColor: '#cccccc', watermarkColor: '#ffffff',
+    clipDefaults: {
+      borderColor: '#7c3aed',
+      bgColor: '#1a1a2e',
+      bgColorEnabled: false,
+      colorGrade: 'none',
+    },
+    titleColor: '#ffffff',
+    taglineColor: '#cccccc',
+    watermarkColor: '#ffffff',
   },
   neon: {
     backgroundColor: '#050510',
-    clipDefaults: { borderColor: '#00ffff', bgColor: '#0a0a1a', bgColorEnabled: false, colorGrade: 'vivid' },
-    titleColor: '#00ffff', taglineColor: '#ff00ff', watermarkColor: '#00ffff',
+    clipDefaults: {
+      borderColor: '#00ffff',
+      bgColor: '#0a0a1a',
+      bgColorEnabled: false,
+      colorGrade: 'vivid',
+    },
+    titleColor: '#00ffff',
+    taglineColor: '#ff00ff',
+    watermarkColor: '#00ffff',
   },
   vintage: {
     backgroundColor: '#1a0f00',
-    clipDefaults: { borderColor: '#d4a044', bgColor: '#2a1500', bgColorEnabled: false, colorGrade: 'vintage' },
-    titleColor: '#f5deb3', taglineColor: '#d4a044', watermarkColor: '#d4a044',
+    clipDefaults: {
+      borderColor: '#d4a044',
+      bgColor: '#2a1500',
+      bgColorEnabled: false,
+      colorGrade: 'vintage',
+    },
+    titleColor: '#f5deb3',
+    taglineColor: '#d4a044',
+    watermarkColor: '#d4a044',
   },
   cyberpunk: {
     backgroundColor: '#0d0221',
-    clipDefaults: { borderColor: '#ff00ff', bgColor: '#0d0221', bgColorEnabled: false, colorGrade: 'cyberpunk' },
-    titleColor: '#ff00ff', taglineColor: '#00ffff', watermarkColor: '#ff00ff',
+    clipDefaults: {
+      borderColor: '#ff00ff',
+      bgColor: '#0d0221',
+      bgColorEnabled: false,
+      colorGrade: 'cyberpunk',
+    },
+    titleColor: '#ff00ff',
+    taglineColor: '#00ffff',
+    watermarkColor: '#ff00ff',
   },
   minimal: {
     backgroundColor: '#f5f5f5',
-    clipDefaults: { borderColor: '#e0e0e0', bgColor: '#ffffff', bgColorEnabled: false, colorGrade: 'none' },
-    titleColor: '#111111', taglineColor: '#555555', watermarkColor: '#888888',
+    clipDefaults: {
+      borderColor: '#e0e0e0',
+      bgColor: '#ffffff',
+      bgColorEnabled: false,
+      colorGrade: 'none',
+    },
+    titleColor: '#111111',
+    taglineColor: '#555555',
+    watermarkColor: '#888888',
   },
 };
 
