@@ -22,9 +22,10 @@ const videoProcessingQueue = new Queue('video processing', {
 // Concurrency: default 4, clamped to [1, 32] and validated to guard against
 // non-numeric values like "auto" or empty strings.
 const _rawConcurrency = parseInt(process.env.QUEUE_CONCURRENCY || '', 10);
-const QUEUE_CONCURRENCY = (Number.isFinite(_rawConcurrency) && _rawConcurrency >= 1)
-  ? Math.min(_rawConcurrency, 32)
-  : 4;
+const QUEUE_CONCURRENCY =
+  Number.isFinite(_rawConcurrency) && _rawConcurrency >= 1
+    ? Math.min(_rawConcurrency, 32)
+    : 4;
 
 // Process video composition jobs with enhanced error handling and progress tracking
 videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
@@ -101,13 +102,13 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
           },
         },
         null,
-        2
-      )
+        2,
+      ),
     );
 
     writeFileSync(
       videoFilesJsonPath,
-      JSON.stringify(transformedVideoFiles, null, 2)
+      JSON.stringify(transformedVideoFiles, null, 2),
     );
 
     await job.progress(30, {
@@ -144,7 +145,7 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
       const progressMatches = output.match(/PROGRESS:(\d+)/g);
       if (progressMatches) {
         const latestProgress = parseInt(
-          progressMatches[progressMatches.length - 1].split(':')[1]
+          progressMatches[progressMatches.length - 1].split(':')[1],
         );
         if (latestProgress > lastProgress) {
           lastProgress = latestProgress;
@@ -168,10 +169,13 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
     });
     // Wait for Python process to complete
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        pythonProcess.kill('SIGKILL');
-        reject(new Error('Video processing timeout after 10 minutes'));
-      }, 10 * 60 * 1000); // 10 minute timeout
+      const timeout = setTimeout(
+        () => {
+          pythonProcess.kill('SIGKILL');
+          reject(new Error('Video processing timeout after 10 minutes'));
+        },
+        10 * 60 * 1000,
+      ); // 10 minute timeout
 
       pythonProcess.on('close', (code) => {
         clearTimeout(timeout);
@@ -222,7 +226,7 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
         trackCount: Object.keys(allVideoFiles).length,
         processingTime: Date.now() - job.timestamp,
       },
-      7200
+      7200,
     ); // Cache for 2 hours
 
     // Store performance metrics
@@ -235,11 +239,11 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
         outputFileSize: stats.size,
         totalProcessingTime: Date.now() - job.timestamp,
       },
-      3600
+      3600,
     ); // Cache metrics for 1 hour
 
     console.log(
-      `✅ Composition job ${job.id} completed successfully: ${stats.size} bytes`
+      `✅ Composition job ${job.id} completed successfully: ${stats.size} bytes`,
     );
 
     // Cleanup temp files
@@ -271,7 +275,7 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
         sessionId,
         jobData: job.data,
       },
-      3600
+      3600,
     );
 
     throw error;
@@ -286,9 +290,8 @@ videoProcessingQueue.process('autotune', 2, async (job) => {
     await job.progress(20);
 
     // Import the autotune processor
-    const { processAutotuneVideo } = await import(
-      '../controllers/autotuneController.js'
-    );
+    const { processAutotuneVideo } =
+      await import('../controllers/autotuneController.js');
 
     const result = await processAutotuneVideo(videoPath, outputPath);
 
@@ -309,9 +312,8 @@ videoProcessingQueue.process('midi-analysis', 8, async (job) => {
     await job.progress(30);
 
     // Import MIDI processor
-    const { analyzeMidiBuffer } = await import(
-      '../controllers/midiController.js'
-    );
+    const { analyzeMidiBuffer } =
+      await import('../controllers/midiController.js');
 
     const result = await analyzeMidiBuffer(midiBuffer, fileName);
 
@@ -348,7 +350,7 @@ export const addVideoCompositionJob = async (
   processedDrums,
   outputPath,
   sessionId,
-  priority = 0
+  priority = 0,
 ) => {
   const jobPayload =
     midiDataOrJob && typeof midiDataOrJob === 'object' && midiDataOrJob.midiData
@@ -361,14 +363,10 @@ export const addVideoCompositionJob = async (
           sessionId,
         };
 
-  const job = await videoProcessingQueue.add(
-    'compose',
-    jobPayload,
-    {
-      priority,
-      delay: 0,
-    }
-  );
+  const job = await videoProcessingQueue.add('compose', jobPayload, {
+    priority,
+    delay: 0,
+  });
 
   return job;
 };
@@ -382,7 +380,7 @@ export const addAutotuneJob = async (videoPath, outputPath, priority = 0) => {
     },
     {
       priority,
-    }
+    },
   );
 
   return job;
@@ -391,7 +389,7 @@ export const addAutotuneJob = async (videoPath, outputPath, priority = 0) => {
 export const addMidiAnalysisJob = async (
   midiBuffer,
   fileName,
-  priority = 10
+  priority = 10,
 ) => {
   const job = await videoProcessingQueue.add(
     'midi-analysis',
@@ -401,7 +399,7 @@ export const addMidiAnalysisJob = async (
     },
     {
       priority,
-    }
+    },
   );
 
   return job;
