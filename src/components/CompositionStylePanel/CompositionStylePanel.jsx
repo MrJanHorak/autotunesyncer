@@ -507,6 +507,19 @@ const CompositionStylePanel = ({ style, onChange }) => {
                     {style.taglineAccentColor || '#ff4db8'}
                   </span>
                 </Field>
+                <Field label='Shape'>
+                  <select
+                    className='csp-select'
+                    value={style.taglineShape || 'rounded'}
+                    onChange={(e) => set('taglineShape', e.target.value)}
+                  >
+                    <option value='rounded'>Rounded</option>
+                    <option value='pill'>Pill</option>
+                    <option value='square'>Square</option>
+                    <option value='outline'>Outline</option>
+                    <option value='accent-left'>Accent Left</option>
+                  </select>
+                </Field>
               </>
             )}
             <Field label='Width'>
@@ -520,6 +533,24 @@ const CompositionStylePanel = ({ style, onChange }) => {
                 onChange={(e) => set('taglineWidth', +e.target.value)}
               />
               <span className='csp-range-val'>{style.taglineWidth || 72}%</span>
+            </Field>
+            <Field label='Vertical Offset'>
+              <input
+                className='csp-range'
+                type='range'
+                min={-120}
+                max={120}
+                step={1}
+                value={style.taglineVerticalOffset ?? 0}
+                onChange={(e) => set('taglineVerticalOffset', +e.target.value)}
+              />
+              <span className='csp-range-val'>
+                {(style.taglineVerticalOffset ?? 0) > 0
+                  ? `+${style.taglineVerticalOffset}px up`
+                  : (style.taglineVerticalOffset ?? 0) < 0
+                    ? `${Math.abs(style.taglineVerticalOffset)}px down`
+                    : '0px'}
+              </span>
             </Field>
             <Field label='Position'>
               <select

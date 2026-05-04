@@ -53,6 +53,8 @@ export const DEFAULT_COMPOSITION_STYLE = {
   taglineFont: 'default',
   taglinePosition: 'bottom-center', // 'bottom-left' | 'bottom-center' | 'bottom-right'
   taglineWidth: 72, // percentage (0-100)
+  taglineVerticalOffset: 0, // px, positive moves bar upward
+  taglineShape: 'rounded', // 'rounded' | 'pill' | 'square' | 'outline' | 'accent-left'
   taglineBackgroundEnabled: false,
   taglineBackgroundColor: '#0c1220',
   taglineBackgroundOpacity: 0.72,

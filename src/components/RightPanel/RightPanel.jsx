@@ -84,10 +84,12 @@ export default function RightPanel({
       {isOpen && (
         <div className='right-panel__body'>
           {activeTab === 'style' && (
-            <CompositionStylePanel
-              style={compositionStyle}
-              onChange={onStyleChange}
-            />
+            <div className='right-panel__style'>
+              <CompositionStylePanel
+                style={compositionStyle}
+                onChange={onStyleChange}
+              />
+            </div>
           )}
 
           {activeTab === 'mix' && (

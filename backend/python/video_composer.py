@@ -4791,7 +4791,9 @@ class VideoComposer:
             color = cs.get('taglineColor', '#cccccc')
             tagline_position = cs.get('taglinePosition', 'bottom-center')
             tagline_alignment = cs.get('taglineAlignment', 'center')
+            tagline_shape = cs.get('taglineShape', 'rounded')
             tagline_width_pct = min(100.0, max(20.0, float(cs.get('taglineWidth', 72) or 72)))
+            tagline_vertical_offset = min(160.0, max(-160.0, float(cs.get('taglineVerticalOffset', 0) or 0.0)))
             tagline_fade_in = max(0.0, float(cs.get('taglineFadeInDuration', 0.5) or 0.0))
             tagline_fade_out = max(0.0, float(cs.get('taglineFadeOutDuration', 0.5) or 0.0))
             tagline_bg_enabled = bool(cs.get('taglineBackgroundEnabled'))
@@ -4820,18 +4822,33 @@ class VideoComposer:
                 container_x = f'w-{container_w}-14'
             else:
                 container_x = f'(w-{container_w})/2'
+            top_padding = max(8, size // 3)
+            text_inset = 18
             if tagline_bg_enabled:
-                box_y = f'h-{size * 2 + 28}'
-                box_h = f'{size * 2 + 14}'
-                text_y = f'{box_y}+{max(8, size // 3)}'
+                box_height_px = size * 2 + 14
+                if tagline_shape == 'pill':
+                    box_height_px = size * 2 + 20
+                    top_padding = max(10, size // 3)
+                    text_inset = 22
+                elif tagline_shape == 'square':
+                    top_padding = max(6, size // 4)
+                    text_inset = 14
+                elif tagline_shape == 'outline':
+                    text_inset = 20
+                elif tagline_shape == 'accent-left':
+                    text_inset = 22
+
+                box_y = f'h-{size * 2 + 28 + tagline_vertical_offset:.3f}'
+                box_h = f'{box_height_px:.3f}'
+                text_y = f'{box_y}+{top_padding}'
             else:
                 box_y = None
                 box_h = None
-                text_y = f'h-{size + 18}'
+                text_y = f'h-{size + 18 + tagline_vertical_offset:.3f}'
             if tagline_alignment == 'left':
-                text_x = f'{container_x}+18'
+                text_x = f'{container_x}+{text_inset}'
             elif tagline_alignment == 'right':
-                text_x = f'{container_x}+{container_w}-text_w-18'
+                text_x = f'{container_x}+{container_w}-text_w-{text_inset}'
             else:
                 text_x = f'{container_x}+({container_w}-text_w)/2'
             if tagline_bg_enabled:
@@ -4842,10 +4859,26 @@ class VideoComposer:
                 )
                 current_label = nxt
                 nxt = f'v_to_{len(filter_parts)}'
-                filter_parts.append(
-                    f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h=4"
-                    f":color={tagline_accent}@1.0:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
-                )
+                if tagline_shape == 'accent-left':
+                    filter_parts.append(
+                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w=4:h={box_h}"
+                        f":color={tagline_accent}@1.0:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
+                    )
+                elif tagline_shape == 'outline':
+                    filter_parts.append(
+                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h={box_h}"
+                        f":color={tagline_accent}@0.9:t=2:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
+                    )
+                elif tagline_shape != 'pill':
+                    filter_parts.append(
+                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h=4"
+                        f":color={tagline_accent}@1.0:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h={box_h}"
+                        f":color={tagline_accent}@0.55:t=1:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
+                    )
                 current_label = nxt
             add_drawtext(tagline_text, text_x, text_y,
                          size, color, alpha_expr=tagline_alpha,

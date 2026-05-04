@@ -73,27 +73,35 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  overflow-x: hidden;
+  min-height: 0;
+  overflow: hidden;
   padding: 0.75rem;
 }
 
-.right-panel__body::-webkit-scrollbar {
+.right-panel__style {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0.2rem;
+}
+
+.right-panel__style::-webkit-scrollbar {
   width: 10px;
 }
 
-.right-panel__body::-webkit-scrollbar-track {
+.right-panel__style::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.right-panel__body::-webkit-scrollbar-thumb {
+.right-panel__style::-webkit-scrollbar-thumb {
   background: rgba(192, 132, 252, 0.24);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
-.right-panel__body::-webkit-scrollbar-thumb:hover {
+.right-panel__style::-webkit-scrollbar-thumb:hover {
   background: rgba(192, 132, 252, 0.38);
   background-clip: padding-box;
 }

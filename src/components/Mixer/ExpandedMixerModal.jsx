@@ -73,8 +73,19 @@ const ExpandedMixerModal = ({
                 : 'Start preview playback'
             }
           >
-            <span className='soundboard-transport__label'>
-              {isPreviewPlaying ? '⏹ Stop Preview' : '▶ Play Preview'}
+            <span className='soundboard-transport__left'>
+              <span
+                className={[
+                  'soundboard-transport__status',
+                  isPreviewPlaying ? 'is-active' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                aria-hidden='true'
+              />
+              <span className='soundboard-transport__label'>
+                {isPreviewPlaying ? 'Stop Preview' : 'Play Preview'}
+              </span>
             </span>
             <span className='soundboard-transport__time'>
               {formatClock(previewElapsed)} / {formatClock(previewDuration)}

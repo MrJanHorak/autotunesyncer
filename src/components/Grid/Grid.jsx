@@ -427,19 +427,24 @@ const Grid = ({
 
   const getTaglinePositionStyle = () => {
     const width = `${Math.max(20, Math.min(100, previewStyle.taglineWidth ?? 72))}%`;
+    const verticalOffset = Math.max(
+      -160,
+      Math.min(160, Number(previewStyle.taglineVerticalOffset ?? 0)),
+    );
+    const bottom = `${14 + verticalOffset}px`;
 
     switch (previewStyle.taglinePosition) {
       case 'bottom-left':
         return {
           left: '14px',
-          bottom: '14px',
+          bottom,
           transform: 'none',
           width,
         };
       case 'bottom-right':
         return {
           right: '14px',
-          bottom: '14px',
+          bottom,
           left: 'auto',
           transform: 'none',
           width,
@@ -447,11 +452,73 @@ const Grid = ({
       default:
         return {
           left: '50%',
-          bottom: '14px',
+          bottom,
           transform: 'translateX(-50%)',
           width,
         };
     }
+  };
+
+  const getTaglineSurfaceStyle = () => {
+    if (!previewStyle.taglineBackgroundEnabled) return {};
+
+    const shape = previewStyle.taglineShape || 'rounded';
+    const accent = previewStyle.taglineAccentColor || '#ff4db8';
+    const bg = hexToRgba(
+      previewStyle.taglineBackgroundColor || '#0c1220',
+      previewStyle.taglineBackgroundOpacity ?? 0.72,
+    );
+
+    const base = {
+      background: bg,
+      boxShadow: '0 -10px 32px rgba(0, 0, 0, 0.22)',
+      padding: '0.65rem 1rem 0.7rem',
+      borderTop: `3px solid ${accent}`,
+      borderRadius: '14px 14px 0 0',
+    };
+
+    if (shape === 'pill') {
+      return {
+        ...base,
+        borderTop: 'none',
+        border: `1px solid ${hexToRgba(accent, 0.55)}`,
+        borderRadius: '999px',
+        padding: '0.58rem 1.25rem',
+      };
+    }
+
+    if (shape === 'square') {
+      return {
+        ...base,
+        borderRadius: '0',
+      };
+    }
+
+    if (shape === 'outline') {
+      return {
+        ...base,
+        borderTop: 'none',
+        border: `2px solid ${hexToRgba(accent, 0.78)}`,
+        background: hexToRgba(
+          previewStyle.taglineBackgroundColor || '#0c1220',
+          Math.max(
+            0.18,
+            (previewStyle.taglineBackgroundOpacity ?? 0.72) * 0.58,
+          ),
+        ),
+      };
+    }
+
+    if (shape === 'accent-left') {
+      return {
+        ...base,
+        borderTop: 'none',
+        borderLeft: `4px solid ${accent}`,
+        borderRadius: '12px',
+      };
+    }
+
+    return base;
   };
 
   const getTaglineAnimationStyle = () => {
@@ -677,16 +744,7 @@ const Grid = ({
                   ...(previewStyle.taglineShadowEnabled && {
                     textShadow: `0 ${previewStyle.taglineShadowSize || 2}px ${previewStyle.taglineShadowSize || 2}px ${hexToRgba(previewStyle.taglineShadowColor || '#000000', 0.55)}`,
                   }),
-                  ...(previewStyle.taglineBackgroundEnabled && {
-                    background: hexToRgba(
-                      previewStyle.taglineBackgroundColor || '#0c1220',
-                      previewStyle.taglineBackgroundOpacity ?? 0.72,
-                    ),
-                    borderTop: `3px solid ${previewStyle.taglineAccentColor || '#ff4db8'}`,
-                    padding: '0.65rem 1rem 0.7rem',
-                    borderRadius: '14px 14px 0 0',
-                    boxShadow: '0 -10px 32px rgba(0, 0, 0, 0.22)',
-                  }),
+                  ...getTaglineSurfaceStyle(),
                 }}
               >
                 {taglineText}

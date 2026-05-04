@@ -98,32 +98,73 @@
   background: rgba(59, 130, 246, 0.16);
   border: 1px solid rgba(96, 165, 250, 0.38);
   color: #dbeafe;
-  min-width: 150px;
-  height: 42px;
+  min-width: 235px;
+  height: 46px;
   border-radius: 10px;
-  padding: 0 0.9rem;
+  padding: 0 0.75rem 0 0.7rem;
   cursor: pointer;
-  font-weight: 700;
-  font-size: 0.86rem;
-  letter-spacing: 0.25px;
+  font-weight: 600;
+  font-size: 0.84rem;
+  letter-spacing: 0.18px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  gap: 0.55rem;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   transition: all 0.2s ease;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
+.soundboard-transport__left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.soundboard-transport__status {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.3);
+  flex-shrink: 0;
+}
+
+.soundboard-transport__status.is-active {
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.8);
+  animation: soundboardTransportPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes soundboardTransportPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+
+  50% {
+    transform: scale(1.25);
+    opacity: 1;
+  }
+}
+
 .soundboard-transport__label {
-  line-height: 1.05;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .soundboard-transport__time {
-  margin-top: 0.12rem;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   font-family: 'Courier New', monospace;
-  opacity: 0.88;
+  opacity: 0.94;
   line-height: 1;
+  white-space: nowrap;
+  padding: 0.24rem 0.42rem;
+  border-radius: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.36);
 }
 
 .soundboard-transport:hover {
@@ -137,6 +178,11 @@
   border-color: rgba(74, 222, 128, 0.46);
   color: #dcfce7;
   box-shadow: 0 0 14px rgba(34, 197, 94, 0.22);
+}
+
+.soundboard-transport.is-playing .soundboard-transport__time {
+  border-color: rgba(74, 222, 128, 0.36);
+  background: rgba(20, 83, 45, 0.28);
 }
 
 .soundboard-close {
@@ -239,13 +285,13 @@
   }
 
   .soundboard-transport {
-    min-width: 132px;
-    height: 38px;
+    min-width: 208px;
+    height: 42px;
     font-size: 0.8rem;
   }
 
   .soundboard-transport__time {
-    font-size: 0.62rem;
+    font-size: 0.66rem;
   }
 }
 
@@ -265,6 +311,7 @@
   .soundboard-transport {
     order: 3;
     width: 100%;
+    min-width: 0;
   }
 
   .soundboard-channels {
