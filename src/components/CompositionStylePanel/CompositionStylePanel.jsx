@@ -701,6 +701,30 @@ const CompositionStylePanel = ({
                 </option>
               </select>
             </Field>
+            <Field label='Apply After Text/Overlays'>
+              <Toggle
+                checked={style.transitionApplyAfterText ?? false}
+                onChange={(v) => set('transitionApplyAfterText', v)}
+              />
+            </Field>
+            <p className='csp-field__hint'>
+              On animates the composed overlay layer, including title, tagline,
+              watermark, and the intro card when present.
+            </p>
+            {style.introCardEnabled && transitionOnValue === 'start' && (
+              <>
+                <Field label='Apply To Intro Card'>
+                  <Toggle
+                    checked={style.transitionApplyToIntroCard ?? false}
+                    onChange={(v) => set('transitionApplyToIntroCard', v)}
+                  />
+                </Field>
+                <p className='csp-field__hint'>
+                  Off keeps the intro card static and starts the transition
+                  after the intro card ends.
+                </p>
+              </>
+            )}
             {transitionOnValue === 'section' && (
               <Field
                 label={`Repeat Every (${(style.transitionSectionInterval ?? 8).toFixed(1)}s)`}

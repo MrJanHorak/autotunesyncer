@@ -1306,6 +1306,7 @@ class VideoComposer:
         chunk_start_time=0.0,
         onset_offset=0.0,
         note_audio_map=None,
+        style_track_id=None,
     ):
         """
         WORKING unified note-triggered clip builder.
@@ -1388,9 +1389,25 @@ class VideoComposer:
                     note_input_index[mn] = BASE_EXTRA_IDX + len(extra_audio_inputs)
                     extra_audio_inputs.append(note_audio_map[mn])
 
+            cs = getattr(self, 'composition_style', {}) or {}
+            bg_hex = cs.get('backgroundColor', '#0a0a0f')
+            style_lookup_id = style_track_id if style_track_id is not None else track_name
+            clip_style, _, matched_key = self._resolve_clip_style(style_lookup_id)
+            if (
+                clip_style.get('bgColorEnabled')
+                and clip_style.get('bgColor')
+                and not clip_style.get('transparentBg')
+            ):
+                bg_hex = clip_style.get('bgColor')
+                logging.info(
+                    f"[style] note-trigger base for {track_name!r}: {bg_hex} "
+                    f"({matched_key or style_lookup_id})"
+                )
+            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
+
             # Build filter parts
             filter_parts = [
-                # Base black video & silent audio come from inputs 1 & 2
+                # Base cell background and silent audio come from inputs 1 & 2
                 f"[1:v]trim=0:{total_duration},setpts=PTS-STARTPTS[base_v]",
                 f"[2:a]atrim=0:{total_duration},asetpts=PTS-STARTPTS[base_a]"
             ]
@@ -1456,10 +1473,6 @@ class VideoComposer:
                 )
 
             filter_parts.append(f"{video_chain}format=yuv420p[final_v]")
-
-            cs = getattr(self, 'composition_style', {}) or {}
-            bg_hex = cs.get('backgroundColor', '#0a0a0f')
-            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
 
             cmd = [
                 "ffmpeg", "-y",
@@ -2799,14 +2812,36 @@ class VideoComposer:
                     f"Mux duration mismatch: video={video_dur:.2f}s "
                     f"audio={audio_dur:.2f}s (Δ={abs(video_dur - audio_dur):.2f}s)"
                 )
+            pad_audio = (
+                audio_dur is not None
+                and total_duration is not None
+                and audio_dur < total_duration - 0.05
+            )
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(silent_video),
+                '-i', str(audio_path),
+                '-map', '0:v', '-map', '1:a',
+                '-c:v', 'copy',
+            ]
+            if pad_audio:
+                silence_pad = max(0.0, total_duration - audio_dur)
+                logging.info(
+                    f"🔇 Padding mux audio with {silence_pad:.2f}s silence to match {total_duration:.2f}s"
+                )
+                cmd.extend([
+                    '-af', f'apad=whole_dur={total_duration:.3f}',
+                    '-c:a', 'aac',
+                    '-b:a', self.render_config.get('audio_bitrate', '192k'),
+                ])
+            else:
+                cmd.extend(['-c:a', 'copy'])
+            cmd.extend([
+                '-t', str(total_duration),
+                str(output_path),
+            ])
             r = subprocess.run(
-                ['ffmpeg', '-y',
-                 '-i', str(silent_video),
-                 '-i', str(audio_path),
-                 '-map', '0:v', '-map', '1:a',
-                 '-c:v', 'copy', '-c:a', 'copy',
-                 '-t', str(total_duration),
-                 str(output_path)],
+                cmd,
                 capture_output=True, text=True, encoding='utf-8', errors='replace'
             )
             if r.returncode == 0 and os.path.exists(output_path):
@@ -2901,6 +2936,14 @@ class VideoComposer:
                 )
                 return output_path
             logging.warning(f'⚠️  {label} pass failed, keeping original: {r.stderr[-1500:]}')
+
+            # Preserve overlays/effects even if the combined compression pass fails.
+            if overlay_chain:
+                logging.warning('⚠️ Trying overlay-only fallback to preserve effects…')
+                overlay_out = self._apply_text_overlays_to_video(input_path, output_path, total_duration)
+                if overlay_out and os.path.exists(overlay_out):
+                    logging.info('✅ Overlay-only fallback succeeded; effects preserved')
+                    return overlay_out
         except Exception as e:
             logging.warning(f'⚠️  Compression pass error: {e}')
         finally:
@@ -3858,6 +3901,7 @@ class VideoComposer:
                 chunk_start_time=chunk_start_time,
                 onset_offset=onset_offset,
                 note_audio_map=note_audio_map if note_audio_map else None,
+                style_track_id=track_id,
             )
 
             if not triggered_video:
@@ -4197,6 +4241,17 @@ class VideoComposer:
             pass
         return clip_path, False
 
+    def _resolve_clip_style(self, track_id):
+        """Resolve frontend clip-style keys for a backend track id."""
+        clip_styles = getattr(self, 'clip_styles', {}) or {}
+        track_key = str(track_id)
+        candidates = [track_key, f'track-{track_key}', f'drum-{track_key}']
+        matched_key = next(
+            (candidate for candidate in candidates if candidate in clip_styles),
+            None,
+        )
+        return clip_styles.get(matched_key, {}), candidates, matched_key
+
     def _write_text_tempfile(self, text, prefix='ats_text_'):
         """Write text to a temp file and return its path (for drawtext textfile= option)."""
         fd, path = tempfile.mkstemp(prefix=prefix, suffix='.txt')
@@ -4239,16 +4294,13 @@ class VideoComposer:
         chunk_duration: if provided, short clips are overlaid on a bg-color source so they
                         never go black after the clip ends (overlay eof_action=pass).
         """
-        cs = getattr(self, 'clip_styles', {})
-
         # Look up style: frontend keys use prefixes ('track-0', 'drum-drum_snare_drum')
         # while backend track_ids are bare ('0', 'drum_crash_cymbal'), so try all formats.
-        candidates = [track_id, f'track-{track_id}', f'drum-{track_id}']
-        style = next((cs[k] for k in candidates if k in cs), {})
+        style, candidates, matched_key = self._resolve_clip_style(track_id)
 
         logging.info(
             f"[style] cell={track_id!r}  candidates={candidates}  "
-            f"matched={'yes ('+next((k for k in candidates if k in cs), 'none')+')'}  "
+            f"matched={matched_key or 'none'}  "
             f"effects={[k for k,v in style.items() if v and k.endswith('Enabled')]}  "
             f"roundedCorners={style.get('roundedCorners', False)}  "
             f"beatFlashColor={style.get('beatFlashColor', 'N/A')}"
@@ -4737,7 +4789,27 @@ class VideoComposer:
         has_tagline   = bool(cs.get('taglineEnabled') and tagline_text)
         has_watermark = bool(cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip())
         has_intro     = bool(cs.get('titleEnabled') and cs.get('introCardEnabled') and intro_title_text)
-        if not (has_title or has_tagline or has_watermark or has_intro):
+
+        # Keep title visible after intro by default.
+        # If users explicitly hide it after intro, respect that.
+        repeat_title_after_intro = bool(
+            cs.get('titleShowAfterIntro') or cs.get('titleRepeatAfterIntro')
+        )
+        hide_title_after_intro = bool(cs.get('titleHideAfterIntro'))
+        if has_intro and hide_title_after_intro:
+            has_title = False
+        
+        # Check if ANY effects are enabled (text overlays + visual effects)
+        has_any_text = has_title or has_tagline or has_watermark or has_intro
+        has_any_visual = (
+            bool(cs.get('transitionEnabled')) or
+            bool(cs.get('outroEffectEnabled')) or
+            bool(cs.get('waveformEnabled')) or
+            bool(cs.get('vignetteEnabled')) or
+            bool(cs.get('glitchEnabled')) or
+            bool(cs.get('beatSyncEnabled'))
+        )
+        if not (has_any_text or has_any_visual):
             return None
 
         filter_parts: list = []
@@ -4804,12 +4876,18 @@ class VideoComposer:
                     transition_auto_reason = 'Sparse arrangement detected'
 
         transition_repeat = transition_on in {'section', 'phrase'}
+        # Repeating transitions (section/phrase) should affect composited text layers too,
+        # so they are applied after text overlays.
+        transition_apply_post_text = transition_repeat or bool(cs.get('transitionApplyAfterText'))
         transition_strength_map = {
             'low': 0.55,
             'medium': 0.8,
             'high': 1.0,
         }
         transition_strength_factor = transition_strength_map.get(transition_strength, 0.8)
+        transition_fill_color = self._hex_to_ffmpeg_color(
+            cs.get('backgroundColor', '#0a0a0f')
+        )
 
         beat_sync_enabled = bool(cs.get('beatSyncEnabled'))
         beat_sync_sensitivity = (cs.get('beatSyncSensitivity') or 'medium').strip().lower()
@@ -4871,14 +4949,51 @@ class VideoComposer:
         outro_duration = max(0.4, float(cs.get('outroEffectDuration', 1.2) or 1.2))
         outro_strength = (cs.get('outroEffectStrength') or 'medium').strip().lower()
         outro_strength_factor = transition_strength_map.get(outro_strength, 0.8)
-        transition_time_expr = (
-            f"mod(t,{transition_section_interval:.3f})" if transition_repeat else 't'
-        )
-        transition_progress_expr = (
-            f"min(max(({transition_time_expr})/{transition_duration:.3f},0),1)"
-        )
-        transition_active_expr = (
-            f"lt(({transition_time_expr}),{transition_duration:.3f})"
+
+        intro_duration_for_timing = 0.0
+        if has_intro:
+            intro_duration_for_timing = max(1.0, float(cs.get('introCardDuration', 3) or 3))
+
+        # By default, opening transition starts after intro card so intro remains readable.
+        # Set compositionStyle.transitionApplyToIntroCard=true to opt into transitioning intro too.
+        transition_apply_to_intro = bool(cs.get('transitionApplyToIntroCard'))
+        transition_anchor = 0.0
+        if (
+            transition_enabled
+            and transition_on == 'start'
+            and has_intro
+            and not transition_apply_to_intro
+        ):
+            transition_anchor = intro_duration_for_timing
+
+        if transition_repeat:
+            transition_time_expr = (
+                f"mod(max(t-{transition_anchor:.3f},0),{transition_section_interval:.3f})"
+            )
+            transition_progress_expr = (
+                f"min(max(({transition_time_expr})/{transition_duration:.3f},0),1)"
+            )
+            transition_active_expr = (
+                f"gte(t,{transition_anchor:.3f})*lt(({transition_time_expr}),{transition_duration:.3f})"
+            )
+        else:
+            transition_time_expr = f"max(t-{transition_anchor:.3f},0)"
+            transition_progress_expr = (
+                f"min(max((t-{transition_anchor:.3f})/{transition_duration:.3f},0),1)"
+            )
+            transition_active_expr = (
+                f"between(t,{transition_anchor:.3f},{transition_anchor + transition_duration:.3f})"
+            )
+
+        logging.info(
+            "[style] overlay-plan: "
+            f"intro={has_intro}, intro_dur={intro_duration_for_timing:.2f}, "
+            f"title_enabled_effective={has_title}, title_repeat_after_intro={repeat_title_after_intro}, "
+            f"transition_enabled={transition_enabled and transition_preset != 'none'}, "
+            f"transition_on={transition_on}, transition_anchor={transition_anchor:.2f}, "
+            f"transition_post_text={transition_apply_post_text}, "
+            f"transition_apply_to_intro={transition_apply_to_intro}, "
+            f"outro_enabled={outro_enabled}"
         )
 
         def _esc(t: str) -> str:
@@ -4920,7 +5035,7 @@ class VideoComposer:
             current_label = nxt
 
         # ── Opening transition (preview/export parity) ───────────────────────
-        if transition_enabled and transition_preset != 'none':
+        if transition_enabled and transition_preset != 'none' and not transition_apply_post_text:
             applied_transition = transition_preset
             if transition_preset == 'crossfade':
                 if transition_repeat:
@@ -4967,45 +5082,43 @@ class VideoComposer:
                 applied_transition = 'push-left'
                 # Start slightly right-shifted, then settle to centered frame.
                 slide_span = f"iw*{0.08 * transition_strength_factor:.3f}"
+                crop_w = f"iw-{slide_span}"
                 padded = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x={slide_span}:y=0:color=black[{padded}]"
+                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x={slide_span}:y=0:color={transition_fill_color}[{padded}]"
                 )
                 current_label = padded
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]crop=w=iw:h=ih:x='{slide_span}*{transition_progress_expr}':y=0[{nxt}]"
+                    f"[{current_label}]crop=w='{crop_w}':h=ih:x='{slide_span}*{transition_progress_expr}':y=0[{nxt}]"
                 )
                 current_label = nxt
             elif transition_preset in {'slide-right', 'push-right'}:
                 applied_transition = 'push-right'
                 # Start slightly left-shifted, then settle to centered frame.
                 slide_span = f"iw*{0.08 * transition_strength_factor:.3f}"
+                crop_w = f"iw-{slide_span}"
                 padded = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x=0:y=0:color=black[{padded}]"
+                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x=0:y=0:color={transition_fill_color}[{padded}]"
                 )
                 current_label = padded
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]crop=w=iw:h=ih:x='{slide_span}*(1-{transition_progress_expr})':y=0[{nxt}]"
+                    f"[{current_label}]crop=w='{crop_w}':h=ih:x='{slide_span}*(1-{transition_progress_expr})':y=0[{nxt}]"
                 )
                 current_label = nxt
             elif transition_preset in {'zoom-in', 'zoom'}:
                 applied_transition = 'zoom'
-                # Start slightly zoomed-in and ease to native framing.
-                zoom_factor = 0.12 * transition_strength_factor
-                zoom_expr = (
-                    f"(1+{zoom_factor:.3f}*(1-{transition_progress_expr}))"
-                )
-                scaled = f'v_to_{len(filter_parts)}'
-                filter_parts.append(
-                    f"[{current_label}]scale=w='iw*{zoom_expr}':h='ih*{zoom_expr}':eval=frame[{scaled}]"
-                )
-                current_label = scaled
+                # Dimension-safe "zoom-like" opening effect.
+                # Previous implementation used per-frame scale/crop with dynamic dimensions,
+                # which can cause encoder failures in the final overlay pass.
+                # Keep geometry stable and emulate zoom energy via contrast/brightness settle.
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]crop=w=iw:h=ih:x='(in_w-iw)/2':y='(in_h-ih)/2'[{nxt}]"
+                    f"[{current_label}]eq=contrast='{1.0 + 0.22 * transition_strength_factor:.3f}-(0.22*{transition_strength_factor:.3f}*{transition_progress_expr})':"
+                    f"brightness='{-0.06 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':"
+                    f"enable='{transition_active_expr}'[{nxt}]"
                 )
                 current_label = nxt
             else:
@@ -5032,7 +5145,8 @@ class VideoComposer:
             logging.info(
                 f"🎞️ Opening transition overlay: preset={applied_transition}, "
                 f"duration={transition_duration:.2f}s, strength={transition_strength}, "
-                f"timing={transition_on}, interval={transition_section_interval:.2f}s"
+                f"timing={transition_on}, interval={transition_section_interval:.2f}s, "
+                f"anchor={transition_anchor:.2f}s"
                 f"{transition_log_suffix}"
             )
 
@@ -5083,6 +5197,9 @@ class VideoComposer:
             size = int(cs.get('titleFontSize', 56))
             color = title_color
             animated = bool(cs.get('titleAnimated', True))
+            # Prevent a second "fly-in" title by default when intro is enabled.
+            if has_intro and not repeat_title_after_intro:
+                animated = False
             title_anim_preset = (cs.get('titleAnimationPreset') or 'fade').strip().lower()
             title_anim_delay = max(0.0, float(cs.get('titleAnimDelay', 0) or 0.0))
             title_anim_duration = max(0.3, float(cs.get('titleAnimDuration', 0.7) or 0.7))
@@ -5398,6 +5515,94 @@ class VideoComposer:
                          alpha_expr=str(round(opacity, 2)),
                          font_key=cs.get('watermarkFont', 'default'))
 
+        # ── Post-text transition pass (for section/phrase cadence) ─────────
+        if transition_enabled and transition_preset != 'none' and transition_apply_post_text:
+            applied_transition = None
+            if transition_preset in {'zoom-in', 'zoom', 'crossfade'}:
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=contrast='{1.0 + 0.34 * transition_strength_factor:.3f}-(0.34*{transition_strength_factor:.3f}*{transition_progress_expr})':"
+                    f"brightness='{-0.11 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':"
+                    f"saturation='{1.0 + 0.22 * transition_strength_factor:.3f}-(0.22*{transition_strength_factor:.3f}*{transition_progress_expr})':"
+                    f"enable='{transition_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'zoom'
+            elif transition_preset == 'dip-black':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=brightness='-{0.82 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':enable='{transition_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'dip-black'
+            elif transition_preset == 'dip-white':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=brightness='{0.82 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':enable='{transition_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'dip-white'
+            elif transition_preset == 'glitch-cut':
+                glitch_d = min(0.35, transition_duration)
+                glitch_active_expr = (
+                    f"lt(({transition_time_expr}),{glitch_d:.3f})"
+                )
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]noise=alls={int(16 + 26 * transition_strength_factor)}:allf=t:enable='{glitch_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'glitch-cut'
+            elif transition_preset in {'slide-left', 'push-left'}:
+                slide_span = f"iw*{0.08 * transition_strength_factor:.3f}"
+                crop_w = f"iw-{slide_span}"
+                padded = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x={slide_span}:y=0:color={transition_fill_color}[{padded}]"
+                )
+                current_label = padded
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]crop=w='{crop_w}':h=ih:x='{slide_span}*{transition_progress_expr}':y=0[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'push-left'
+            elif transition_preset in {'slide-right', 'push-right'}:
+                slide_span = f"iw*{0.08 * transition_strength_factor:.3f}"
+                crop_w = f"iw-{slide_span}"
+                padded = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x=0:y=0:color={transition_fill_color}[{padded}]"
+                )
+                current_label = padded
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]crop=w='{crop_w}':h=ih:x='{slide_span}*(1-{transition_progress_expr})':y=0[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'push-right'
+            else:
+                logging.warning(
+                    "[style] Unsupported post-text transition preset '%s', falling back to zoom",
+                    transition_preset,
+                )
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=contrast='{1.0 + 0.34 * transition_strength_factor:.3f}-(0.34*{transition_strength_factor:.3f}*{transition_progress_expr})':"
+                    f"brightness='{-0.11 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':"
+                    f"saturation='{1.0 + 0.22 * transition_strength_factor:.3f}-(0.22*{transition_strength_factor:.3f}*{transition_progress_expr})':"
+                    f"enable='{transition_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+                applied_transition = 'zoom(fallback)'
+
+            logging.info(
+                f"🎞️ Post-text transition overlay: preset={applied_transition}, "
+                f"duration={transition_duration:.2f}s, strength={transition_strength}, "
+                f"timing={transition_on}, interval={transition_section_interval:.2f}s, "
+                f"anchor={transition_anchor:.2f}s"
+            )
+
         # ── Ending effect / outro ────────────────────────────────────────────
         if outro_enabled:
             outro_start = max(0.0, total_duration - outro_duration)
@@ -5477,22 +5682,32 @@ class VideoComposer:
         except Exception:
             fc_arg = ['-filter_complex', fc_str]
 
-        # Match the encoder used elsewhere in the pipeline (NVENC if available).
-        # Adding pix_fmt + faststart so the overlay pass produces a web-playable
-        # file (previously could leave non-yuv420p / non-faststart output).
+        # Match encoder settings when possible, but retry on CPU if NVENC fails.
         enc = self._get_encoding_settings()
-        cmd = [
-            'ffmpeg', '-y', '-i', input_path,
-            *fc_arg,
-            '-map', '[text_out]', '-map', '0:a?',
-            *enc,
-            '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-            '-c:a', 'copy',
-            '-t', str(total_duration),
-            output_path,
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True,
+        use_nvenc = ('-c:v' in enc and enc[enc.index('-c:v') + 1] == 'h264_nvenc')
+
+        def _overlay_cmd(use_gpu: bool) -> list:
+            if use_gpu:
+                video_enc = enc
+            else:
+                video_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23']
+            return [
+                'ffmpeg', '-y', '-i', input_path,
+                *fc_arg,
+                '-map', '[text_out]', '-map', '0:a?',
+                *video_enc,
+                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                '-c:a', 'copy',
+                '-t', str(total_duration),
+                output_path,
+            ]
+
+        result = subprocess.run(_overlay_cmd(use_nvenc), capture_output=True, text=True,
                                 encoding='utf-8', errors='replace')
+        if result.returncode != 0 and use_nvenc:
+            logging.warning('⚠️ Overlay pass NVENC failed, retrying with CPU (libx264)…')
+            result = subprocess.run(_overlay_cmd(False), capture_output=True, text=True,
+                                    encoding='utf-8', errors='replace')
         if fc_script_path:
             try: os.unlink(fc_script_path)
             except Exception: pass
@@ -5510,10 +5725,18 @@ class VideoComposer:
         Returns the (possibly unchanged) path."""
         cs = getattr(self, 'composition_style', {}) or {}
         has_any = any([
+            # Text overlays (intro card, title, tagline, watermark)
             cs.get('introCardEnabled'),
             cs.get('titleEnabled')     and cs.get('titleText',     '').strip(),
             cs.get('taglineEnabled')   and cs.get('taglineText',   '').strip(),
             cs.get('watermarkEnabled') and cs.get('watermarkText', '').strip(),
+            # Visual effects (transitions, outro, waveform, vignette, glitch, beat sync)
+            cs.get('transitionEnabled'),
+            cs.get('outroEffectEnabled'),
+            cs.get('waveformEnabled'),
+            cs.get('vignetteEnabled'),
+            cs.get('glitchEnabled'),
+            cs.get('beatSyncEnabled'),
         ])
         if not has_any:
             return path
@@ -5669,7 +5892,20 @@ class VideoComposer:
                     orig = seg.get('video_path', '')
                     if not orig or not os.path.exists(orig) or orig in extended_clips:
                         continue
-                    ext, is_temp = self._preprocess_extend_clip(orig, duration, bg_hex)
+                    track_id = seg.get('track_id', f'{r}_{c}')
+                    clip_style, _, matched_key = self._resolve_clip_style(track_id)
+                    clip_bg_hex = bg_hex
+                    if (
+                        clip_style.get('bgColorEnabled')
+                        and clip_style.get('bgColor')
+                        and not clip_style.get('transparentBg')
+                    ):
+                        clip_bg_hex = clip_style.get('bgColor')
+                        logging.info(
+                            f"[style] cell={track_id!r} extending idle frames with {clip_bg_hex} "
+                            f"({matched_key or 'direct track id'})"
+                        )
+                    ext, is_temp = self._preprocess_extend_clip(orig, duration, clip_bg_hex)
                     extended_clips[orig] = ext
                     if is_temp:
                         preprocess_temp_files.append(ext)
@@ -6042,7 +6278,8 @@ class VideoComposer:
                     total_duration=chunk_duration,
                     track_name=drum_track_id,
                     unique_id=short_id,
-                    onset_offset=onset_offset
+                    onset_offset=onset_offset,
+                    style_track_id=drum_track_id,
                 )
                 if triggered_video and os.path.exists(triggered_video):
                     drum_segment = {

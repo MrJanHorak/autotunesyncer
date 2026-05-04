@@ -8,17 +8,17 @@ import { DEFAULT_CLIP_STYLE, COLOR_GRADE_LABELS } from '../../js/styleDefaults';
 const getClipColorFilter = (colorGrade) => {
   switch (colorGrade) {
     case 'warm':
-      return 'saturate(1.12) sepia(0.14) hue-rotate(-8deg)';
+      return 'saturate(1.2) sepia(0.12) brightness(1.03) hue-rotate(-8deg)';
     case 'cool':
-      return 'saturate(1.06) hue-rotate(12deg) brightness(1.02)';
+      return 'saturate(1.1) brightness(1.02) hue-rotate(12deg)';
     case 'vintage':
-      return 'sepia(0.48) contrast(0.95) saturate(0.86)';
+      return 'sepia(0.55) contrast(0.94) saturate(0.8)';
     case 'cyberpunk':
-      return 'saturate(1.4) hue-rotate(24deg) contrast(1.06)';
+      return 'saturate(1.55) contrast(1.1) hue-rotate(18deg) brightness(1.02)';
     case 'bw':
-      return 'grayscale(1) contrast(1.03)';
+      return 'grayscale(1)';
     case 'vivid':
-      return 'saturate(1.55) contrast(1.08)';
+      return 'saturate(1.8) contrast(1.1) brightness(1.04)';
     default:
       return 'none';
   }
@@ -392,6 +392,21 @@ export const SortableItem = memo(function SortableItem({
 
   const cs = clipStyle || DEFAULT_CLIP_STYLE;
   const videoFilter = getClipColorFilter(cs.colorGrade);
+  const clipBackground =
+    !cs.transparentBg && cs.bgColorEnabled && cs.bgColor
+      ? cs.bgColor
+      : 'transparent';
+  const fadeDuration = Math.max(cs.fadeDuration ?? 0.15, 0.05);
+  const videoVisible = !isPreviewPlaying || isInstrumentActive || cs.fadeEnabled;
+  const previewLabelText = (cs.labelText || item.name || '').trim();
+  const videoEffectFilter = [
+    videoFilter !== 'none' ? videoFilter : '',
+    cs.fadeEnabled && isPreviewPlaying && isInstrumentActive
+      ? 'brightness(1.12)'
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   const beatFlashOpacity =
     isPreviewPlaying && isInstrumentActive && cs.beatFlashEnabled
       ? Math.min(Math.max(cs.beatFlashIntensity ?? 0.4, 0), 1)
@@ -403,9 +418,7 @@ export const SortableItem = memo(function SortableItem({
     background: isPreviewPlaying
       ? isEmpty
         ? 'transparent'
-        : cs.bgColorEnabled && cs.bgColor
-          ? cs.bgColor
-          : 'transparent'
+        : clipBackground
       : isEmpty
         ? '#f3f4f6'
         : getHeatColor,
@@ -448,13 +461,15 @@ export const SortableItem = memo(function SortableItem({
             width: '100%',
             height: '100%',
             objectFit: 'cover',
-            display: isPreviewPlaying && !isInstrumentActive ? 'none' : 'block',
-            opacity: !isPreviewPlaying ? 0.35 : 1,
-            transition: 'opacity 0.08s ease',
+            display: videoVisible ? 'block' : 'none',
+            opacity: !isPreviewPlaying ? 0.35 : isInstrumentActive ? 1 : 0,
+            transition: cs.fadeEnabled
+              ? `opacity ${fadeDuration}s ease, filter ${fadeDuration}s ease`
+              : 'opacity 0.08s ease',
             pointerEvents: 'none',
             zIndex: 0,
             borderRadius: 'inherit',
-            filter: videoFilter,
+            filter: videoEffectFilter || 'none',
           }}
         />
       )}
@@ -467,6 +482,32 @@ export const SortableItem = memo(function SortableItem({
             opacity: beatFlashOpacity,
           }}
         />
+      )}
+
+      {!isEmpty && isPreviewPlaying && cs.labelEnabled && previewLabelText && (
+        <div
+          style={{
+            position: 'absolute',
+            left: '6px',
+            bottom: '6px',
+            zIndex: 2,
+            maxWidth: 'calc(100% - 12px)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            padding: '3px 6px',
+            borderRadius: '6px',
+            background: 'rgba(0, 0, 0, 0.45)',
+            color: cs.labelColor || '#ffffff',
+            fontSize: `${cs.labelFontSize ?? 14}px`,
+            fontWeight: 600,
+            lineHeight: 1.1,
+            pointerEvents: 'none',
+            textShadow: '0 1px 2px rgba(0, 0, 0, 0.45)',
+          }}
+        >
+          {previewLabelText}
+        </div>
       )}
 
       {!isEmpty && (

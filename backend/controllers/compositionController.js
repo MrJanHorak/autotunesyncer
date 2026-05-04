@@ -72,7 +72,7 @@ async function startHealthMonitoringSession(sessionId, totalVideos = 0) {
       ],
       {
         stdio: ['pipe', 'pipe', 'pipe'],
-      }
+      },
     );
 
     healthMonitoringSession = sessionId;
@@ -111,7 +111,7 @@ async function stopHealthMonitoringSession() {
   if (healthMonitor && healthMonitoringSession) {
     try {
       console.log(
-        `Stopping health monitoring for session: ${healthMonitoringSession}`
+        `Stopping health monitoring for session: ${healthMonitoringSession}`,
       );
       healthMonitor.kill('SIGTERM');
 
@@ -179,7 +179,7 @@ async function processVideoWithPython(
   midiData,
   processedFiles,
   outputPath,
-  onProgress = null
+  onProgress = null,
 ) {
   console.log('Processing video with Python:', {
     outputPath,
@@ -266,7 +266,7 @@ async function processVideoWithPython(
       writeFileSync(midiJsonPath, JSON.stringify(enhancedMidiData, null, 2));
       writeFileSync(
         videoFilesJsonPath,
-        JSON.stringify(videoFilesForPython, null, 2)
+        JSON.stringify(videoFilesForPython, null, 2),
       ); // Enhanced Python process with performance monitoring
       const pythonArgs = [
         join(__dirname, '../utils/video_processor.py'),
@@ -284,7 +284,7 @@ async function processVideoWithPython(
       // Add preview mode if requested
       if (req.body.preview) {
         console.log(
-          'Enabling preview mode (lower resolution, faster processing)'
+          'Enabling preview mode (lower resolution, faster processing)',
         );
         pythonArgs.push('--preview');
       }
@@ -349,17 +349,20 @@ async function processVideoWithPython(
       });
 
       // Enhanced timeout handling
-      const timeout = setTimeout(() => {
-        console.error('Python process timeout - killing process');
-        pythonProcess.kill('SIGKILL');
-        reject(new Error('Video processing timeout after 5 minutes'));
-      }, 5 * 60 * 1000); // 5 minute timeout
+      const timeout = setTimeout(
+        () => {
+          console.error('Python process timeout - killing process');
+          pythonProcess.kill('SIGKILL');
+          reject(new Error('Video processing timeout after 5 minutes'));
+        },
+        5 * 60 * 1000,
+      ); // 5 minute timeout
 
       pythonProcess.on('close', async (code) => {
         clearTimeout(timeout);
         const processingTime = Date.now() - startTime;
         console.log(
-          `Python process completed in ${processingTime}ms with code ${code}`
+          `Python process completed in ${processingTime}ms with code ${code}`,
         );
 
         if (code === 0) {
@@ -378,7 +381,7 @@ async function processVideoWithPython(
             await validateOutputVideo(outputPath);
 
             console.log(
-              `✅ Video composition successful: ${stats.size} bytes in ${processingTime}ms`
+              `✅ Video composition successful: ${stats.size} bytes in ${processingTime}ms`,
             );
 
             // Clean up temp files
@@ -388,7 +391,7 @@ async function processVideoWithPython(
             } catch (cleanupError) {
               console.warn(
                 'Warning: Could not clean up temp files:',
-                cleanupError.message
+                cleanupError.message,
               );
             }
 
@@ -460,10 +463,10 @@ async function validateOutputVideo(outputPath) {
 
       try {
         const videoStream = metadata.streams.find(
-          (s) => s.codec_type === 'video'
+          (s) => s.codec_type === 'video',
         );
         const audioStream = metadata.streams.find(
-          (s) => s.codec_type === 'audio'
+          (s) => s.codec_type === 'audio',
         );
 
         if (!videoStream) {
@@ -590,7 +593,7 @@ export const composeVideo = async (req, res) => {
           setTimeout(
             () =>
               cleanupTempDirectory(dirname(cachedPath)).catch(console.error),
-            1000
+            1000,
           );
         });
       }
@@ -618,7 +621,7 @@ export const composeVideo = async (req, res) => {
       midiData,
       videoFiles,
       sessionId,
-      performanceMetrics
+      performanceMetrics,
     );
 
     // Step 4: Create job for background video composition
@@ -643,7 +646,8 @@ export const composeVideo = async (req, res) => {
       message: 'Video composition started',
       estimatedTime: estimateProcessingTime(
         midiData,
-        Object.keys(processedTracks).length + Object.keys(processedDrums).length
+        Object.keys(processedTracks).length +
+          Object.keys(processedDrums).length,
       ),
     });
   } catch (error) {
@@ -674,7 +678,7 @@ async function processTracksInParallel(
   midiData,
   videoFiles,
   sessionId,
-  performanceMetrics
+  performanceMetrics,
 ) {
   const processedTracks = {};
   const processedDrums = {};
@@ -708,7 +712,7 @@ async function processTracksInParallel(
 
             processedDrums[videoKey] = processedVideo;
           }
-        }
+        },
       );
 
       await Promise.all(drumPromises);
@@ -1534,7 +1538,7 @@ export const streamComposition = async (req, res) => {
         step: 'parsing',
         progress: 10,
         message: 'Parsing MIDI data...',
-      })}\n\n`
+      })}\n\n`,
     );
 
     const midiData = new Midi(Buffer.from(midi));
@@ -1546,7 +1550,7 @@ export const streamComposition = async (req, res) => {
         step: 'tracks',
         progress: 30,
         message: 'Processing tracks...',
-      })}\n\n`
+      })}\n\n`,
     );
 
     // Process tracks with progress updates
@@ -1561,9 +1565,9 @@ export const streamComposition = async (req, res) => {
             step: 'processing',
             progress: 30 + progress * 0.4, // 30-70%
             message: `Processing track ${progress.current} of ${progress.total}...`,
-          })}\n\n`
+          })}\n\n`,
         );
-      }
+      },
     );
 
     // Send composition starting
@@ -1573,7 +1577,7 @@ export const streamComposition = async (req, res) => {
         step: 'composition',
         progress: 70,
         message: 'Starting video composition...',
-      })}\n\n`
+      })}\n\n`,
     );
 
     // Create and monitor background job
@@ -1599,7 +1603,7 @@ export const streamComposition = async (req, res) => {
               progress: 70 + (status.progress || 0) * 0.3, // 70-100%
               message: status.message || 'Composing video...',
               jobId: job.id,
-            })}\n\n`
+            })}\n\n`,
           );
 
           if (status.status === 'completed') {
@@ -1610,7 +1614,7 @@ export const streamComposition = async (req, res) => {
                 message: 'Composition completed!',
                 jobId: job.id,
                 downloadUrl: `/api/composition/download/${job.id}`,
-              })}\n\n`
+              })}\n\n`,
             );
             clearInterval(progressInterval);
             res.end();
@@ -1620,9 +1624,9 @@ export const streamComposition = async (req, res) => {
                 type: 'error',
                 error: status.error || 'Composition failed',
                 troubleshooting: getTroubleshootingInfo(
-                  new Error(status.error)
+                  new Error(status.error),
                 ),
-              })}\n\n`
+              })}\n\n`,
             );
             clearInterval(progressInterval);
             res.end();
@@ -1635,7 +1639,7 @@ export const streamComposition = async (req, res) => {
           `data: ${JSON.stringify({
             type: 'error',
             error: 'Failed to monitor progress',
-          })}\n\n`
+          })}\n\n`,
         );
         res.end();
       }
@@ -1653,7 +1657,7 @@ export const streamComposition = async (req, res) => {
         type: 'error',
         error: error.message,
         troubleshooting: getTroubleshootingInfo(error),
-      })}\n\n`
+      })}\n\n`,
     );
     res.end();
   }
@@ -1664,7 +1668,7 @@ async function processTracksWithProgress(
   midiData,
   videoFiles,
   sessionId,
-  onProgress
+  onProgress,
 ) {
   const processedTracks = {};
   const processedDrums = {};
@@ -1694,7 +1698,7 @@ async function processTracksWithProgress(
 
               processedDrums[videoKey] = processedVideo;
             }
-          }
+          },
         );
 
         await Promise.all(drumPromises);

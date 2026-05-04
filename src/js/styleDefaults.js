@@ -105,6 +105,8 @@ export const DEFAULT_COMPOSITION_STYLE = {
   transitionSectionInterval: 8, // repeat cadence in seconds when transitionOn='section' (legacy: 'interval'/'sections')
   transitionAutoCadenceSeconds: 8, // frontend-estimated cadence used when transitionOn='auto'
   transitionAutoReason: 'Sparse arrangement detected',
+  transitionApplyAfterText: false,
+  transitionApplyToIntroCard: false,
 
   // Beat-sync micro motion (phase 3 scaffold)
   beatSyncEnabled: false,
@@ -156,7 +158,7 @@ export const DEFAULT_CLIP_STYLE = {
   fadeEnabled: false,
   fadeDuration: 0.15, // seconds for fade-in/out on note trigger
 
-  transparentBg: false, // zoom-to-fill (crop) instead of letterbox
+  transparentBg: false, // when true, idle gaps fall back to the global composition background
 };
 
 export const COLOR_THEMES = {
