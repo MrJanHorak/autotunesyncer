@@ -98,10 +98,23 @@ FontSelect.propTypes = {
   onChange: PropTypes.func.isRequired,
 };
 
-const CompositionStylePanel = ({ style, onChange }) => {
+const CompositionStylePanel = ({
+  style,
+  onChange,
+  autoTransitionIntervalSeconds,
+  autoTransitionReason,
+}) => {
   const set = (key, val) => onChange({ ...style, [key]: val });
   const { presets, savePreset, applyPreset, deletePreset } = useStylePresets();
   const [selectedPreset, setSelectedPreset] = useState('');
+
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const rand = (min, max, step = 1) => {
+    const steps = Math.round((max - min) / step);
+    return Number(
+      (min + Math.floor(Math.random() * (steps + 1)) * step).toFixed(3),
+    );
+  };
 
   const applyTheme = (theme) => {
     const t = COLOR_THEMES[theme];
@@ -137,17 +150,132 @@ const CompositionStylePanel = ({ style, onChange }) => {
     setSelectedPreset('');
   };
 
+  const handleRemixStyle = () => {
+    const titlePresets = [
+      'fade',
+      'scroll-up',
+      'scroll-left',
+      'bounce',
+      'spin-soft',
+      'blur-focus',
+    ];
+    const titleDurations = [0, 4, 5, 6, 8, 10, 12];
+    const glitchModes = ['subtle', 'medium', 'heavy'];
+    const transitionModes = [
+      'crossfade',
+      'dip-black',
+      'dip-white',
+      'push-left',
+      'push-right',
+      'zoom',
+      'glitch-cut',
+    ];
+    const intensities = ['low', 'medium', 'high'];
+    const transitionTimingModes = ['start', 'interval', 'auto'];
+    const directions = ['left', 'right'];
+    const easings = [
+      'linear',
+      'ease-out',
+      'ease-in-out',
+      'cubic-bezier(0.22, 1, 0.36, 1)',
+    ];
+
+    onChange({
+      ...style,
+      titleEnabled: true,
+      titleAnimated: true,
+      titleAnimationPreset: pick(titlePresets),
+      titleAnimDuration: rand(0.4, 1.8, 0.1),
+      titleAnimDelay: rand(0, 0.9, 0.1),
+      titleAnimIntensity: pick(intensities),
+      titleAnimDirection: pick(directions),
+      titleAnimEasing: pick(easings),
+      titleDuration: pick(titleDurations),
+      titleBackgroundEnabled: Math.random() > 0.42,
+      titleBackgroundMode: Math.random() > 0.65 ? 'fullscreen' : 'card',
+      titleBackgroundOpacity: rand(0.25, 0.9, 0.05),
+      titleGlowEnabled: Math.random() > 0.45,
+      titleGlowSize: rand(4, 16, 1),
+      titleShadowEnabled: true,
+      titleShadowSize: rand(1, 5, 0.5),
+      vignetteEnabled: Math.random() > 0.52,
+      vignetteStrength: rand(0.2, 0.75, 0.05),
+      glitchEnabled: Math.random() > 0.62,
+      glitchIntensity: pick(glitchModes),
+      transitionEnabled: Math.random() > 0.25,
+      transitionPreset: pick(transitionModes),
+      transitionDuration: rand(0.25, 1.2, 0.05),
+      transitionStrength: pick(intensities),
+      transitionOn: pick(transitionTimingModes),
+      transitionSectionInterval: rand(4, 14, 1),
+      beatSyncEnabled: Math.random() > 0.55,
+      beatSyncSensitivity: pick(intensities),
+      beatSyncTargets: [
+        'title',
+        'tagline',
+        ...(Math.random() > 0.6 ? ['track-cells'] : []),
+      ],
+      beatPulseMode: pick(['scale', 'glow', 'shake-lite']),
+      outroEffectEnabled: Math.random() > 0.45,
+      outroEffectPreset: pick([
+        'fade-black',
+        'fade-white',
+        'glitch-out',
+        'zoom-out',
+      ]),
+      outroEffectDuration: rand(0.6, 2.8, 0.1),
+      outroEffectStrength: pick(intensities),
+      taglineEnabled: Math.random() > 0.4,
+      taglineShape: pick(['rounded', 'pill', 'outline', 'accent-left']),
+      taglineBackgroundEnabled: Math.random() > 0.5,
+      taglineWidth: rand(56, 88, 2),
+      taglineFadeInDuration: rand(0.2, 1.1, 0.1),
+      taglineFadeOutDuration: rand(0.2, 1.2, 0.1),
+    });
+  };
+
+  const titleIntensityLabelMap = {
+    low: 'Subtle',
+    medium: 'Medium',
+    high: 'Bold',
+  };
+  const livePreviewTitleIntensity =
+    titleIntensityLabelMap[style.titleAnimIntensity || 'medium'] || 'Medium';
+  const transitionPresetValue =
+    style.transitionPreset === 'slide-left'
+      ? 'push-left'
+      : style.transitionPreset === 'slide-right'
+        ? 'push-right'
+        : style.transitionPreset === 'zoom-in'
+          ? 'zoom'
+          : style.transitionPreset || 'crossfade';
+  const transitionOnValue =
+    style.transitionOn === 'interval' || style.transitionOn === 'sections'
+      ? 'section'
+      : style.transitionOn === 'auto'
+        ? 'phrase'
+        : style.transitionOn || 'start';
+
   return (
     <div className='csp'>
       <div className='csp__header'>
         <h3 className='csp__title'>🎨 Composition Style</h3>
-        <button
-          className='csp__reset'
-          onClick={resetToDefaults}
-          title='Reset all to defaults'
-        >
-          ↺ Reset
-        </button>
+        <div className='csp__header-actions'>
+          <button
+            className='csp__reset csp__remix'
+            onClick={handleRemixStyle}
+            title='Randomize creative style settings'
+          >
+            Remix
+          </button>
+          <button
+            className='csp__reset'
+            onClick={resetToDefaults}
+            title='Reset all to defaults'
+          >
+            ↺ Reset
+          </button>
+        </div>
       </div>
 
       {/* Presets */}
@@ -396,6 +524,98 @@ const CompositionStylePanel = ({ style, onChange }) => {
                 onChange={(v) => set('titleAnimated', v)}
               />
             </Field>
+            {style.titleAnimated && (
+              <>
+                <Field label='Motion Preset'>
+                  <select
+                    className='csp-select'
+                    value={style.titleAnimationPreset || 'fade'}
+                    onChange={(e) =>
+                      set('titleAnimationPreset', e.target.value)
+                    }
+                  >
+                    <option value='fade'>Fade In</option>
+                    <option value='scroll-up'>Scroll Up</option>
+                    <option value='scroll-left'>Scroll Left</option>
+                    <option value='bounce'>Bounce In</option>
+                    <option value='spin-soft'>Spin Soft</option>
+                    <option value='blur-focus'>Blur Focus</option>
+                    <option value='typewriter'>Typewriter</option>
+                  </select>
+                </Field>
+                <Field label='Motion Duration'>
+                  <input
+                    className='csp-range'
+                    type='range'
+                    min={0.3}
+                    max={2.5}
+                    step={0.1}
+                    value={style.titleAnimDuration ?? 0.7}
+                    onChange={(e) => set('titleAnimDuration', +e.target.value)}
+                  />
+                  <span className='csp-range-val'>
+                    {(style.titleAnimDuration ?? 0.7).toFixed(1)}s
+                  </span>
+                </Field>
+                <Field label='Motion Delay'>
+                  <input
+                    className='csp-range'
+                    type='range'
+                    min={0}
+                    max={2}
+                    step={0.1}
+                    value={style.titleAnimDelay ?? 0}
+                    onChange={(e) => set('titleAnimDelay', +e.target.value)}
+                  />
+                  <span className='csp-range-val'>
+                    {(style.titleAnimDelay ?? 0).toFixed(1)}s
+                  </span>
+                </Field>
+                <Field label='Motion Feel'>
+                  <select
+                    className='csp-select'
+                    value={style.titleAnimEasing || 'ease-out'}
+                    onChange={(e) => set('titleAnimEasing', e.target.value)}
+                  >
+                    <option value='linear'>Linear</option>
+                    <option value='ease-out'>Ease Out</option>
+                    <option value='ease-in-out'>Ease In/Out</option>
+                    <option value='cubic-bezier(0.22, 1, 0.36, 1)'>
+                      Cinematic
+                    </option>
+                  </select>
+                </Field>
+                <Field label='Motion Intensity'>
+                  <select
+                    className='csp-select'
+                    value={style.titleAnimIntensity || 'medium'}
+                    onChange={(e) => set('titleAnimIntensity', e.target.value)}
+                  >
+                    <option value='low'>Low</option>
+                    <option value='medium'>Medium</option>
+                    <option value='high'>High</option>
+                  </select>
+                </Field>
+                <p className='csp-field__hint'>
+                  Live Preview: {livePreviewTitleIntensity}
+                </p>
+                {(style.titleAnimationPreset === 'scroll-left' ||
+                  style.titleAnimationPreset === 'spin-soft') && (
+                  <Field label='Direction'>
+                    <select
+                      className='csp-select'
+                      value={style.titleAnimDirection || 'left'}
+                      onChange={(e) =>
+                        set('titleAnimDirection', e.target.value)
+                      }
+                    >
+                      <option value='left'>Left</option>
+                      <option value='right'>Right</option>
+                    </select>
+                  </Field>
+                )}
+              </>
+            )}
             <Field label='Overlay Duration'>
               <input
                 className='csp-range'
@@ -412,6 +632,239 @@ const CompositionStylePanel = ({ style, onChange }) => {
                   : `${style.titleDuration}s`}
               </span>
             </Field>
+          </>
+        )}
+      </Section>
+
+      <Section title='Transitions' icon='🎞️'>
+        <Field label='Enable'>
+          <Toggle
+            checked={style.transitionEnabled ?? false}
+            onChange={(v) => set('transitionEnabled', v)}
+          />
+        </Field>
+        {style.transitionEnabled && (
+          <>
+            <Field label='Preset'>
+              <select
+                className='csp-select'
+                value={transitionPresetValue}
+                onChange={(e) => set('transitionPreset', e.target.value)}
+              >
+                <option value='crossfade'>Crossfade</option>
+                <option value='dip-black'>Dip to Black</option>
+                <option value='dip-white'>Dip to White</option>
+                <option value='push-left'>Push Left</option>
+                <option value='push-right'>Push Right</option>
+                <option value='zoom'>Zoom Cross</option>
+                <option value='glitch-cut'>Glitch Cut</option>
+              </select>
+            </Field>
+            <Field
+              label={`Duration (${(style.transitionDuration ?? 0.6).toFixed(2)}s)`}
+            >
+              <input
+                className='csp-range'
+                type='range'
+                min={0.2}
+                max={2}
+                step={0.05}
+                value={style.transitionDuration ?? 0.6}
+                onChange={(e) => set('transitionDuration', +e.target.value)}
+              />
+              <span className='csp-range-val'>
+                {(style.transitionDuration ?? 0.6).toFixed(2)}s
+              </span>
+            </Field>
+            <Field label='Strength'>
+              <select
+                className='csp-select'
+                value={style.transitionStrength || 'medium'}
+                onChange={(e) => set('transitionStrength', e.target.value)}
+              >
+                <option value='low'>Low</option>
+                <option value='medium'>Medium</option>
+                <option value='high'>High</option>
+              </select>
+            </Field>
+            <Field label='Apply On'>
+              <select
+                className='csp-select'
+                value={transitionOnValue}
+                onChange={(e) => set('transitionOn', e.target.value)}
+              >
+                <option value='start'>Video Start</option>
+                <option value='section'>Every X Seconds</option>
+                <option value='phrase'>Auto (Song Pace)</option>
+                <option value='manual-marker'>
+                  Manual Marker (Single Trigger)
+                </option>
+              </select>
+            </Field>
+            {transitionOnValue === 'section' && (
+              <Field
+                label={`Repeat Every (${(style.transitionSectionInterval ?? 8).toFixed(1)}s)`}
+              >
+                <input
+                  className='csp-range'
+                  type='range'
+                  min={2}
+                  max={20}
+                  step={0.5}
+                  value={style.transitionSectionInterval ?? 8}
+                  onChange={(e) =>
+                    set('transitionSectionInterval', +e.target.value)
+                  }
+                />
+                <span className='csp-range-val'>
+                  {(style.transitionSectionInterval ?? 8).toFixed(1)}s
+                </span>
+              </Field>
+            )}
+            {transitionOnValue === 'phrase' && (
+              <>
+                <p className='csp-field__hint'>
+                  Auto cadence:{' '}
+                  {Number(autoTransitionIntervalSeconds ?? 8).toFixed(1)}s{' '}
+                  between transitions (derived from MIDI density).
+                </p>
+                <p className='csp-field__hint'>
+                  Reason:{' '}
+                  {autoTransitionReason || 'Estimated from song complexity'}.
+                </p>
+              </>
+            )}
+            <p className='csp-field__hint'>
+              Use Video Start for a cinematic open, or Every X Seconds to add
+              recurring transitions throughout the song. Auto derives a repeat
+              cadence from MIDI note density.
+            </p>
+          </>
+        )}
+      </Section>
+
+      <Section title='Beat Sync' icon='🥁'>
+        <Field label='Enable'>
+          <Toggle
+            checked={style.beatSyncEnabled ?? false}
+            onChange={(v) => set('beatSyncEnabled', v)}
+          />
+        </Field>
+        {style.beatSyncEnabled && (
+          <>
+            <Field label='Sensitivity'>
+              <select
+                className='csp-select'
+                value={style.beatSyncSensitivity || 'medium'}
+                onChange={(e) => set('beatSyncSensitivity', e.target.value)}
+              >
+                <option value='low'>Low</option>
+                <option value='medium'>Medium</option>
+                <option value='high'>High</option>
+              </select>
+            </Field>
+            <Field label='Pulse Mode'>
+              <select
+                className='csp-select'
+                value={style.beatPulseMode || 'scale'}
+                onChange={(e) => set('beatPulseMode', e.target.value)}
+              >
+                <option value='scale'>Scale</option>
+                <option value='glow'>Glow</option>
+                <option value='shake-lite'>Shake Lite</option>
+              </select>
+            </Field>
+            <div className='csp-field'>
+              <span className='csp-field__label'>Targets</span>
+              <div className='csp-field__control csp-checkbox-row'>
+                {[
+                  ['title', 'Title'],
+                  ['tagline', 'Tagline'],
+                  ['track-cells', 'Track Cells'],
+                  ['overlays', 'Overlays'],
+                ].map(([value, label]) => {
+                  const selected = Array.isArray(style.beatSyncTargets)
+                    ? style.beatSyncTargets
+                    : [];
+                  const checked = selected.includes(value);
+                  return (
+                    <label key={value} className='csp-checkbox'>
+                      <input
+                        type='checkbox'
+                        checked={checked}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? [...new Set([...selected, value])]
+                            : selected.filter((v) => v !== value);
+                          set('beatSyncTargets', next);
+                        }}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+            <p className='csp-field__hint'>
+              Beat Sync now exports subtle pulses for title, tagline,
+              track-cells, and overlays.
+            </p>
+          </>
+        )}
+      </Section>
+
+      <Section title='Ending Effects' icon='🏁'>
+        <Field label='Enable'>
+          <Toggle
+            checked={style.outroEffectEnabled ?? false}
+            onChange={(v) => set('outroEffectEnabled', v)}
+          />
+        </Field>
+        {style.outroEffectEnabled && (
+          <>
+            <Field label='Preset'>
+              <select
+                className='csp-select'
+                value={style.outroEffectPreset || 'fade-black'}
+                onChange={(e) => set('outroEffectPreset', e.target.value)}
+              >
+                <option value='fade-black'>Fade to Black</option>
+                <option value='fade-white'>Fade to White</option>
+                <option value='glitch-out'>Glitch Out</option>
+                <option value='zoom-out'>Zoom Out</option>
+              </select>
+            </Field>
+            <Field
+              label={`Duration (${(style.outroEffectDuration ?? 1.2).toFixed(1)}s)`}
+            >
+              <input
+                className='csp-range'
+                type='range'
+                min={0.4}
+                max={4}
+                step={0.1}
+                value={style.outroEffectDuration ?? 1.2}
+                onChange={(e) => set('outroEffectDuration', +e.target.value)}
+              />
+              <span className='csp-range-val'>
+                {(style.outroEffectDuration ?? 1.2).toFixed(1)}s
+              </span>
+            </Field>
+            <Field label='Strength'>
+              <select
+                className='csp-select'
+                value={style.outroEffectStrength || 'medium'}
+                onChange={(e) => set('outroEffectStrength', e.target.value)}
+              >
+                <option value='low'>Low</option>
+                <option value='medium'>Medium</option>
+                <option value='high'>High</option>
+              </select>
+            </Field>
+            <p className='csp-field__hint'>
+              Ending effects are applied in the final seconds of the preview and
+              exported video.
+            </p>
           </>
         )}
       </Section>
@@ -877,6 +1330,8 @@ const CompositionStylePanel = ({ style, onChange }) => {
 CompositionStylePanel.propTypes = {
   style: PropTypes.object.isRequired,
   onChange: PropTypes.func.isRequired,
+  autoTransitionIntervalSeconds: PropTypes.number,
+  autoTransitionReason: PropTypes.string,
 };
 
 export default CompositionStylePanel;

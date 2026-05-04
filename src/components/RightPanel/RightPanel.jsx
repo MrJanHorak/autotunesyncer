@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import PropTypes from 'prop-types';
 import Mixer from '../Mixer/Mixer';
 import PreviewPlayer from '../PreviewPlayer/PreviewPlayer';
@@ -33,6 +33,93 @@ export default function RightPanel({
 }) {
   const [activeTab, setActiveTab] = useState('style');
   const [previewElapsed, setPreviewElapsed] = useState(0);
+
+  const { autoTransitionIntervalSeconds, autoTransitionReason } =
+    useMemo(() => {
+      const tracks = Array.isArray(midiData?.tracks) ? midiData.tracks : [];
+      const totalNotes = tracks.reduce(
+        (acc, track) =>
+          acc + (Array.isArray(track?.notes) ? track.notes.length : 0),
+        0,
+      );
+
+      let maxTime = 0;
+      tracks.forEach((track) => {
+        track?.notes?.forEach((note) => {
+          const start = Number(
+            note?.time ?? note?.start ?? note?.startTime ?? note?.ticks ?? 0,
+          );
+          const duration = Number(note?.duration ?? 0);
+          const end = Number(note?.end ?? note?.endTime ?? start + duration);
+          maxTime = Math.max(maxTime, Number.isFinite(end) ? end : 0);
+        });
+      });
+
+      const safeDuration = Math.max(1, maxTime);
+      const noteDensity = totalNotes / safeDuration;
+
+      if (noteDensity >= 12) {
+        return {
+          autoTransitionIntervalSeconds: 2.5,
+          autoTransitionReason: 'Very dense arrangement detected',
+        };
+      }
+      if (noteDensity >= 8) {
+        return {
+          autoTransitionIntervalSeconds: 3.5,
+          autoTransitionReason: 'Dense arrangement detected',
+        };
+      }
+      if (noteDensity >= 4) {
+        return {
+          autoTransitionIntervalSeconds: 5,
+          autoTransitionReason: 'Balanced arrangement detected',
+        };
+      }
+      if (noteDensity >= 2) {
+        return {
+          autoTransitionIntervalSeconds: 6.5,
+          autoTransitionReason: 'Light arrangement detected',
+        };
+      }
+      return {
+        autoTransitionIntervalSeconds: 8,
+        autoTransitionReason: 'Sparse arrangement detected',
+      };
+    }, [midiData]);
+
+  useEffect(() => {
+    if (!compositionStyle || typeof onStyleChange !== 'function') {
+      return;
+    }
+
+    const nextCadence = Number(autoTransitionIntervalSeconds || 8);
+    const currentCadence = Number(
+      compositionStyle.transitionAutoCadenceSeconds,
+    );
+    const cadenceChanged =
+      !Number.isFinite(currentCadence) ||
+      Math.abs(currentCadence - nextCadence) > 0.001;
+
+    const nextReason = autoTransitionReason || '';
+    const currentReason = String(compositionStyle.transitionAutoReason || '');
+    const reasonChanged = currentReason !== nextReason;
+
+    if (!cadenceChanged && !reasonChanged) {
+      return;
+    }
+
+    onStyleChange({
+      ...compositionStyle,
+      transitionAutoCadenceSeconds: nextCadence,
+      transitionAutoReason: nextReason,
+    });
+  }, [
+    autoTransitionIntervalSeconds,
+    autoTransitionReason,
+    compositionStyle,
+    onStyleChange,
+  ]);
 
   const handleTabClick = (tabId) => {
     if (!isOpen) {
@@ -88,6 +175,8 @@ export default function RightPanel({
               <CompositionStylePanel
                 style={compositionStyle}
                 onChange={onStyleChange}
+                autoTransitionIntervalSeconds={autoTransitionIntervalSeconds}
+                autoTransitionReason={autoTransitionReason}
               />
             </div>
           )}

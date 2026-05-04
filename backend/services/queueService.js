@@ -30,6 +30,8 @@ const QUEUE_CONCURRENCY = (Number.isFinite(_rawConcurrency) && _rawConcurrency >
 videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
   const {
     midiData,
+    compositionStyle,
+    clipStyles,
     processedTracks,
     processedDrums,
     sessionId,
@@ -88,6 +90,9 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
       JSON.stringify(
         {
           ...midiData,
+          compositionStyle:
+            midiData?.compositionStyle || compositionStyle || {},
+          clipStyles: midiData?.clipStyles || clipStyles || {},
           processingMetadata: {
             sessionId,
             timestamp: Date.now(),
@@ -338,22 +343,27 @@ videoProcessingQueue.on('stalled', (job) => {
 
 // Queue management functions
 export const addVideoCompositionJob = async (
-  midiData,
+  midiDataOrJob,
   processedTracks,
   processedDrums,
   outputPath,
   sessionId,
   priority = 0
 ) => {
+  const jobPayload =
+    midiDataOrJob && typeof midiDataOrJob === 'object' && midiDataOrJob.midiData
+      ? midiDataOrJob
+      : {
+          midiData: midiDataOrJob,
+          processedTracks,
+          processedDrums,
+          outputPath,
+          sessionId,
+        };
+
   const job = await videoProcessingQueue.add(
     'compose',
-    {
-      midiData,
-      processedTracks,
-      processedDrums,
-      outputPath,
-      sessionId,
-    },
+    jobPayload,
     {
       priority,
       delay: 0,

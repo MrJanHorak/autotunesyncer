@@ -4231,7 +4231,7 @@ class VideoComposer:
 
     def _apply_cell_style_filters(self, filter_parts, input_label, output_label,
                                    cell_w, cell_h, track_id, cell_segment, temp_files,
-                                   chunk_duration=None):
+                                   chunk_duration=None, beat_sync_stats=None):
         """
         Build per-cell styling filters (scale, pad/bgColor, color grade, beat flash, label, border).
         Chains filters from input_label → output_label.
@@ -4326,6 +4326,102 @@ class VideoComposer:
             # else: no active note windows — skip colorGrade (would only affect background)
 
         # ── 3. Beat flash (colored overlay) ─────────────────────────────────
+        # ── 3a. Beat-sync track-cell modulation (export parity) ───────────
+        # Applies subtle pulse to individual grid cells when beatSync targets
+        # include track-cells. The effect is gated to note-active windows and
+        # uses conservative amplitudes for CPU/GPU stability.
+        gstyle = getattr(self, 'composition_style', {}) or {}
+        beat_sync_enabled = bool(gstyle.get('beatSyncEnabled'))
+        beat_targets = gstyle.get('beatSyncTargets')
+        if isinstance(beat_targets, (list, tuple, set)):
+            beat_targets_set = {str(v).strip().lower() for v in beat_targets if str(v).strip()}
+        elif isinstance(beat_targets, str) and beat_targets.strip():
+            beat_targets_set = {s.strip().lower() for s in beat_targets.split(',') if s.strip()}
+        else:
+            beat_targets_set = set()
+
+        if beat_sync_enabled and 'track-cells' in beat_targets_set:
+            if isinstance(beat_sync_stats, dict):
+                beat_sync_stats['eligible_cells'] = beat_sync_stats.get('eligible_cells', 0) + 1
+            beat_sensitivity = (gstyle.get('beatSyncSensitivity') or 'medium').strip().lower()
+            beat_mode = (gstyle.get('beatPulseMode') or 'scale').strip().lower()
+            beat_interval_map = {
+                'low': 0.90,
+                'medium': 0.65,
+                'high': 0.45,
+            }
+            beat_amp_map = {
+                'low': 0.65,
+                'medium': 1.0,
+                'high': 1.35,
+            }
+            beat_mode_amp_map = {
+                'scale': 0.95,
+                'glow': 1.2,
+                'shake-lite': 0.9,
+            }
+
+            notes = cell_segment.get('notes', []) if cell_segment else []
+            windows = []
+            velocity_samples = []
+            for note in notes:
+                t = float(note.get('chunk_time', note.get('time', 0)))
+                dur = max(0.02, float(note.get('duration', 0.25)))
+                if t >= 0 and dur > 0:
+                    windows.append((round(t, 3), round(t + dur, 3)))
+                v = note.get('velocity')
+                if v is None:
+                    v = note.get('midi_velocity')
+                if v is None:
+                    v = note.get('note_velocity')
+                try:
+                    fv = float(v)
+                    velocity_samples.append((fv / 127.0) if fv > 1.0 else fv)
+                except Exception:
+                    pass
+
+            windows.sort(key=lambda w: w[0])
+            merged = []
+            for s, e in windows:
+                if merged and s <= merged[-1][1] + 0.03:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            if len(merged) > 80:
+                merged = merged[:80]
+
+            if merged:
+                if isinstance(beat_sync_stats, dict):
+                    beat_sync_stats['modulated_cells'] = beat_sync_stats.get('modulated_cells', 0) + 1
+                    beat_sync_stats['modulated_windows'] = beat_sync_stats.get('modulated_windows', 0) + len(merged)
+                enable_expr = '+'.join(f'between(t,{s},{e})' for s, e in merged)
+                avg_vel = 0.72
+                if velocity_samples:
+                    avg_vel = min(1.0, max(0.0, sum(velocity_samples) / len(velocity_samples)))
+                velocity_factor = 0.85 + 0.4 * avg_vel
+
+                beat_interval = beat_interval_map.get(beat_sensitivity, 0.65)
+                pulse = (
+                    beat_amp_map.get(beat_sensitivity, 1.0)
+                    * beat_mode_amp_map.get(beat_mode, 0.95)
+                    * velocity_factor
+                )
+                wave_expr = f"(0.5+0.5*sin(6.28318*t/{beat_interval:.3f}))"
+                bright_amp = min(0.09, 0.038 * pulse)
+                sat_amp = min(0.22, 0.11 * pulse)
+                contrast_amp = min(0.16, 0.08 * pulse)
+
+                next_label = f'v_bs_{output_label[1:-1]}'
+                filter_parts.append(
+                    f"{current}eq="
+                    f"brightness='{bright_amp:.4f}*({wave_expr}-0.5)':"
+                    f"saturation='1+{sat_amp:.4f}*({wave_expr}-0.5)':"
+                    f"contrast='1+{contrast_amp:.4f}*({wave_expr}-0.5)':"
+                    f"enable='{enable_expr}'[{next_label}]"
+                )
+                current = f'[{next_label}]'
+
+        # ── 3b. Beat flash (colored overlay) ───────────────────────────────
         # Onset flash: colored burst at each note onset.
         # Uses drawbox with the user's chosen beatFlashColor at the specified
         # intensity (opacity).  Adjacent flashes (<60ms apart) are merged so
@@ -4627,6 +4723,12 @@ class VideoComposer:
         title_color   = cs.get('titleColor') or cs.get('introCardTextColor', '#ffffff')
         title_subcolor = cs.get('titleSubtitleColor', '#d8d8e6')
         title_subsize = int(cs.get('titleSubtitleFontSize', 24))
+        title_glow_enabled = bool(cs.get('titleGlowEnabled', False))
+        title_glow_color = cs.get('titleGlowColor', '#ffffff')
+        title_glow_size = float(cs.get('titleGlowSize', 8) or 8)
+        title_shadow_enabled = bool(cs.get('titleShadowEnabled', True))
+        title_shadow_size = float(cs.get('titleShadowSize', 2) or 2)
+        title_shadow_color = cs.get('titleShadowColor', '#000000')
         title_bg      = cs.get('titleBackgroundColor') or cs.get('introCardBg', '#000000')
         title_bg_opacity = float(cs.get('titleBackgroundOpacity', 0.82) or 0.82)
         title_has_bg  = bool(cs.get('titleBackgroundEnabled'))
@@ -4641,6 +4743,144 @@ class VideoComposer:
         filter_parts: list = []
         current_label = '0:v'
 
+        transition_enabled = bool(cs.get('transitionEnabled'))
+        transition_preset = (cs.get('transitionPreset') or 'none').strip().lower()
+        transition_duration = max(0.2, float(cs.get('transitionDuration', 0.6) or 0.6))
+        transition_strength = (cs.get('transitionStrength') or 'medium').strip().lower()
+        transition_on = (cs.get('transitionOn') or 'start').strip().lower()
+        if transition_on in {'sections', 'interval'}:
+            transition_on = 'section'
+        elif transition_on == 'auto':
+            transition_on = 'phrase'
+        elif transition_on == 'manual-marker':
+            transition_on = 'start'
+        transition_section_interval = max(2.0, float(cs.get('transitionSectionInterval', 8) or 8.0))
+        transition_auto_cadence = cs.get('transitionAutoCadenceSeconds')
+        transition_auto_reason = str(cs.get('transitionAutoReason') or '').strip()
+        transition_auto_source = 'manual'
+        transition_auto_note_density = None
+        transition_auto_note_count = 0
+
+        if transition_on == 'phrase':
+            try:
+                client_cadence = float(transition_auto_cadence)
+            except Exception:
+                client_cadence = None
+
+            if client_cadence is not None and 2.0 <= client_cadence <= 20.0:
+                transition_section_interval = client_cadence
+                transition_auto_source = 'frontend'
+                transition_auto_reason = transition_auto_reason or 'Provided by UI auto timing'
+            else:
+                tracks = []
+                try:
+                    tracks = list((getattr(self, 'midi_data', {}) or {}).get('tracks', []) or [])
+                except Exception:
+                    tracks = []
+                total_notes = 0
+                for trk in tracks:
+                    notes = trk.get('notes') if isinstance(trk, dict) else None
+                    if isinstance(notes, list):
+                        total_notes += len(notes)
+                safe_duration = max(1.0, float(total_duration or 0.0))
+                note_density = total_notes / safe_duration
+                transition_auto_note_density = note_density
+                transition_auto_note_count = total_notes
+                transition_auto_source = 'backend'
+                if note_density >= 12:
+                    transition_section_interval = 2.5
+                    transition_auto_reason = 'Very dense arrangement detected'
+                elif note_density >= 8:
+                    transition_section_interval = 3.5
+                    transition_auto_reason = 'Dense arrangement detected'
+                elif note_density >= 4:
+                    transition_section_interval = 5.0
+                    transition_auto_reason = 'Balanced arrangement detected'
+                elif note_density >= 2:
+                    transition_section_interval = 6.5
+                    transition_auto_reason = 'Light arrangement detected'
+                else:
+                    transition_section_interval = 8.0
+                    transition_auto_reason = 'Sparse arrangement detected'
+
+        transition_repeat = transition_on in {'section', 'phrase'}
+        transition_strength_map = {
+            'low': 0.55,
+            'medium': 0.8,
+            'high': 1.0,
+        }
+        transition_strength_factor = transition_strength_map.get(transition_strength, 0.8)
+
+        beat_sync_enabled = bool(cs.get('beatSyncEnabled'))
+        beat_sync_sensitivity = (cs.get('beatSyncSensitivity') or 'medium').strip().lower()
+        beat_sync_mode = (cs.get('beatPulseMode') or 'scale').strip().lower()
+        beat_targets_raw = cs.get('beatSyncTargets')
+        if isinstance(beat_targets_raw, (list, tuple, set)):
+            beat_sync_targets = {
+                str(v).strip().lower() for v in beat_targets_raw if str(v).strip()
+            }
+        elif isinstance(beat_targets_raw, str) and beat_targets_raw.strip():
+            beat_sync_targets = {
+                s.strip().lower() for s in beat_targets_raw.split(',') if s.strip()
+            }
+        else:
+            beat_sync_targets = set()
+
+        beat_interval_map = {
+            'low': 0.90,
+            'medium': 0.65,
+            'high': 0.45,
+        }
+        beat_base_amp_map = {
+            'low': 0.07,
+            'medium': 0.11,
+            'high': 0.15,
+        }
+        beat_mode_amp_factor = {
+            'scale': 0.85,
+            'glow': 1.0,
+            'shake-lite': 0.75,
+        }
+        beat_shake_px_map = {
+            'low': 1.1,
+            'medium': 1.8,
+            'high': 2.5,
+        }
+        beat_sync_interval = beat_interval_map.get(beat_sync_sensitivity, 0.65)
+        beat_sync_amp = (
+            beat_base_amp_map.get(beat_sync_sensitivity, 0.11)
+            * beat_mode_amp_factor.get(beat_sync_mode, 0.85)
+        )
+        beat_sync_wave_expr = f"(0.5+0.5*sin(6.28318*t/{beat_sync_interval:.3f}))"
+        beat_sync_mod_expr = (
+            f"(1-{beat_sync_amp:.3f}+{beat_sync_amp:.3f}*{beat_sync_wave_expr})"
+        )
+        beat_shake_px = beat_shake_px_map.get(beat_sync_sensitivity, 1.8)
+
+        if beat_sync_enabled:
+            logging.info(
+                "🥁 Beat sync export: "
+                f"mode={beat_sync_mode}, "
+                f"sensitivity={beat_sync_sensitivity}, "
+                f"targets={','.join(sorted(beat_sync_targets)) or 'none'}, "
+                f"interval={beat_sync_interval:.2f}s"
+            )
+
+        outro_enabled = bool(cs.get('outroEffectEnabled'))
+        outro_preset = (cs.get('outroEffectPreset') or 'fade-black').strip().lower()
+        outro_duration = max(0.4, float(cs.get('outroEffectDuration', 1.2) or 1.2))
+        outro_strength = (cs.get('outroEffectStrength') or 'medium').strip().lower()
+        outro_strength_factor = transition_strength_map.get(outro_strength, 0.8)
+        transition_time_expr = (
+            f"mod(t,{transition_section_interval:.3f})" if transition_repeat else 't'
+        )
+        transition_progress_expr = (
+            f"min(max(({transition_time_expr})/{transition_duration:.3f},0),1)"
+        )
+        transition_active_expr = (
+            f"lt(({transition_time_expr}),{transition_duration:.3f})"
+        )
+
         def _esc(t: str) -> str:
             return (t or '').replace('\r', '').replace('\n', ' ') \
                             .replace('\\', '\\\\') \
@@ -4649,19 +4889,158 @@ class VideoComposer:
                             .replace('\u0027', '\u2019')
 
         def add_drawtext(text, x_expr, y_expr, size, color_hex,
-                         alpha_expr='1', enabled='1', font_key=None):
+                         alpha_expr='1', enabled='1', font_key=None,
+                         shadow_size=0, shadow_color_hex=None,
+                         border_size=0, border_color_hex=None):
             nonlocal current_label
             escaped = _esc(text)
             fc = self._hex_to_ffmpeg_color(color_hex)
             fp = self._get_windows_font_path(font_key) if font_key and font_key != 'default' else None
             fontfile_part = f':fontfile={fp}' if fp else ''
+            shadow_part = ''
+            shadow_size = float(shadow_size or 0)
+            if shadow_size > 0:
+                shadow_px = max(1, int(round(shadow_size)))
+                sc = self._hex_to_ffmpeg_color(shadow_color_hex or '#000000')
+                shadow_part = f":shadowx={shadow_px}:shadowy={shadow_px}:shadowcolor={sc}"
+            border_part = ''
+            border_size = float(border_size or 0)
+            if border_size > 0:
+                border_px = max(1, int(round(border_size)))
+                bc = self._hex_to_ffmpeg_color(border_color_hex or color_hex)
+                border_part = f":borderw={border_px}:bordercolor={bc}"
             nxt = f'v_to_{len(filter_parts)}'
             filter_parts.append(
                 f"[{current_label}]drawtext=text='{escaped}'"
                 f":expansion=none"
-                f":x={x_expr}:y={y_expr}:fontsize={size}"
+                f":x='{x_expr}':y='{y_expr}':fontsize={size}"
                 f":fontcolor={fc}:alpha='{alpha_expr}':enable='{enabled}'"
-                f"{fontfile_part}[{nxt}]"
+                f"{shadow_part}{border_part}{fontfile_part}[{nxt}]"
+            )
+            current_label = nxt
+
+        # ── Opening transition (preview/export parity) ───────────────────────
+        if transition_enabled and transition_preset != 'none':
+            applied_transition = transition_preset
+            if transition_preset == 'crossfade':
+                if transition_repeat:
+                    # ffmpeg fade is one-shot; emulate repeating crossfade with subtle brightness settle.
+                    nxt = f'v_to_{len(filter_parts)}'
+                    filter_parts.append(
+                        f"[{current_label}]eq=brightness='-{0.22 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':enable='{transition_active_expr}'[{nxt}]"
+                    )
+                    current_label = nxt
+                else:
+                    nxt = f'v_to_{len(filter_parts)}'
+                    filter_parts.append(
+                        f"[{current_label}]fade=t=in:st=0:d={transition_duration:.3f}[{nxt}]"
+                    )
+                    current_label = nxt
+            elif transition_preset == 'dip-black':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=brightness='-{0.72 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':enable='{transition_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+            elif transition_preset == 'dip-white':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=brightness='{0.72 * transition_strength_factor:.3f}*(1-{transition_progress_expr})':enable='{transition_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+            elif transition_preset == 'glitch-cut':
+                glitch_d = min(0.35, transition_duration)
+                glitch_active_expr = (
+                    f"lt(({transition_time_expr}),{glitch_d:.3f})"
+                )
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]noise=alls={int(14 + 24 * transition_strength_factor)}:allf=t:enable='{glitch_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=saturation='{1.0 + 0.5 * transition_strength_factor:.3f}':contrast='{1.0 + 0.35 * transition_strength_factor:.3f}':enable='{glitch_active_expr}'[{nxt}]"
+                )
+                current_label = nxt
+            elif transition_preset in {'slide-left', 'push-left'}:
+                applied_transition = 'push-left'
+                # Start slightly right-shifted, then settle to centered frame.
+                slide_span = f"iw*{0.08 * transition_strength_factor:.3f}"
+                padded = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x={slide_span}:y=0:color=black[{padded}]"
+                )
+                current_label = padded
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]crop=w=iw:h=ih:x='{slide_span}*{transition_progress_expr}':y=0[{nxt}]"
+                )
+                current_label = nxt
+            elif transition_preset in {'slide-right', 'push-right'}:
+                applied_transition = 'push-right'
+                # Start slightly left-shifted, then settle to centered frame.
+                slide_span = f"iw*{0.08 * transition_strength_factor:.3f}"
+                padded = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]pad=w=iw+{slide_span}:h=ih:x=0:y=0:color=black[{padded}]"
+                )
+                current_label = padded
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]crop=w=iw:h=ih:x='{slide_span}*(1-{transition_progress_expr})':y=0[{nxt}]"
+                )
+                current_label = nxt
+            elif transition_preset in {'zoom-in', 'zoom'}:
+                applied_transition = 'zoom'
+                # Start slightly zoomed-in and ease to native framing.
+                zoom_factor = 0.12 * transition_strength_factor
+                zoom_expr = (
+                    f"(1+{zoom_factor:.3f}*(1-{transition_progress_expr}))"
+                )
+                scaled = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]scale=w='iw*{zoom_expr}':h='ih*{zoom_expr}':eval=frame[{scaled}]"
+                )
+                current_label = scaled
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]crop=w=iw:h=ih:x='(in_w-iw)/2':y='(in_h-ih)/2'[{nxt}]"
+                )
+                current_label = nxt
+            else:
+                # Unknown preset fallback.
+                applied_transition = 'crossfade(fallback)'
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]fade=t=in:st=0:d={transition_duration:.3f}[{nxt}]"
+                )
+                current_label = nxt
+
+            transition_log_suffix = ''
+            if transition_on == 'phrase':
+                transition_log_suffix = (
+                    f", auto_source={transition_auto_source}, "
+                    f"auto_reason={transition_auto_reason or 'n/a'}"
+                )
+                if transition_auto_note_density is not None:
+                    transition_log_suffix += (
+                        f", note_density={transition_auto_note_density:.3f}, "
+                        f"total_notes={transition_auto_note_count}"
+                    )
+
+            logging.info(
+                f"🎞️ Opening transition overlay: preset={applied_transition}, "
+                f"duration={transition_duration:.2f}s, strength={transition_strength}, "
+                f"timing={transition_on}, interval={transition_section_interval:.2f}s"
+                f"{transition_log_suffix}"
+            )
+
+        if beat_sync_enabled and 'overlays' in beat_sync_targets:
+            overlay_boost = min(0.065, 0.026 + beat_sync_amp * 0.23)
+            nxt = f'v_to_{len(filter_parts)}'
+            filter_parts.append(
+                f"[{current_label}]eq=brightness='{overlay_boost:.4f}*({beat_sync_wave_expr}-0.5)'[{nxt}]"
             )
             current_label = nxt
 
@@ -4704,8 +5083,25 @@ class VideoComposer:
             size = int(cs.get('titleFontSize', 56))
             color = title_color
             animated = bool(cs.get('titleAnimated', True))
+            title_anim_preset = (cs.get('titleAnimationPreset') or 'fade').strip().lower()
+            title_anim_delay = max(0.0, float(cs.get('titleAnimDelay', 0) or 0.0))
+            title_anim_duration = max(0.3, float(cs.get('titleAnimDuration', 0.7) or 0.7))
+            title_anim_intensity = (cs.get('titleAnimIntensity') or 'medium').strip().lower()
+            title_anim_direction = (cs.get('titleAnimDirection') or 'left').strip().lower()
+
+            intensity_factor_map = {
+                'low': 0.7,
+                'medium': 1.0,
+                'high': 1.35,
+            }
+            intensity_factor = intensity_factor_map.get(title_anim_intensity, 1.0)
+            direction_sign = 1 if title_anim_direction == 'right' else -1
+            motion_y = max(8.0, 38.0 * intensity_factor)
+            motion_x = max(10.0, 46.0 * intensity_factor) * direction_sign
+            bounce_overshoot = max(4.0, motion_y * 0.22)
+
             title_duration = float(cs.get('titleDuration', 0) or 0)
-            start_at = max(0.0, float(cs.get('introCardDuration', 3))) if has_intro else 0.0
+            start_at = (max(0.0, float(cs.get('introCardDuration', 3))) if has_intro else 0.0) + title_anim_delay
             enabled = '1'
             if title_duration > 0:
                 fin = 0.6 if animated else 0.0
@@ -4772,18 +5168,105 @@ class VideoComposer:
                 y = (str(max(20, size // 2)) if pos == 'top-center'
                      else f'h-{size * 2}'   if pos == 'bottom-center'
                      else '(h-text_h)/2')
-            add_drawtext(title_text, '(w-text_w)/2', y, size, color,
-                         alpha_expr=alpha, enabled=enabled,
-                         font_key=title_font)
+            title_x_expr = '(w-text_w)/2'
+            title_y_expr = y
+            subtitle_x_expr = '(w-text_w)/2'
+
+            if animated:
+                entry_end = start_at + title_anim_duration
+                # p goes from ~1 to 0 during entry; drawtext x/y are quoted so comma-based expressions are valid.
+                p = (
+                    f"if(lt(t,{start_at:.3f}),1,"
+                    f"if(lt(t,{entry_end:.3f}),({entry_end:.3f}-t)/{max(title_anim_duration, 0.001):.3f},0))"
+                )
+                if title_anim_preset == 'scroll-up':
+                    title_y_expr = f"{y}+({motion_y:.2f}*({p}))"
+                elif title_anim_preset == 'scroll-left':
+                    title_x_expr = f"(w-text_w)/2+({motion_x:.2f}*({p}))"
+                    subtitle_x_expr = title_x_expr
+                elif title_anim_preset == 'bounce':
+                    # Starts lower and briefly overshoots upward before settling.
+                    title_y_expr = (
+                        f"{y}+({motion_y:.2f}*({p}))"
+                        f"-({bounce_overshoot:.2f}*sin((1-({p}))*3.14159))"
+                    )
+                elif title_anim_preset == 'spin-soft':
+                    # drawtext cannot rotate directly; emulate with directional drift.
+                    title_x_expr = f"(w-text_w)/2+({motion_x:.2f}*({p}))"
+                    subtitle_x_expr = title_x_expr
+                    title_y_expr = f"{y}+({motion_y * 0.28:.2f}*({p}))"
+                elif title_anim_preset == 'blur-focus':
+                    # drawtext cannot blur directly; keep fade alpha behavior and tiny settle motion.
+                    title_y_expr = f"{y}+({motion_y * 0.18:.2f}*({p}))"
+
+                if title_anim_preset == 'typewriter':
+                    # Approximate typewriter with stepped alpha reveal over entry duration.
+                    title_chars = max(1, len((title_text or '').strip()))
+                    title_step = max(0.02, title_anim_duration / float(title_chars))
+                    title_progress = (
+                        f"if(lt(t,{start_at:.3f}),0,"
+                        f"if(lt(t,{entry_end:.3f}),"
+                        f"min(1,max(0,floor((t-{start_at:.3f})/{title_step:.4f}+1)/{title_chars})),1))"
+                    )
+                    alpha = f"({alpha})*({title_progress})"
+
+            title_render_alpha = alpha
+            if beat_sync_enabled and 'title' in beat_sync_targets:
+                title_render_alpha = f"({alpha})*({beat_sync_mod_expr})"
+                if beat_sync_mode == 'shake-lite':
+                    title_x_expr = (
+                        f"({title_x_expr})+({beat_shake_px:.2f}*sin(6.28318*t/{beat_sync_interval:.3f}))"
+                    )
+                    subtitle_x_expr = title_x_expr
+
+            add_drawtext(title_text, title_x_expr, title_y_expr, size, color,
+                         alpha_expr=title_render_alpha, enabled=enabled,
+                         font_key=title_font,
+                         shadow_size=title_shadow_size if title_shadow_enabled else 0,
+                         shadow_color_hex=title_shadow_color,
+                         border_size=(title_glow_size * 0.14) if title_glow_enabled else 0,
+                         border_color_hex=title_glow_color)
             if title_subtext:
                 subtitle_y = tag_y if title_has_bg else (
                     'h*0.58' if pos == 'center' else f'{y}+{max(title_subsize + 10, size // 2)}'
                 )
-                add_drawtext(title_subtext, '(w-text_w)/2', subtitle_y,
+                subtitle_y_expr = subtitle_y
+                if animated and title_anim_preset in {'scroll-up', 'bounce', 'spin-soft', 'blur-focus'}:
+                    entry_end = start_at + title_anim_duration
+                    p = (
+                        f"if(lt(t,{start_at:.3f}),1,"
+                        f"if(lt(t,{entry_end:.3f}),({entry_end:.3f}-t)/{max(title_anim_duration, 0.001):.3f},0))"
+                    )
+                    if title_anim_preset == 'scroll-up':
+                        subtitle_y_expr = f"{subtitle_y}+({motion_y:.2f}*({p}))"
+                    elif title_anim_preset == 'bounce':
+                        subtitle_y_expr = (
+                            f"{subtitle_y}+({motion_y:.2f}*({p}))"
+                            f"-({bounce_overshoot:.2f}*sin((1-({p}))*3.14159))"
+                        )
+                    elif title_anim_preset == 'spin-soft':
+                        subtitle_y_expr = f"{subtitle_y}+({motion_y * 0.28:.2f}*({p}))"
+                    elif title_anim_preset == 'blur-focus':
+                        subtitle_y_expr = f"{subtitle_y}+({motion_y * 0.18:.2f}*({p}))"
+                subtitle_alpha = title_render_alpha
+                if animated and title_anim_preset == 'typewriter':
+                    sub_chars = max(1, len((title_subtext or '').strip()))
+                    sub_step = max(0.02, title_anim_duration / float(sub_chars))
+                    sub_progress = (
+                        f"if(lt(t,{start_at:.3f}),0,"
+                        f"if(lt(t,{entry_end:.3f}),"
+                        f"min(1,max(0,floor((t-{start_at:.3f})/{sub_step:.4f}+1)/{sub_chars})),1))"
+                    )
+                    subtitle_alpha = f"({title_render_alpha})*({sub_progress})"
+                add_drawtext(title_subtext, subtitle_x_expr, subtitle_y_expr,
                              int(max(16, title_subsize)),
                              title_subcolor,
-                             alpha_expr=alpha, enabled=enabled,
-                             font_key=title_font)
+                             alpha_expr=subtitle_alpha, enabled=enabled,
+                             font_key=title_font,
+                             shadow_size=(title_shadow_size * 0.9) if title_shadow_enabled else 0,
+                             shadow_color_hex=title_shadow_color,
+                             border_size=(title_glow_size * 0.1) if title_glow_enabled else 0,
+                             border_color_hex=title_glow_color)
 
         # ── Tagline ───────────────────────────────────────────────────────────
         if has_tagline:
@@ -4792,6 +5275,9 @@ class VideoComposer:
             tagline_position = cs.get('taglinePosition', 'bottom-center')
             tagline_alignment = cs.get('taglineAlignment', 'center')
             tagline_shape = cs.get('taglineShape', 'rounded')
+            tagline_shadow_enabled = bool(cs.get('taglineShadowEnabled', True))
+            tagline_shadow_size = float(cs.get('taglineShadowSize', 2) or 2)
+            tagline_shadow_color = cs.get('taglineShadowColor', '#000000')
             tagline_width_pct = min(100.0, max(20.0, float(cs.get('taglineWidth', 72) or 72)))
             tagline_vertical_offset = min(160.0, max(-160.0, float(cs.get('taglineVerticalOffset', 0) or 0.0)))
             tagline_fade_in = max(0.0, float(cs.get('taglineFadeInDuration', 0.5) or 0.0))
@@ -4851,6 +5337,15 @@ class VideoComposer:
                 text_x = f'{container_x}+{container_w}-text_w-{text_inset}'
             else:
                 text_x = f'{container_x}+({container_w}-text_w)/2'
+
+            tagline_draw_alpha = tagline_alpha
+            if beat_sync_enabled and 'tagline' in beat_sync_targets:
+                tagline_draw_alpha = f"({tagline_alpha})*({beat_sync_mod_expr})"
+                if beat_sync_mode == 'shake-lite':
+                    text_x = (
+                        f"({text_x})+({beat_shake_px:.2f}*sin(6.28318*t/{beat_sync_interval:.3f}))"
+                    )
+
             if tagline_bg_enabled:
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
@@ -4881,8 +5376,10 @@ class VideoComposer:
                     )
                 current_label = nxt
             add_drawtext(tagline_text, text_x, text_y,
-                         size, color, alpha_expr=tagline_alpha,
+                         size, color, alpha_expr=tagline_draw_alpha,
                          enabled=f'between(t,{tagline_start:.3f},{total_duration:.3f})',
+                         shadow_size=tagline_shadow_size if tagline_shadow_enabled else 0,
+                         shadow_color_hex=tagline_shadow_color,
                          font_key=cs.get('taglineFont', 'default'))
 
         # ── Watermark ─────────────────────────────────────────────────────────
@@ -4900,6 +5397,54 @@ class VideoComposer:
             add_drawtext(cs['watermarkText'], x, y, size, color,
                          alpha_expr=str(round(opacity, 2)),
                          font_key=cs.get('watermarkFont', 'default'))
+
+        # ── Ending effect / outro ────────────────────────────────────────────
+        if outro_enabled:
+            outro_start = max(0.0, total_duration - outro_duration)
+            if outro_preset == 'fade-black':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]fade=t=out:st={outro_start:.3f}:d={outro_duration:.3f}[{nxt}]"
+                )
+                current_label = nxt
+            elif outro_preset == 'fade-white':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]fade=t=out:st={outro_start:.3f}:d={outro_duration:.3f}:color=white[{nxt}]"
+                )
+                current_label = nxt
+            elif outro_preset == 'glitch-out':
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]noise=alls={int(12 + 22 * outro_strength_factor)}:allf=t:enable='between(t,{outro_start:.3f},{total_duration:.3f})'[{nxt}]"
+                )
+                current_label = nxt
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]eq=saturation='{1.0 + 0.42 * outro_strength_factor:.3f}':contrast='{1.0 + 0.30 * outro_strength_factor:.3f}':enable='between(t,{outro_start:.3f},{total_duration:.3f})'[{nxt}]"
+                )
+                current_label = nxt
+            elif outro_preset == 'zoom-out':
+                zoom_factor = 0.14 * outro_strength_factor
+                zoom_progress = (
+                    f"min(max((t-{outro_start:.3f})/{max(outro_duration, 0.001):.3f},0),1)"
+                )
+                zoom_expr = f"(1-{zoom_factor:.3f}*({zoom_progress}))"
+                scaled = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]scale=w='iw*{zoom_expr}':h='ih*{zoom_expr}':eval=frame[{scaled}]"
+                )
+                current_label = scaled
+                nxt = f'v_to_{len(filter_parts)}'
+                filter_parts.append(
+                    f"[{current_label}]pad=w=iw:h=ih:x='(iw-in_w)/2':y='(ih-in_h)/2':color=black[{nxt}]"
+                )
+                current_label = nxt
+
+            logging.info(
+                f"🏁 Outro effect overlay: preset={outro_preset}, "
+                f"duration={outro_duration:.2f}s, strength={outro_strength}"
+            )
 
         filter_parts.append(f"[{current_label}]null[text_out]")
         return ';'.join(filter_parts)
@@ -5085,6 +5630,11 @@ class VideoComposer:
             audio_inputs_for_mix = []
             input_idx = 0
             style_temp_files = []  # Temp files created during styling (cleaned up after ffmpeg)
+            beat_sync_stats = {
+                'eligible_cells': 0,
+                'modulated_cells': 0,
+                'modulated_windows': 0,
+            }
 
             # Determine canvas background color from composition style
             cs = getattr(self, 'composition_style', {}) or {}
@@ -5147,7 +5697,8 @@ class VideoComposer:
                         self._apply_cell_style_filters(
                             filter_parts, f"[{input_idx}:v]", f"[v{r}_{c}]",
                             cell_width, cell_height, track_id, cell_segment, style_temp_files,
-                            chunk_duration=duration
+                            chunk_duration=duration,
+                            beat_sync_stats=beat_sync_stats,
                         )
                         video_inputs_for_stack.append(f"[v{r}_{c}]")
                         
@@ -5173,6 +5724,21 @@ class VideoComposer:
                         logging.info(f"      Cell ({r},{c}): EMPTY (using bg placeholder)")
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
+            gstyle = getattr(self, 'composition_style', {}) or {}
+            beat_targets = gstyle.get('beatSyncTargets')
+            if isinstance(beat_targets, (list, tuple, set)):
+                beat_targets_set = {str(v).strip().lower() for v in beat_targets if str(v).strip()}
+            elif isinstance(beat_targets, str) and beat_targets.strip():
+                beat_targets_set = {s.strip().lower() for s in beat_targets.split(',') if s.strip()}
+            else:
+                beat_targets_set = set()
+            if bool(gstyle.get('beatSyncEnabled')) and 'track-cells' in beat_targets_set:
+                logging.info(
+                    "🥁 Beat sync cells summary: "
+                    f"eligible={beat_sync_stats.get('eligible_cells', 0)}, "
+                    f"modulated={beat_sync_stats.get('modulated_cells', 0)}, "
+                    f"windows={beat_sync_stats.get('modulated_windows', 0)}"
+                )
 
             # ── Solo-resolution optimisation ────────────────────────────────
             # When only one cell has content in this chunk, skip xstack and
@@ -5194,7 +5760,8 @@ class VideoComposer:
                 self._apply_cell_style_filters(
                     filter_parts, '[2:v]', '[v_solo]',
                     solo_w, solo_h, solo_track_id, solo_segment, style_temp_files,
-                    chunk_duration=duration
+                    chunk_duration=duration,
+                    beat_sync_stats={},
                 )
                 if solo_segment:
                     vol_db = float(self._resolve_segment_volume(solo_segment))

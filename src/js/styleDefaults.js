@@ -32,6 +32,12 @@ export const DEFAULT_COMPOSITION_STYLE = {
   titleSubtitleFontSize: 24,
   titleSubtitleColor: '#d8d8e6',
   titleAnimated: true,
+  titleAnimationPreset: 'fade', // 'fade' | 'scroll-up' | 'scroll-left' | 'bounce' | 'spin-soft' | 'blur-focus' | 'typewriter'
+  titleAnimDuration: 0.7,
+  titleAnimDelay: 0,
+  titleAnimIntensity: 'medium', // 'low' | 'medium' | 'high'
+  titleAnimDirection: 'left', // used by direction-aware presets
+  titleAnimEasing: 'ease-out', // 'linear' | 'ease-out' | 'ease-in-out' | 'cubic-bezier(0.22, 1, 0.36, 1)'
   titleDuration: 4, // seconds to show before fade-out; set to 0 for permanent
   titleBackgroundEnabled: false,
   titleBackgroundMode: 'card', // 'card' | 'fullscreen'
@@ -89,6 +95,28 @@ export const DEFAULT_COMPOSITION_STYLE = {
   // Glitch / VHS
   glitchEnabled: false,
   glitchIntensity: 'subtle', // 'subtle' | 'medium' | 'heavy'
+
+  // Opening transition
+  transitionEnabled: false,
+  transitionPreset: 'none', // 'none' | 'crossfade' | 'dip-black' | 'dip-white' | 'push-left' | 'push-right' | 'slide-left' | 'slide-right' | 'zoom' | 'zoom-in' | 'glitch-cut'
+  transitionDuration: 0.6,
+  transitionStrength: 'medium', // 'low' | 'medium' | 'high'
+  transitionOn: 'start', // 'start' | 'section' | 'phrase' | 'manual-marker' | 'interval' | 'sections' | 'auto'
+  transitionSectionInterval: 8, // repeat cadence in seconds when transitionOn='section' (legacy: 'interval'/'sections')
+  transitionAutoCadenceSeconds: 8, // frontend-estimated cadence used when transitionOn='auto'
+  transitionAutoReason: 'Sparse arrangement detected',
+
+  // Beat-sync micro motion (phase 3 scaffold)
+  beatSyncEnabled: false,
+  beatSyncSensitivity: 'medium', // 'low' | 'medium' | 'high'
+  beatSyncTargets: ['title', 'tagline'], // subset of: 'title' | 'tagline' | 'track-cells' | 'overlays'
+  beatPulseMode: 'scale', // 'scale' | 'glow' | 'shake-lite'
+
+  // Ending effect / outro
+  outroEffectEnabled: false,
+  outroEffectPreset: 'fade-black', // 'fade-black' | 'fade-white' | 'glitch-out' | 'zoom-out'
+  outroEffectDuration: 1.2,
+  outroEffectStrength: 'medium', // 'low' | 'medium' | 'high'
 
   // Intro title card
   introCardEnabled: false,
