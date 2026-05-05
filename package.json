@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "prepare:sf2": "node ./scripts/copy-fluidsynth-assets.mjs",
+    "test:regressions": "python -m unittest -v test_video_composer_regressions",
     "test:components": "python test_components.py",
     "test:quick": "pwsh -ExecutionPolicy Bypass -File test-quick.ps1",
     "test:dev": "pwsh -ExecutionPolicy Bypass -File test-dev.ps1",

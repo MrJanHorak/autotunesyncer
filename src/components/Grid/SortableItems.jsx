@@ -1,28 +1,105 @@
 /* eslint-disable react/prop-types */
-import { useState, useRef, useEffect, memo } from 'react';
+import { useState, useRef, useEffect, useId, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { DEFAULT_CLIP_STYLE, COLOR_GRADE_LABELS } from '../../js/styleDefaults';
 
-const getClipColorFilter = (colorGrade) => {
+const SVG_COLOR_GRADES = new Set(['warm', 'cool', 'vintage', 'cyberpunk', 'vivid']);
+
+const getClipColorFilter = (colorGrade, filterIds) => {
   switch (colorGrade) {
     case 'warm':
-      return 'saturate(1.2) sepia(0.12) brightness(1.03) hue-rotate(-8deg)';
+      return `url(#${filterIds.warm})`;
     case 'cool':
-      return 'saturate(1.1) brightness(1.02) hue-rotate(12deg)';
+      return `url(#${filterIds.cool})`;
     case 'vintage':
-      return 'sepia(0.55) contrast(0.94) saturate(0.8)';
+      return `url(#${filterIds.vintage})`;
     case 'cyberpunk':
-      return 'saturate(1.55) contrast(1.1) hue-rotate(18deg) brightness(1.02)';
+      return `url(#${filterIds.cyberpunk})`;
     case 'bw':
       return 'grayscale(1)';
     case 'vivid':
-      return 'saturate(1.8) contrast(1.1) brightness(1.04)';
+      return `url(#${filterIds.vivid})`;
     default:
       return 'none';
   }
 };
+
+const ClipColorGradeFilterDefs = memo(function ClipColorGradeFilterDefs({ filterIds }) {
+  return (
+    <svg
+      aria-hidden='true'
+      focusable='false'
+      width='0'
+      height='0'
+      style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+    >
+      <defs>
+        <filter id={filterIds.warm} colorInterpolationFilters='sRGB'>
+          <feColorMatrix type='saturate' values='1.2' />
+          <feComponentTransfer>
+            <feFuncR type='gamma' amplitude='1' exponent='0.9091' offset='0' />
+            <feFuncG type='identity' />
+            <feFuncB type='gamma' amplitude='1' exponent='1.1364' offset='0' />
+            <feFuncA type='identity' />
+          </feComponentTransfer>
+        </filter>
+
+        <filter id={filterIds.cool} colorInterpolationFilters='sRGB'>
+          <feColorMatrix type='saturate' values='1.1' />
+          <feComponentTransfer>
+            <feFuncR type='gamma' amplitude='1' exponent='1.1364' offset='0' />
+            <feFuncG type='identity' />
+            <feFuncB type='gamma' amplitude='1' exponent='0.8696' offset='0' />
+            <feFuncA type='identity' />
+          </feComponentTransfer>
+        </filter>
+
+        <filter id={filterIds.vintage} colorInterpolationFilters='sRGB'>
+          <feColorMatrix
+            type='matrix'
+            values='
+              0.393 0.769 0.189 0 0
+              0.349 0.686 0.168 0 0
+              0.272 0.534 0.131 0 0
+              0     0     0     1 0
+            '
+          />
+        </filter>
+
+        <filter id={filterIds.cyberpunk} colorInterpolationFilters='sRGB'>
+          <feColorMatrix type='saturate' values='1.6' />
+          <feComponentTransfer>
+            <feFuncR type='linear' slope='1.1' intercept='-0.05' />
+            <feFuncG type='linear' slope='1.1' intercept='-0.05' />
+            <feFuncB type='linear' slope='1.1' intercept='-0.05' />
+            <feFuncA type='identity' />
+          </feComponentTransfer>
+          <feColorMatrix
+            type='matrix'
+            values='
+              1.15 0    0.15 0 0
+              0    1.15 0.15 0 0
+              0.25 0    1    0 0
+              0    0    0    1 0
+            '
+          />
+        </filter>
+
+        <filter id={filterIds.vivid} colorInterpolationFilters='sRGB'>
+          <feColorMatrix type='saturate' values='1.8' />
+          <feComponentTransfer>
+            <feFuncR type='linear' slope='1.1' intercept='-0.01' />
+            <feFuncG type='linear' slope='1.1' intercept='-0.01' />
+            <feFuncB type='linear' slope='1.1' intercept='-0.01' />
+            <feFuncA type='identity' />
+          </feComponentTransfer>
+        </filter>
+      </defs>
+    </svg>
+  );
+});
 
 const ClipStylePopover = ({
   style,
@@ -324,6 +401,7 @@ export const SortableItem = memo(function SortableItem({
   const videoRef = useRef(null);
   const wasActiveRef = useRef(false);
   const btnRef = useRef(null);
+  const gradeFilterIdSeed = useId().replace(/[^a-zA-Z0-9_-]/g, '');
 
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id });
@@ -391,7 +469,15 @@ export const SortableItem = memo(function SortableItem({
   }, [activeLevel, isPreviewPlaying, videoUrl]);
 
   const cs = clipStyle || DEFAULT_CLIP_STYLE;
-  const videoFilter = getClipColorFilter(cs.colorGrade);
+  const gradeFilterIds = {
+    warm: `clip-grade-${gradeFilterIdSeed}-warm`,
+    cool: `clip-grade-${gradeFilterIdSeed}-cool`,
+    vintage: `clip-grade-${gradeFilterIdSeed}-vintage`,
+    cyberpunk: `clip-grade-${gradeFilterIdSeed}-cyberpunk`,
+    vivid: `clip-grade-${gradeFilterIdSeed}-vivid`,
+  };
+  const usesSvgColorGrade = SVG_COLOR_GRADES.has(cs.colorGrade);
+  const videoFilter = getClipColorFilter(cs.colorGrade, gradeFilterIds);
   const clipBackground =
     !cs.transparentBg && cs.bgColorEnabled && cs.bgColor
       ? cs.bgColor
@@ -446,6 +532,10 @@ export const SortableItem = memo(function SortableItem({
       {...attributes}
       {...listeners}
     >
+      {!isEmpty && usesSvgColorGrade && (
+        <ClipColorGradeFilterDefs filterIds={gradeFilterIds} />
+      )}
+
       {/* Video — use display:none (not opacity:0) when hidden so the browser's
            default black video background can't bleed through transparent cells */}
       {!isEmpty && videoUrl && (

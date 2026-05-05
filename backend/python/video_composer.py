@@ -1727,11 +1727,16 @@ class VideoComposer:
     def _create_placeholder_chunk(self, chunk_idx):
         """Create a placeholder chunk with silence"""
         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+        bg_hex = (getattr(self, 'composition_style', {}) or {}).get(
+            'backgroundColor',
+            '#0a0a0f',
+        )
+        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
         
-        # Create a video with black background and silent audio
+        # Create a video with the composition background and silent audio
         cmd = [
             'ffmpeg', '-y',
-            '-f', 'lavfi', '-i', 'color=black:s=1920x1080:r=30',
+            '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s=1920x1080:r=30',
             '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
             '-t', str(self.CHUNK_DURATION),
             '-c:v', 'h264_nvenc', '-preset', 'p4',
@@ -3483,10 +3488,15 @@ class VideoComposer:
         """Create a silent chunk for gaps in composition"""
         try:
             chunk_path = self.chunks_dir / f"silent_chunk_{chunk_idx}.mp4"
+            bg_hex = (getattr(self, 'composition_style', {}) or {}).get(
+                'backgroundColor',
+                '#0a0a0f',
+            )
+            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
             
             cmd = [
                 'ffmpeg', '-y',
-                '-f', 'lavfi', '-i', 'color=black:s=1920x1080:r=30',
+                '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s=1920x1080:r=30',
                 '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
                 '-t', str(duration),
                 '-c:v', 'h264_nvenc', '-preset', 'p4',
@@ -3998,6 +4008,7 @@ class VideoComposer:
             
             # FIXED: Better track ID to grid position mapping
             positioned_segments = []
+            unmapped_segments = []
             
             for i, segment in enumerate(track_segments):
                 track_id = segment.get('track_id')
@@ -4045,15 +4056,29 @@ class VideoComposer:
                     positioned_segments.append(segment)
                     logging.info(f"      ✅ Positioned at grid ({position.get('row')}, {position.get('column')}) using {strategy_used}")
                 else:
-                    # Fallback positioning
-                    fallback_idx = len(positioned_segments)
-                    segment['grid_row'] = fallback_idx // 3
-                    segment['grid_col'] = fallback_idx % 3
-                    positioned_segments.append(segment)
-                    logging.warning(f"      ⚠️ Used fallback position ({fallback_idx // 3}, {fallback_idx % 3}) - no grid mapping found")
+                    unmapped_segments.append({
+                        'track_id': track_id,
+                        'track_name': track_name,
+                        'segment_type': segment_type,
+                        'video_path': video_path,
+                    })
+                    logging.error(
+                        f"      ❌ No grid mapping found for {segment_type} "
+                        f"track_id={track_id!r} track_name={track_name!r}"
+                    )
             
             logging.info(f"📊 Grid positioning summary:")
             logging.info(f"   - Successfully positioned: {len(positioned_segments)} segments")
+
+            if unmapped_segments:
+                logging.error(
+                    "❌ Grid layout aborted because one or more segments could not be mapped: %s",
+                    [
+                        f"{item['segment_type']}:{item['track_id']}:{Path(item['video_path']).name if item['video_path'] != 'missing' else 'MISSING'}"
+                        for item in unmapped_segments
+                    ],
+                )
+                return None
             
             if not positioned_segments:
                 logging.warning(f"⚪ No positioned segments, creating placeholder")
@@ -5642,7 +5667,7 @@ class VideoComposer:
                 current_label = scaled
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]pad=w=iw:h=ih:x='(iw-in_w)/2':y='(ih-in_h)/2':color=black[{nxt}]"
+                    f"[{current_label}]pad=w=iw:h=ih:x='(iw-in_w)/2':y='(ih-in_h)/2':color={transition_fill_color}[{nxt}]"
                 )
                 current_label = nxt
 
@@ -5787,16 +5812,14 @@ class VideoComposer:
                 else:
                     logging.warning(f"   ❌ Video not found: {segment_type} {track_id} - {video_path}")
             
-            if len(input_map) < 2:
-                if input_map:
-                    first_video = list(input_map.values())[0]['video_path']
-                    import shutil
-                    logging.info(f"📋 Only one valid input, copying: {Path(first_video).name}")
-                    shutil.copy2(first_video, output_path)
-                    logging.info(f"✅ Fallback video copied successfully")
-                    return str(output_path)
+            if not input_map:
                 logging.error(f"❌ No valid video inputs found")
                 return None
+            if len(input_map) == 1:
+                logging.info(
+                    "🧱 One valid input detected; keeping grid compositor active so "
+                    "empty cells and composition styles still render"
+                )
             
             logging.info(f"📐 Calculating grid dimensions...")
             
@@ -5976,11 +5999,13 @@ class VideoComposer:
                     f"windows={beat_sync_stats.get('modulated_windows', 0)}"
                 )
 
-            # ── Solo-resolution optimisation ────────────────────────────────
-            # When only one cell has content in this chunk, skip xstack and
-            # render the single clip at the full canvas resolution so the active
-            # instrument fills the screen instead of appearing as a tiny cell.
-            if cells_with_content == 1:
+            # ── Optional solo-resolution optimisation ───────────────────────
+            # Disabled by default because the frontend preview always preserves
+            # the grid footprint, even when only one cell is active.
+            solo_mode_enabled = str(os.getenv('ATS_ENABLE_SOLO_MODE', '')).strip().lower() in {
+                '1', 'true', 'yes', 'on'
+            }
+            if solo_mode_enabled and cells_with_content == 1:
                 solo_w = target_width & ~1
                 solo_h = target_height & ~1
                 # The single video is always at input index 2
@@ -6060,6 +6085,8 @@ class VideoComposer:
                 else:
                     logging.warning(f"⚠️ Solo FFmpeg failed for chunk, skipping: {result.stderr[-300:]}")
                     return None
+            elif cells_with_content == 1:
+                logging.info("🧱 Single active cell detected; preserving grid layout because solo mode is disabled")
             # ── End solo-resolution optimisation ────────────────────────────
 
             force_cpu_encode = cells_with_content > self.max_concurrent_streams
@@ -6573,158 +6600,19 @@ class VideoComposer:
         return None
 
     def _create_grid_layout_chunk(self, track_segments, output_path, duration):
-        """
-        Create a grid layout chunk from track video segments using proper grid arrangement.
-        Uses robust FFmpeg-based grid layout when MoviePy fails.
-        """
-        try:
-            if not track_segments:
-                return self._create_placeholder_chunk_simple(0, output_path.parent, duration)
-            
-            logging.info(f"Creating grid layout with {len(track_segments)} segments")
-            logging.info(f"Available grid positions: {list(self.grid_positions.keys())}")
-            
-            # Debug what we're working with
-            self._debug_grid_placement(track_segments)
-            
-            # Determine grid dimensions from grid arrangement
-            max_row = 0
-            max_col = 0
-            for position in self.grid_positions.values():
-                max_row = max(max_row, position.get('row', 0))
-                max_col = max(max_col, position.get('column', 0))
-            
-            # Create grid dimensions (add 1 since indices are 0-based)
-            grid_rows = max_row + 1
-            grid_cols = max_col + 1
-            
-            logging.info(f"Grid dimensions: {grid_rows}x{grid_cols}")
-            logging.info(f"Track segments to place: {[(s.get('track_id'), s.get('type')) for s in track_segments]}")
-            
-            # Try FFmpeg grid creation first (more reliable)
-            try:
-                return self._create_ffmpeg_grid_layout(track_segments, output_path, duration, grid_rows, grid_cols)
+        """Compatibility wrapper: route legacy callers into the fixed grid compositor."""
+        logging.info("[compat] _create_grid_layout_chunk -> _create_grid_layout_chunk_fixed")
+        return self._create_grid_layout_chunk_fixed(track_segments, output_path, duration)
 
-            except Exception as ffmpeg_error:
-                logging.warning(f"FFmpeg grid creation failed: {ffmpeg_error}")
-                # Fall back to using first available video (temporary fix)
-                if track_segments:
-                    first_video = track_segments[0]['video_path']
-                    import shutil
-                    shutil.copy2(first_video, output_path)
-                    logging.info(f"Used fallback: copied {os.path.basename(first_video)} to output")
-                    return str(output_path)
-                return None
-                
-        except Exception as e:
-            logging.error(f"Error creating grid layout chunk: {e}")
-            return None
     def _create_ffmpeg_grid_layout(self, track_segments, output_path, duration, grid_rows, grid_cols):
-        """Create grid layout using FFmpeg with proper multi-video handling"""
-        try:
-            if len(track_segments) == 1:
-                # Single video - just copy it instead of trying to create a grid
-                single_video = track_segments[0]['video_path']
-                import shutil
-                shutil.copy2(single_video, output_path)
-                logging.info(f"✅ Single video copied: {os.path.basename(single_video)}")
-                return str(output_path)
-            
-            logging.info(f"🎬 Creating grid with {len(track_segments)} videos")
-            
-            # Build FFmpeg command with all inputs
-            cmd = ['ffmpeg', '-y']
-            
-            # Add all video files as inputs
-            input_map = {}
-            for i, segment in enumerate(track_segments):
-                video_path = segment['video_path']
-                if os.path.exists(video_path):
-                    cmd.extend(['-i', video_path])
-                    input_map[i] = segment
-                    logging.info(f"📹 Input {i}: {os.path.basename(video_path)}")
-                else:
-                    logging.warning(f"❌ Video not found: {video_path}")
-            
-            if len(input_map) < 2:
-                logging.warning("⚠️ Less than 2 valid videos found, using fallback")
-                if input_map:
-                    first_video = list(input_map.values())[0]['video_path']
-                    import shutil
-                    shutil.copy2(first_video, output_path)
-                    return str(output_path)
-                return None
-            
-            # Calculate cell dimensions
-            cell_width = 1920 // grid_cols
-            cell_height = 1080 // grid_rows
-            
-            # Create filter complex
-            filter_parts = []
-            
-            # Scale all inputs to cell size
-            for i in range(len(input_map)):
-                filter_parts.append(f'[{i}:v]scale={cell_width}:{cell_height}[v{i}]')
-            
-            # Create grid layout positions
-            layout_positions = []
-            for i in range(len(input_map)):
-                row = i // grid_cols
-                col = i % grid_cols
-                x = col * cell_width
-                y = row * cell_height
-                layout_positions.append(f"{x}_{y}")
-            
-            layout_string = "|".join(layout_positions)
-            
-            # Create xstack filter
-            video_inputs = ''.join([f'[v{i}]' for i in range(len(input_map))])
-            xstack_filter = f"{video_inputs}xstack=inputs={len(input_map)}:layout={layout_string}[video_out]"
-            filter_parts.append(xstack_filter)
-            
-            # Mix audio
-            audio_inputs = ''.join([f'[{i}:a]' for i in range(len(input_map))])
-            amix_filter = f"{audio_inputs}amix=inputs={len(input_map)}:duration=longest[audio_out]"
-            filter_parts.append(amix_filter)
-            
-            # Add filter complex to command
-            filter_complex = ';'.join(filter_parts)
-            cmd.extend(['-filter_complex', filter_complex])
-            
-            # Map outputs
-            cmd.extend([
-                '-map', '[video_out]',
-                '-map', '[audio_out]',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                '-c:a', 'aac', '-b:a', '192k',
-                '-t', str(duration),
-                '-r', '30',
-                str(output_path)
-            ])
-            
-            logging.info(f"🎬 Running grid command with {len(input_map)} inputs")
-            logging.info(f"Filter: {filter_complex}")
-            
-            result = gpu_subprocess_run(cmd, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                logging.info(f"✅ Grid created successfully with {len(input_map)} videos")
-                return str(output_path)
-            else:
-                logging.error(f"❌ Grid creation failed: {result.stderr}")
-                
-                # Fallback to first video
-                if input_map:
-                    first_video = list(input_map.values())[0]['video_path']
-                    import shutil
-                    shutil.copy2(first_video, output_path)
-                    logging.info(f"⚠️ Used fallback: {os.path.basename(first_video)}")
-                    return str(output_path)
-                return None
-            
-        except Exception as e:
-            logging.error(f"Error creating grid layout: {e}")
-            return None
+        """Compatibility wrapper: route legacy callers into the fixed FFmpeg grid compositor."""
+        logging.info(
+            "[compat] _create_ffmpeg_grid_layout -> _create_ffmpeg_grid_layout_fixed "
+            "(legacy grid_rows=%s, grid_cols=%s ignored)",
+            grid_rows,
+            grid_cols,
+        )
+        return self._create_ffmpeg_grid_layout_fixed(track_segments, output_path, duration)
 
     def _create_simple_concat_fallback(self, track_segments, output_path, duration):
         """Simple fallback: concatenate all videos horizontally"""
@@ -6747,10 +6635,15 @@ class VideoComposer:
         """Create a simple placeholder chunk"""
         try:
             output_path = chunks_dir / f"placeholder_chunk_{chunk_idx}.mp4"
+            bg_hex = (getattr(self, 'composition_style', {}) or {}).get(
+                'backgroundColor',
+                '#0a0a0f',
+            )
+            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
             
             cmd = [
                 'ffmpeg', '-y',
-                '-f', 'lavfi', '-i', f'color=black:size=1920x1080:duration={duration}:rate=30',
+                '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:size=1920x1080:duration={duration}:rate=30',
                 '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={duration}',
                 '-c:v', 'libx264', '-preset', 'ultrafast',
                 '-c:a', 'aac', '-b:a', '128k',
@@ -6897,47 +6790,25 @@ class VideoComposer:
             return False
 
     def create_midi_synchronized_composition(self, midi_data, video_paths, output_path):
-        """
-        Create a composition where videos are triggered by MIDI notes
-        
-        Args:
-            midi_data: MIDI data structure with tracks and notes
-            video_paths: Dictionary mapping instrument names to video file paths
-            output_path: Output video file path
-        """
-        from .midi_synchronized_compositor import MidiSynchronizedCompositor
-        
-        # Calculate total duration from MIDI data
-        total_duration = 0
-        for track in midi_data.get('tracks', []):
-            for note in track.get('notes', []):
-                end_time = note.get('time', 0) + note.get('duration', 0.5)
-                total_duration = max(total_duration, end_time)
-        
-        # Add some padding
-        total_duration += 2.0
-        
-        print(f"🎵 Creating MIDI-synchronized composition (duration: {total_duration:.2f}s)")
-        
-        # Create compositor
-        compositor = MidiSynchronizedCompositor()
-        
-        try:
-            # Create triggered composition
-            success = compositor.create_midi_triggered_video(
-                midi_data, video_paths, output_path, total_duration
-            )
-            
-            if success:
-                print(f"✅ MIDI-synchronized composition created: {output_path}")
-                return output_path
-            else:
-                print("❌ Failed to create MIDI-synchronized composition")
-                return None
-                
-        finally:
-            # Clean up temporary files
-            compositor.cleanup()
+        """Compatibility wrapper for legacy callers using the removed MIDI sync helper."""
+        logging.info(
+            "[compat] create_midi_synchronized_composition -> VideoComposer.create_composition"
+        )
+
+        compat_midi_data = dict(midi_data or {})
+        compat_midi_data['videoFiles'] = video_paths or {}
+
+        uploads_dir = getattr(self, 'uploads_dir', None)
+        if uploads_dir and 'uploadsDir' not in compat_midi_data:
+            compat_midi_data['uploadsDir'] = str(uploads_dir)
+
+        compat_composer = type(self)(
+            compat_midi_data,
+            str(getattr(self, 'processed_videos_dir', self.temp_dir)),
+            output_path,
+            preview_mode=getattr(self, 'preview_mode', False),
+        )
+        return compat_composer.create_composition()
 
     def run_ffmpeg_grid_command(self, segments, output_path, duration=4.0):
         """

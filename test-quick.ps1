@@ -1,17 +1,41 @@
 # Quick Component and Performance Test
 Write-Host "🔥 AutoTuneSyncer Enhanced Performance Test" -ForegroundColor Green
 
+function Invoke-Step {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    Write-Host $Title -ForegroundColor Yellow
+    & $Action
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Step failed with exit code ${LASTEXITCODE}: $Title"
+    }
+}
+
 cd "c:\Users\janny\development\autotunesyncer"
 
-Write-Host "`n1️⃣  Testing Core Components..." -ForegroundColor Yellow
-python test_components.py
+Invoke-Step "`n1️⃣  Testing Core Components..." {
+    python test_components.py
+}
 
-Write-Host "`n2️⃣  Checking GPU Status..." -ForegroundColor Yellow
+Invoke-Step "`n2️⃣  Running Video Composer Regressions..." {
+    python -m unittest -v test_video_composer_regressions
+}
+
 cd backend
-python python/gpu_setup.py
 
-Write-Host "`n3️⃣  Verifying Python Dependencies..." -ForegroundColor Yellow
-python -c "
+Invoke-Step "`n3️⃣  Checking GPU Status..." {
+    python python/gpu_setup.py
+}
+
+Invoke-Step "`n4️⃣  Verifying Python Dependencies..." {
+    python -c "
 import torch
 print(f'PyTorch version: {torch.__version__}')
 print(f'CUDA available: {torch.cuda.is_available()}')
@@ -31,10 +55,13 @@ try:
 except:
     print('❌ MoviePy not available')
 "
+}
 
-Write-Host "`n4️⃣  Checking Node.js Dependencies..." -ForegroundColor Yellow
 cd ../
-node -e "console.log('Node.js version:', process.version)"
-npm list --depth=0 2>$null | Select-String "react|express|ffmpeg"
+
+Invoke-Step "`n5️⃣  Checking Node.js Dependencies..." {
+    node -e "console.log('Node.js version:', process.version)"
+    npm list --depth=0 2>$null | Select-String "react|express|ffmpeg"
+}
 
 Write-Host "`n✅ Performance test complete!" -ForegroundColor Green
