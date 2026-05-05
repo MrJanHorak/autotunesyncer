@@ -41,6 +41,65 @@ const sortEditorLayout = (a, b) => {
   return String(a.i).localeCompare(String(b.i));
 };
 
+const getOverlapArea = (left, right) => {
+  const overlapWidth =
+    Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x);
+  const overlapHeight =
+    Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y);
+
+  if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+  return overlapWidth * overlapHeight;
+};
+
+const findSwapTarget = (layout, draggedItem) => {
+  if (!draggedItem?.i) return null;
+
+  let bestMatch = null;
+  let bestArea = 0;
+
+  layout.forEach((item) => {
+    if (!item || item.i === draggedItem.i) return;
+    const overlapArea = getOverlapArea(item, draggedItem);
+    if (overlapArea > bestArea) {
+      bestArea = overlapArea;
+      bestMatch = item;
+    }
+  });
+
+  return bestMatch;
+};
+
+const swapLayoutItems = (layout, firstId, secondId) => {
+  const swappedLayout = normalizeEditorLayout(layout).map((item) => ({
+    ...item,
+  }));
+  const firstItem = swappedLayout.find((item) => item.i === firstId);
+  const secondItem = swappedLayout.find((item) => item.i === secondId);
+
+  if (!firstItem || !secondItem) {
+    return swappedLayout;
+  }
+
+  const firstRect = {
+    x: firstItem.x,
+    y: firstItem.y,
+    w: firstItem.w,
+    h: firstItem.h,
+  };
+
+  firstItem.x = secondItem.x;
+  firstItem.y = secondItem.y;
+  firstItem.w = secondItem.w;
+  firstItem.h = secondItem.h;
+
+  secondItem.x = firstRect.x;
+  secondItem.y = firstRect.y;
+  secondItem.w = firstRect.w;
+  secondItem.h = firstRect.h;
+
+  return normalizeEditorLayout(swappedLayout);
+};
+
 const getDefaultTileSpan = (itemCount) => {
   if (itemCount <= 4) return 6 * EDITOR_GRID_SNAP_FACTOR;
   if (itemCount <= 9) return 4 * EDITOR_GRID_SNAP_FACTOR;
@@ -314,12 +373,15 @@ const Grid = ({
     return [...trackData, ...Array.from(drumData.values())];
   }, [midiData]);
 
-  const stageRef = useRef(null);
-  const [stageWidth, setStageWidth] = useState(DEFAULT_STAGE_WIDTH);
   const initialEditorLayout = useMemo(
     () => buildEditorLayoutFromArrangement(processedData, initialArrangement),
     [processedData, initialArrangement],
   );
+  const stageRef = useRef(null);
+  const dragStartLayoutRef = useRef(null);
+  const ignoreNextLayoutChangeRef = useRef(false);
+  const committedLayoutRef = useRef(initialEditorLayout);
+  const [stageWidth, setStageWidth] = useState(DEFAULT_STAGE_WIDTH);
   const [editorLayout, setEditorLayout] = useState(initialEditorLayout);
   const gridHeight = useMemo(() => (stageWidth * 9) / 16, [stageWidth]);
   const rowHeight = useMemo(() => gridHeight / EDITOR_GRID_UNITS, [gridHeight]);
@@ -561,6 +623,7 @@ const Grid = ({
         ? currentLayout
         : initialEditorLayout,
     );
+    committedLayoutRef.current = initialEditorLayout;
   }, [initialEditorLayout]);
 
   useEffect(() => {
@@ -598,6 +661,11 @@ const Grid = ({
   ]);
 
   const updateEditorLayout = (nextLayout) => {
+    if (ignoreNextLayoutChangeRef.current) {
+      ignoreNextLayoutChangeRef.current = false;
+      return committedLayoutRef.current;
+    }
+
     const normalizedLayout = normalizeEditorLayout(nextLayout);
     setEditorLayout((currentLayout) =>
       areEditorLayoutsEqual(currentLayout, normalizedLayout)
@@ -607,14 +675,52 @@ const Grid = ({
     return normalizedLayout;
   };
 
+  const applyResolvedEditorLayout = (nextLayout) => {
+    const normalizedLayout = normalizeEditorLayout(nextLayout);
+    setEditorLayout((currentLayout) =>
+      areEditorLayoutsEqual(currentLayout, normalizedLayout)
+        ? currentLayout
+        : normalizedLayout,
+    );
+    committedLayoutRef.current = normalizedLayout;
+    onArrangementChange(buildArrangementFromEditorLayout(normalizedLayout));
+    return normalizedLayout;
+  };
+
   const commitEditorLayout = (nextLayout) => {
     const normalizedLayout = updateEditorLayout(nextLayout);
+    committedLayoutRef.current = normalizedLayout;
     onArrangementChange(buildArrangementFromEditorLayout(normalizedLayout));
+  };
+
+  const handleDragStart = (nextLayout) => {
+    dragStartLayoutRef.current = normalizeEditorLayout(nextLayout);
+  };
+
+  const handleDragStop = (nextLayout, oldItem, newItem) => {
+    const startingLayout =
+      dragStartLayoutRef.current || committedLayoutRef.current;
+    dragStartLayoutRef.current = null;
+
+    const swapTarget = findSwapTarget(startingLayout, newItem || oldItem);
+    if (swapTarget) {
+      ignoreNextLayoutChangeRef.current = true;
+      const swappedLayout = swapLayoutItems(
+        startingLayout,
+        (newItem || oldItem).i,
+        swapTarget.i,
+      );
+      applyResolvedEditorLayout(swappedLayout);
+      return;
+    }
+
+    commitEditorLayout(nextLayout);
   };
 
   const handleResetLayout = () => {
     const nextLayout = buildDefaultEditorLayout(processedData);
     setEditorLayout(nextLayout);
+    committedLayoutRef.current = nextLayout;
     onArrangementChange(buildArrangementFromEditorLayout(nextLayout));
   };
 
@@ -991,7 +1097,7 @@ const Grid = ({
         <div className='grid-layout-toolbar'>
           <span className='grid-layout-note'>
             Drag from the grip to move clips. Resize from the lower-right corner
-            to spotlight instruments.
+            to spotlight instruments. Drop onto another clip to swap positions.
           </span>
           <button className='grid-layout-reset' onClick={handleResetLayout}>
             Reset Layout
@@ -1030,12 +1136,13 @@ const Grid = ({
           draggableCancel='.cell-style-btn,.clip-style-popover,.clip-style-popover *,input,button,select,label'
           isDraggable={!isPreviewPlaying}
           isResizable={!isPreviewPlaying}
-          preventCollision
+          allowOverlap
           isBounded
           maxRows={EDITOR_GRID_UNITS}
           style={{ height: `${gridHeight}px` }}
           onLayoutChange={updateEditorLayout}
-          onDragStop={commitEditorLayout}
+          onDragStart={handleDragStart}
+          onDragStop={handleDragStop}
           onResizeStop={commitEditorLayout}
         >
           {processedData.map((item) => {

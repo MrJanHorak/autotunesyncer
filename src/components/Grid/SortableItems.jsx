@@ -537,6 +537,8 @@ export const GridClipItem = memo(function GridClipItem({
   const fadeDuration = Math.max(cs.fadeDuration ?? 0.15, 0.05);
   const videoVisible =
     !isPreviewPlaying || isInstrumentActive || cs.fadeEnabled;
+  const showClipBorder =
+    cs.borderWidth > 0 && (!isPreviewPlaying || isInstrumentActive);
   const previewLabelText = (cs.labelText || item.name || '').trim();
   const videoEffectFilter = [
     videoFilter !== 'none' ? videoFilter : '',
@@ -563,10 +565,9 @@ export const GridClipItem = memo(function GridClipItem({
     ...(fillParent
       ? { width: '100%', height: '100%' }
       : { aspectRatio: '16/9' }),
-    border:
-      cs.borderWidth > 0
-        ? `${cs.borderWidth}px solid ${cs.borderColor}`
-        : 'none',
+    border: showClipBorder
+      ? `${cs.borderWidth}px solid ${cs.borderColor}`
+      : 'none',
     boxSizing: 'border-box',
     position: 'relative',
     overflow: 'hidden',

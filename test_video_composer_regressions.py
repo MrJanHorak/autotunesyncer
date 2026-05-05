@@ -138,6 +138,44 @@ class VideoComposerRegressionTests(unittest.TestCase):
             filter_parts[0],
         )
 
+    def test_cell_style_border_is_gated_to_active_note_windows(self):
+        composer = self.make_composer(
+            clip_styles={
+                'track-0': {
+                    'borderWidth': 3,
+                    'borderColor': '#ff44aa',
+                }
+            }
+        )
+        filter_parts = []
+
+        composer._apply_cell_style_filters(
+            filter_parts,
+            '[0:v]',
+            '[v0]',
+            640,
+            360,
+            '0',
+            {
+                'notes': [
+                    {'chunk_time': 0.25, 'duration': 0.5},
+                ]
+            },
+            [],
+            chunk_duration=1.0,
+            beat_sync_stats={},
+        )
+
+        border_filters = [
+            part for part in filter_parts if 'drawbox=' in part and ':t=3' in part
+        ]
+
+        self.assertEqual(len(border_filters), 1)
+        self.assertIn(
+            ":enable='between(t,0.25,0.75)'",
+            border_filters[0],
+        )
+
     def test_grid_layout_aborts_when_segment_has_no_mapping(self):
         source_path = self.write_dummy_media('grid-segment.mp4')
         composer = self.make_composer(grid_positions={'0': {'row': 0, 'column': 0}})

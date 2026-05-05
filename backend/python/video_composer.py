@@ -4554,37 +4554,54 @@ class VideoComposer:
         logging.info(f"[style] cell={track_id!r} zoom-to-fill → {cell_w}x{cell_h}")
         current = f'[{next_label}]'
 
+        notes = cell_segment.get('notes', []) if cell_segment else []
+        active_note_windows = []
+        for note in notes:
+            t = float(note.get('chunk_time', note.get('time', 0)))
+            dur = float(note.get('duration', 0.3))
+            if t >= 0 and dur > 0:
+                active_note_windows.append((round(t, 3), round(t + dur, 3)))
+
+        active_note_windows.sort(key=lambda window: window[0])
+        merged_active_note_windows = []
+        for start, end in active_note_windows:
+            if (
+                merged_active_note_windows
+                and start <= merged_active_note_windows[-1][1] + 0.01
+            ):
+                merged_active_note_windows[-1] = (
+                    merged_active_note_windows[-1][0],
+                    max(merged_active_note_windows[-1][1], end),
+                )
+            else:
+                merged_active_note_windows.append((start, end))
+
+        if len(merged_active_note_windows) > 60:
+            merged_active_note_windows = merged_active_note_windows[:60]
+
+        active_note_enable_expr = (
+            '+'.join(
+                f'between(t,{start},{end})'
+                for start, end in merged_active_note_windows
+            )
+            if merged_active_note_windows
+            else None
+        )
+
         # ── 2. Color grade (note-active windows only) ────────────────────────
         # Apply colorGrade only when notes are playing so gap/background frames
         # show the composition background without per-clip colour tinting.
         grade_filter = self._get_color_grade_filter(color_grade)
-        if grade_filter:
-            _grade_notes = cell_segment.get('notes', []) if cell_segment else []
-            _grade_windows = []
-            for _n in _grade_notes:
-                _t = float(_n.get('chunk_time', _n.get('time', 0)))
-                _dur = float(_n.get('duration', 0.3))
-                if _t >= 0 and _dur > 0:
-                    _grade_windows.append((round(_t, 3), round(_t + _dur, 3)))
-            _grade_windows.sort()
-            _grade_merged: list = []
-            for _s, _e in _grade_windows:
-                if _grade_merged and _s <= _grade_merged[-1][1]:
-                    _grade_merged[-1] = (_grade_merged[-1][0], max(_grade_merged[-1][1], _e))
-                else:
-                    _grade_merged.append((_s, _e))
-            if len(_grade_merged) > 60:
-                _grade_merged = _grade_merged[:60]
-
-            if _grade_merged:
-                _grade_enable = '+'.join(f'between(t,{_s},{_e})' for _s, _e in _grade_merged)
-                # Split multi-filter chains (e.g. 'cyberpunk' = 'eq=...,colorchannelmixer=...')
-                _grade_sub_filters = [f.strip() for f in grade_filter.split(',')]
-                for _j, _sub in enumerate(_grade_sub_filters):
-                    _gl = f'v_gr_{_j}_{output_label[1:-1]}'
-                    filter_parts.append(f"{current}{_sub}:enable='{_grade_enable}'[{_gl}]")
-                    current = f'[{_gl}]'
-            # else: no active note windows — skip colorGrade (would only affect background)
+        if grade_filter and active_note_enable_expr:
+            # Split multi-filter chains (e.g. 'cyberpunk' = 'eq=...,colorchannelmixer=...')
+            _grade_sub_filters = [f.strip() for f in grade_filter.split(',')]
+            for _j, _sub in enumerate(_grade_sub_filters):
+                _gl = f'v_gr_{_j}_{output_label[1:-1]}'
+                filter_parts.append(
+                    f"{current}{_sub}:enable='{active_note_enable_expr}'[{_gl}]"
+                )
+                current = f'[{_gl}]'
+        # else: no active note windows — skip colorGrade (would only affect background)
 
         # ── 3. Beat flash (colored overlay) ─────────────────────────────────
         # ── 3a. Beat-sync track-cell modulation (export parity) ───────────
@@ -4622,7 +4639,6 @@ class VideoComposer:
                 'shake-lite': 0.9,
             }
 
-            notes = cell_segment.get('notes', []) if cell_segment else []
             windows = []
             velocity_samples = []
             for note in notes:
@@ -4689,7 +4705,6 @@ class VideoComposer:
         # dense drum chunks aren't truncated.  Cap at 60 merged windows.
         if beat_flash_enabled:
             beat_flash_color = style.get('beatFlashColor', '#ffffff')
-            notes = cell_segment.get('notes', []) if cell_segment else []
             FLASH_DUR = 0.10
             MERGE_GAP = 0.06
             MAX_WINDOWS = 60
@@ -4763,7 +4778,6 @@ class VideoComposer:
         # clips with sparse notes appear too dark.
         if fade_enabled and fade_duration > 0:
             fd = max(fade_duration, 0.05)
-            notes = cell_segment.get('notes', []) if cell_segment else []
             # Build note-active windows (onset → onset+duration)
             MAX_WINDOWS = 50
             windows = []
@@ -4800,7 +4814,7 @@ class VideoComposer:
             current = f'[{next_label}]'
 
         # ── 6. Border ────────────────────────────────────────────────────────
-        if border_width > 0:
+        if border_width > 0 and active_note_enable_expr:
             bc = self._hex_to_ffmpeg_color(border_color)
             next_label = f'v_brd_{output_label[1:-1]}'
             # When transparent bg is on, draw border around actual video content
@@ -4808,7 +4822,7 @@ class VideoComposer:
                               if transparent_bg else (0, 0, cell_w, cell_h)
             filter_parts.append(
                 f"{current}drawbox=x={bx}:y={by}:w={bw}:h={bh}"
-                f":color={bc}@1.0:t={border_width}[{next_label}]"
+                f":color={bc}@1.0:t={border_width}:enable='{active_note_enable_expr}'[{next_label}]"
             )
             current = f'[{next_label}]'
 
