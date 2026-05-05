@@ -115,6 +115,29 @@ class VideoComposerRegressionTests(unittest.TestCase):
             captured['cmd'],
         )
 
+    def test_cell_style_filters_use_lanczos_scaling(self):
+        composer = self.make_composer()
+        filter_parts = []
+
+        composer._apply_cell_style_filters(
+            filter_parts,
+            '[0:v]',
+            '[v0]',
+            640,
+            360,
+            'track-0',
+            {'notes': []},
+            [],
+            chunk_duration=1.0,
+            beat_sync_stats={},
+        )
+
+        self.assertTrue(filter_parts)
+        self.assertIn(
+            'scale=640:360:flags=lanczos:force_original_aspect_ratio=increase',
+            filter_parts[0],
+        )
+
     def test_grid_layout_aborts_when_segment_has_no_mapping(self):
         source_path = self.write_dummy_media('grid-segment.mp4')
         composer = self.make_composer(grid_positions={'0': {'row': 0, 'column': 0}})
@@ -135,6 +158,37 @@ class VideoComposerRegressionTests(unittest.TestCase):
 
         self.assertIsNone(result)
         composer._create_ffmpeg_grid_layout_fixed.assert_not_called()
+
+    def test_setup_track_configuration_preserves_v2_stage_and_spans(self):
+        composer = self.make_composer(
+            midi_data={
+                'tracks': [
+                    {
+                        'channel': 0,
+                        'instrument': {'name': 'Piano', 'family': 'piano'},
+                        'notes': [{'midi': 60, 'time': 0.0, 'duration': 0.5}],
+                    }
+                ],
+                'gridArrangement': {
+                    'version': 2,
+                    'columns': 12,
+                    'rows': 12,
+                    'items': {
+                        'track_0_piano': {'x': 2, 'y': 3, 'w': 4, 'h': 5},
+                    },
+                },
+            },
+        )
+        composer._analyze_midi_timing = lambda: None
+
+        composer._setup_track_configuration()
+
+        self.assertEqual(composer.grid_stage_cols, 12)
+        self.assertEqual(composer.grid_stage_rows, 12)
+        self.assertEqual(composer.grid_positions['track_0_piano']['column'], 2)
+        self.assertEqual(composer.grid_positions['track_0_piano']['row'], 3)
+        self.assertEqual(composer.grid_positions['track_0_piano']['w'], 4)
+        self.assertEqual(composer.grid_positions['track_0_piano']['h'], 5)
 
     def test_placeholder_chunk_uses_composition_background(self):
         composer = self.make_composer(composition_style={'backgroundColor': '#224466'})
@@ -207,7 +261,73 @@ class VideoComposerRegressionTests(unittest.TestCase):
 
         self.assertEqual(result, str(self.temp_dir / 'single-cell-grid.mp4'))
         self.assertIn('filter_script', captured)
-        self.assertIn('xstack=inputs=4', captured['filter_script'])
+        self.assertIn('overlay=x=0:y=0:eof_action=pass:format=auto', captured['filter_script'])
+
+    def test_span_aware_grid_layout_uses_stage_coordinates(self):
+        source_path = self.write_dummy_media('span-cell.mp4')
+        composer = self.make_composer(
+            composition_style={'backgroundColor': '#0F172A'},
+            grid_stage_rows=12,
+            grid_stage_cols=12,
+            grid_positions={
+                '0': {'row': 2, 'column': 1, 'w': 4, 'h': 3},
+            },
+        )
+        captured = {'cell_sizes': []}
+
+        composer._preprocess_extend_clip = lambda clip_path, _duration, _bg_hex: (clip_path, False)
+        composer._get_ffmpeg_decode_args = lambda: []
+        composer._resolve_segment_volume = lambda _segment: 0.0
+        composer._velocity_to_db = lambda _velocity: 0.0
+        composer._get_encoding_settings = lambda: ['-c:v', 'libx264', '-preset', 'fast', '-crf', '26']
+
+        def fake_apply_cell_style_filters(
+            filter_parts,
+            input_label,
+            output_label,
+            cell_w,
+            cell_h,
+            track_id,
+            *_args,
+            **_kwargs,
+        ):
+            captured['cell_sizes'].append((track_id, cell_w, cell_h))
+            filter_parts.append(f'{input_label}null{output_label}')
+
+        composer._apply_cell_style_filters = fake_apply_cell_style_filters
+        composer._apply_global_style_filters = (
+            lambda _filter_parts, video_label, _width, _height, _duration, audio_label, _temp_files:
+            (video_label, audio_label)
+        )
+
+        def fake_subprocess_run(cmd, capture_output=True, text=True):
+            captured['cmd'] = cmd
+            if '-filter_complex_script' in cmd:
+                script_path = Path(cmd[cmd.index('-filter_complex_script') + 1])
+                captured['filter_script'] = script_path.read_text(encoding='utf-8')
+            elif '-filter_complex' in cmd:
+                captured['filter_script'] = cmd[cmd.index('-filter_complex') + 1]
+            return SimpleNamespace(returncode=0, stderr='', stdout='')
+
+        with patch.dict(os.environ, {'ATS_ENABLE_SOLO_MODE': ''}, clear=False):
+            with patch.object(video_composer_module.subprocess, 'run', side_effect=fake_subprocess_run):
+                result = composer._create_ffmpeg_grid_layout_fixed(
+                    [
+                        {
+                            'track_id': '0',
+                            'track_name': 'Lead',
+                            'type': 'instrument',
+                            'video_path': str(source_path),
+                        }
+                    ],
+                    self.temp_dir / 'span-grid.mp4',
+                    4.0,
+                )
+
+        self.assertEqual(result, str(self.temp_dir / 'span-grid.mp4'))
+        self.assertEqual(captured['cell_sizes'], [('0', 640, 270)])
+        self.assertIn('color=0x0F172A:s=1920x1080:r=30:d=4.0', captured['cmd'])
+        self.assertIn('overlay=x=160:y=180:eof_action=pass:format=auto', captured['filter_script'])
 
     def test_legacy_midi_sync_wrapper_routes_to_create_composition(self):
         recorded = {}

@@ -1,7 +1,11 @@
 import express from 'express';
 import multer from 'multer';
 import { EventEmitter } from 'events';
-import { runPythonProcessor, runPythonProcessorDirect, preprocessVideo } from '../js/pythonBridge.js';
+import {
+  runPythonProcessor,
+  runPythonProcessorDirect,
+  preprocessVideo,
+} from '../js/pythonBridge.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -9,9 +13,15 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireProjectOwnership } from '../middleware/projectOwnership.js';
+import {
+  getGridArrangementOverflow,
+  hasGridArrangement,
+  normalizeGridArrangement,
+  toLegacyGridArrangement,
+} from '../../shared/gridLayout.js';
 
 // Bump when preprocessing algorithm or encoding settings change.
-const PREPROCESS_VERSION = 'v2'; // v2: zoom-to-fill (crop) instead of letterbox+pad
+const PREPROCESS_VERSION = 'v3'; // v3: stage-aware layout matching + sharper scaling/quality defaults
 
 const router = express.Router();
 
@@ -45,21 +55,28 @@ function updateJob(jobId, patch) {
 }
 // Never expire queued/processing jobs by age alone.
 const JOB_COMPLETED_TTL_MS = 15 * 60 * 1000;
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, job] of jobs) {
-    if (
-      ['done', 'failed'].includes(job.status) &&
-      job.completedAt &&
-      now - job.completedAt > JOB_COMPLETED_TTL_MS
-    ) {
-      if (job.outputPath) {
-        try { fs.unlinkSync(job.outputPath); } catch { /* already removed */ }
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [id, job] of jobs) {
+      if (
+        ['done', 'failed'].includes(job.status) &&
+        job.completedAt &&
+        now - job.completedAt > JOB_COMPLETED_TTL_MS
+      ) {
+        if (job.outputPath) {
+          try {
+            fs.unlinkSync(job.outputPath);
+          } catch {
+            /* already removed */
+          }
+        }
+        jobs.delete(id);
       }
-      jobs.delete(id);
     }
-  }
-}, 5 * 60 * 1000).unref();
+  },
+  5 * 60 * 1000,
+).unref();
 
 const isFiniteNumber = (value) => Number.isFinite(Number(value));
 
@@ -73,7 +90,65 @@ const normalizeVelocity = (value) => {
   return Math.max(1, Math.min(127, Math.round(v)));
 };
 
-const validateComposeInputs = (midiData, videoFiles) => {
+const toEvenDimension = (value) => {
+  const floored = Math.max(2, Math.floor(Number(value) || 0));
+  return floored & ~1;
+};
+
+const normalizeInstrumentName = (name) =>
+  String(name || '')
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+
+const buildGridLayoutLookup = (gridArrangement, tracks = []) => {
+  const lookup = new Map();
+
+  Object.entries(gridArrangement || {}).forEach(([layoutKey, position]) => {
+    if (!position || typeof position !== 'object') return;
+
+    const normalizedLayoutKey = String(layoutKey || '').toLowerCase();
+    const aliases = new Set([normalizedLayoutKey]);
+
+    const numericIndex = Number.parseInt(normalizedLayoutKey, 10);
+    if (
+      Number.isInteger(numericIndex) &&
+      numericIndex >= 0 &&
+      numericIndex < tracks.length
+    ) {
+      const track = tracks[numericIndex];
+      const instrumentKey = normalizeInstrumentName(track?.instrument?.name);
+      if (instrumentKey) aliases.add(instrumentKey);
+      if (instrumentKey) aliases.add(`track_${numericIndex}_${instrumentKey}`);
+    }
+
+    const numberedTrackMatch = normalizedLayoutKey.match(
+      /^track_(\d+)(?:_(.+))?$/,
+    );
+    if (numberedTrackMatch) {
+      const trackIndex = Number.parseInt(numberedTrackMatch[1], 10);
+      if (
+        Number.isInteger(trackIndex) &&
+        trackIndex >= 0 &&
+        trackIndex < tracks.length
+      ) {
+        const instrumentKey = normalizeInstrumentName(
+          tracks[trackIndex]?.instrument?.name,
+        );
+        aliases.add(String(trackIndex));
+        if (instrumentKey) aliases.add(instrumentKey);
+        if (instrumentKey) aliases.add(`track_${trackIndex}_${instrumentKey}`);
+      }
+    }
+
+    aliases.forEach((alias) => {
+      if (alias) lookup.set(alias, { key: layoutKey, position });
+    });
+  });
+
+  return lookup;
+};
+
+export const validateComposeInputs = (midiData, videoFiles) => {
   if (!midiData || typeof midiData !== 'object') {
     return 'Invalid MIDI payload';
   }
@@ -89,7 +164,13 @@ const validateComposeInputs = (midiData, videoFiles) => {
     return 'Grid arrangement is required';
   }
 
-  const positions = Object.values(midiData.gridArrangement);
+  if (!hasGridArrangement(midiData.gridArrangement)) {
+    return 'Grid arrangement is empty';
+  }
+
+  const positions = Object.values(
+    toLegacyGridArrangement(midiData.gridArrangement),
+  );
   if (positions.length === 0) {
     return 'Grid arrangement is empty';
   }
@@ -106,6 +187,11 @@ const validateComposeInputs = (midiData, videoFiles) => {
     return 'Grid arrangement contains invalid row/column positions';
   }
 
+  const overflow = getGridArrangementOverflow(midiData.gridArrangement);
+  if (overflow) {
+    return `Grid arrangement contains tiles outside the available ${overflow.columns}x${overflow.rows} layout space`;
+  }
+
   if (!Array.isArray(videoFiles) || videoFiles.length === 0) {
     return 'At least one video file is required';
   }
@@ -118,6 +204,62 @@ const validateComposeInputs = (midiData, videoFiles) => {
   }
 
   return null;
+};
+
+export const getResolvedVideoLayout = (
+  videoKey,
+  gridArrangement,
+  {
+    tracks = [],
+    totalWidth = 1920,
+    totalHeight = 1080,
+    gridColumns = 1,
+    gridRows = 1,
+  } = {},
+) => {
+  const safeColumns = Math.max(1, Number(gridColumns) || 1);
+  const safeRows = Math.max(1, Number(gridRows) || 1);
+  const baseCellWidth = toEvenDimension(totalWidth / safeColumns);
+  const baseCellHeight = toEvenDimension(totalHeight / safeRows);
+  const layoutLookup = buildGridLayoutLookup(gridArrangement, tracks);
+  const normalizedVideoKey = String(videoKey || '').toLowerCase();
+
+  const match =
+    layoutLookup.get(normalizedVideoKey) ||
+    [...layoutLookup.entries()].find(([alias]) => {
+      return (
+        alias === normalizedVideoKey ||
+        alias.endsWith(normalizedVideoKey) ||
+        alias.includes(normalizedVideoKey)
+      );
+    })?.[1] ||
+    null;
+
+  const position = match?.position || {};
+  const row = Math.max(0, Number(position.row) || 0);
+  const column = Math.max(0, Number(position.column) || 0);
+  const spanW = Math.max(1, Number(position.w) || 1);
+  const spanH = Math.max(1, Number(position.h) || 1);
+  const x = Math.max(0, column * baseCellWidth);
+  const y = Math.max(0, row * baseCellHeight);
+  const width = toEvenDimension(
+    column + spanW >= safeColumns ? totalWidth - x : baseCellWidth * spanW,
+  );
+  const height = toEvenDimension(
+    row + spanH >= safeRows ? totalHeight - y : baseCellHeight * spanH,
+  );
+
+  return {
+    x,
+    y,
+    width,
+    height,
+    row,
+    column,
+    spanW,
+    spanH,
+    matchKey: match?.key || null,
+  };
 };
 
 // Optimized upload configuration for video processing
@@ -185,19 +327,21 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     updateJob(jobId, { progress: 5 });
 
     // ── 2. Compute cell size ──────────────────────────────────────────────
-    const gridArrangement = midiData.gridArrangement;
-    const maxRow = Math.max(
-      ...Object.values(gridArrangement).map((pos) => pos.row),
-    );
-    const maxCol = Math.max(
-      ...Object.values(gridArrangement).map((pos) => pos.column),
-    );
+    const rawGridArrangement = midiData.gridArrangement;
+    const gridArrangement = toLegacyGridArrangement(rawGridArrangement);
+    const normalizedGridArrangement =
+      normalizeGridArrangement(rawGridArrangement);
     const totalWidth = isPreview ? 640 : 1920;
     const totalHeight = isPreview ? 360 : 1080;
-    const targetWidth = Math.floor(totalWidth / (maxCol + 1));
-    const targetHeight = Math.floor(totalHeight / (maxRow + 1));
+    const gridColumns = Math.max(
+      1,
+      Number(normalizedGridArrangement.columns) || 1,
+    );
+    const gridRows = Math.max(1, Number(normalizedGridArrangement.rows) || 1);
+    const baseCellWidth = toEvenDimension(totalWidth / gridColumns);
+    const baseCellHeight = toEvenDimension(totalHeight / gridRows);
     console.log(
-      `[Job ${jobId}] Cell size: ${targetWidth}x${targetHeight} (${isPreview ? 'PREVIEW' : 'PRODUCTION'})`,
+      `[Job ${jobId}] Layout stage: ${gridColumns}x${gridRows} units, base cell ${baseCellWidth}x${baseCellHeight} (${isPreview ? 'PREVIEW' : 'PRODUCTION'})`,
     );
 
     // ── 3. Preprocess videos ──────────────────────────────────────────────
@@ -207,8 +351,13 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
 
     // Bounded concurrency: 2 for GPU, 4 for CPU (overrideable via env)
     const gpuMode = process.env.ATS_GPU_MODE !== '0';
-    const defaultConcurrency = gpuMode ? 2 : Math.min(4, Math.max(1, os.cpus().length >> 1));
-    const concurrency = parseInt(process.env.ATS_PREPROCESS_CONCURRENCY || String(defaultConcurrency), 10);
+    const defaultConcurrency = gpuMode
+      ? 2
+      : Math.min(4, Math.max(1, os.cpus().length >> 1));
+    const concurrency = parseInt(
+      process.env.ATS_PREPROCESS_CONCURRENCY || String(defaultConcurrency),
+      10,
+    );
 
     await new Promise((resolve, reject) => {
       let active = 0;
@@ -217,7 +366,10 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
 
       function next() {
         if (rejected) return;
-        if (idx >= videoFiles.length && active === 0) { resolve(); return; }
+        if (idx >= videoFiles.length && active === 0) {
+          resolve();
+          return;
+        }
         while (active < concurrency && idx < videoFiles.length) {
           const file = videoFiles[idx++];
           active++;
@@ -225,7 +377,9 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
             .then(() => {
               active--;
               processedCount++;
-              updateJob(jobId, { progress: 5 + Math.round((processedCount / totalVideos) * 40) });
+              updateJob(jobId, {
+                progress: 5 + Math.round((processedCount / totalVideos) * 40),
+              });
               next();
             })
             .catch((err) => {
@@ -237,12 +391,21 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
 
       async function processOne(file) {
         const instrumentName = path.parse(file.originalname).name;
+        const layout = getResolvedVideoLayout(instrumentName, gridArrangement, {
+          tracks: midiData.tracks,
+          totalWidth,
+          totalHeight,
+          gridColumns,
+          gridRows,
+        });
         const originalPath = file.path;
         tempFiles.push(originalPath);
 
         const cacheKey = await new Promise((res, rej) => {
           const hash = crypto.createHash('sha1');
-          hash.update(`${PREPROCESS_VERSION}:${targetWidth}x${targetHeight}:${isPreview ? 'preview' : 'prod'}:`);
+          hash.update(
+            `${PREPROCESS_VERSION}:${layout.width}x${layout.height}:${isPreview ? 'preview' : 'prod'}:`,
+          );
           const stream = fs.createReadStream(originalPath);
           stream.on('data', (chunk) => hash.update(chunk));
           stream.on('end', () => res(hash.digest('hex').slice(0, 16)));
@@ -260,8 +423,18 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
           await preprocessVideo(
             originalPath,
             processedPath,
-            `${targetWidth}x${targetHeight}`,
-            { performanceMode: true, quality: isPreview ? 'low' : 'high', memoryLimit: 4 },
+            `${layout.width}x${layout.height}`,
+            {
+              performanceMode: true,
+              quality: isPreview ? 'low' : 'high',
+              memoryLimit: 4,
+            },
+          );
+        }
+
+        if (layout.matchKey) {
+          console.log(
+            `[Job ${jobId}] Preprocess layout ${instrumentName} -> ${layout.matchKey} at (${layout.column},${layout.row}) span ${layout.spanW}x${layout.spanH} => ${layout.width}x${layout.height}`,
           );
         }
 
@@ -269,11 +442,20 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
           path: path.resolve(processedPath),
           isDrum: instrumentName.toLowerCase().includes('drum'),
           notes: [],
-          layout: { x: 0, y: 0, width: targetWidth, height: targetHeight },
+          layout: {
+            x: layout.x,
+            y: layout.y,
+            width: layout.width,
+            height: layout.height,
+          },
         };
 
         // Clean up raw upload immediately after this task finishes
-        try { fs.unlinkSync(originalPath); } catch { /* ignore */ }
+        try {
+          fs.unlinkSync(originalPath);
+        } catch {
+          /* ignore */
+        }
         const idx2 = tempFiles.indexOf(originalPath);
         if (idx2 !== -1) tempFiles.splice(idx2, 1);
       }
@@ -282,9 +464,6 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     });
 
     // ── 4. Map MIDI notes to videos ───────────────────────────────────────
-    const normalizeInstrumentName = (name) =>
-      name.toLowerCase().replace(/\s+/g, '_');
-
     const isDrumTrack = (track) =>
       track.channel === 9 ||
       track.instrument?.name?.toLowerCase().includes('drum') ||
@@ -292,27 +471,69 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
 
     const getDrumName = (midiNote) => {
       const DRUM_NOTES = {
-        27: 'Laser', 28: 'Whip', 29: 'Scratch Push', 30: 'Scratch Pull',
-        31: 'Stick Click', 32: 'Metronome Click', 34: 'Metronome Bell',
-        35: 'Bass Drum', 36: 'Kick Drum', 37: 'Snare Cross Stick',
-        38: 'Snare Drum', 39: 'Hand Clap', 40: 'Electric Snare Drum',
-        41: 'Floor Tom 2', 42: 'Hi-Hat Closed', 43: 'Floor Tom 1',
-        44: 'Hi-Hat Foot', 45: 'Low Tom', 46: 'Hi-Hat Open',
-        47: 'Low-Mid Tom', 48: 'High-Mid Tom', 49: 'Crash Cymbal',
-        50: 'High Tom', 51: 'Ride Cymbal', 52: 'China Cymbal',
-        53: 'Ride Bell', 54: 'Tambourine', 55: 'Splash cymbal',
-        56: 'Cowbell', 57: 'Crash Cymbal 2', 58: 'Vibraslap',
-        59: 'Ride Cymbal 2', 60: 'High Bongo', 61: 'Low Bongo',
-        62: 'Conga Dead Stroke', 63: 'Conga', 64: 'Tumba',
-        65: 'High Timbale', 66: 'Low Timbale', 67: 'High Agogo',
-        68: 'Low Agogo', 69: 'Cabasa', 70: 'Maracas',
-        71: 'Whistle Short', 72: 'Whistle Long', 73: 'Guiro Short',
-        74: 'Guiro Long', 75: 'Claves', 76: 'High Woodblock',
-        77: 'Low Woodblock', 78: 'Cuica High', 79: 'Cuica Low',
-        80: 'Triangle Mute', 81: 'Triangle Open', 82: 'Shaker',
-        83: 'Sleigh Bell', 84: 'Bell Tree', 85: 'Castanets',
-        86: 'Surdu Dead Stroke', 87: 'Surdu', 91: 'Snare Drum Rod',
-        92: 'Ocean Drum', 93: 'Snare Drum Brush',
+        27: 'Laser',
+        28: 'Whip',
+        29: 'Scratch Push',
+        30: 'Scratch Pull',
+        31: 'Stick Click',
+        32: 'Metronome Click',
+        34: 'Metronome Bell',
+        35: 'Bass Drum',
+        36: 'Kick Drum',
+        37: 'Snare Cross Stick',
+        38: 'Snare Drum',
+        39: 'Hand Clap',
+        40: 'Electric Snare Drum',
+        41: 'Floor Tom 2',
+        42: 'Hi-Hat Closed',
+        43: 'Floor Tom 1',
+        44: 'Hi-Hat Foot',
+        45: 'Low Tom',
+        46: 'Hi-Hat Open',
+        47: 'Low-Mid Tom',
+        48: 'High-Mid Tom',
+        49: 'Crash Cymbal',
+        50: 'High Tom',
+        51: 'Ride Cymbal',
+        52: 'China Cymbal',
+        53: 'Ride Bell',
+        54: 'Tambourine',
+        55: 'Splash cymbal',
+        56: 'Cowbell',
+        57: 'Crash Cymbal 2',
+        58: 'Vibraslap',
+        59: 'Ride Cymbal 2',
+        60: 'High Bongo',
+        61: 'Low Bongo',
+        62: 'Conga Dead Stroke',
+        63: 'Conga',
+        64: 'Tumba',
+        65: 'High Timbale',
+        66: 'Low Timbale',
+        67: 'High Agogo',
+        68: 'Low Agogo',
+        69: 'Cabasa',
+        70: 'Maracas',
+        71: 'Whistle Short',
+        72: 'Whistle Long',
+        73: 'Guiro Short',
+        74: 'Guiro Long',
+        75: 'Claves',
+        76: 'High Woodblock',
+        77: 'Low Woodblock',
+        78: 'Cuica High',
+        79: 'Cuica Low',
+        80: 'Triangle Mute',
+        81: 'Triangle Open',
+        82: 'Shaker',
+        83: 'Sleigh Bell',
+        84: 'Bell Tree',
+        85: 'Castanets',
+        86: 'Surdu Dead Stroke',
+        87: 'Surdu',
+        91: 'Snare Drum Rod',
+        92: 'Ocean Drum',
+        93: 'Snare Drum Brush',
       };
       return DRUM_NOTES[midiNote] || `Drum_${midiNote}`;
     };
@@ -377,7 +598,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     const config = {
       tracks: midiData.tracks,
       header: midiData.header,
-      gridArrangement: midiData.gridArrangement,
+      gridArrangement: rawGridArrangement,
       trackVolumes: midiData.trackVolumes || {},
       compositionStyle: midiData.compositionStyle || {},
       clipStyles: midiData.clipStyles || {},
@@ -392,17 +613,18 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     });
 
     // ── 6. Atomic rename to permanent location ────────────────────────────
-    permanentOutputPath = path.join(
-      jobUploadsDir,
-      `final_output_${jobId}.mp4`,
-    );
+    permanentOutputPath = path.join(jobUploadsDir, `final_output_${jobId}.mp4`);
     if (result.outputPath && fs.existsSync(result.outputPath)) {
       try {
         fs.renameSync(result.outputPath, permanentOutputPath);
       } catch (renameErr) {
         // Cross-device fallback (outputDir on different partition than tmpdir)
         fs.copyFileSync(result.outputPath, permanentOutputPath);
-        try { fs.unlinkSync(result.outputPath); } catch { /* ignore */ }
+        try {
+          fs.unlinkSync(result.outputPath);
+        } catch {
+          /* ignore */
+        }
       }
     }
     if (!fs.existsSync(permanentOutputPath)) {
@@ -420,13 +642,26 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
     console.error(`[Job ${jobId}] ❌ Failed:`, err.message);
     // Remove any partial output so a failed job never serves a broken file
     if (permanentOutputPath) {
-      try { if (fs.existsSync(permanentOutputPath)) fs.unlinkSync(permanentOutputPath); } catch { /* ignore */ }
+      try {
+        if (fs.existsSync(permanentOutputPath))
+          fs.unlinkSync(permanentOutputPath);
+      } catch {
+        /* ignore */
+      }
     }
-    updateJob(jobId, { status: 'failed', error: err.message, completedAt: Date.now() });
+    updateJob(jobId, {
+      status: 'failed',
+      error: err.message,
+      completedAt: Date.now(),
+    });
   } finally {
     // Clean up any remaining temp files
     for (const f of tempFiles) {
-      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch { /* ignore */ }
+      try {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
@@ -441,7 +676,10 @@ router.post(
       if (err instanceof multer.MulterError) {
         console.error('Upload error:', err);
         if (err.code === 'LIMIT_FILE_SIZE') {
-          return res.status(413).json({ error: 'File too large', details: 'Maximum file size is 1GB per file' });
+          return res.status(413).json({
+            error: 'File too large',
+            details: 'Maximum file size is 1GB per file',
+          });
         }
         return res.status(400).json({ error: `Upload error: ${err.message}` });
       } else if (err) {
@@ -480,13 +718,19 @@ router.post(
 
     res.status(202).json({ jobId });
 
-    void runCompositionJob(jobId, req.files, isPreview, jobUploadsDir).catch((err) => {
-      console.error(`[Job ${jobId}] Unhandled error:`, err);
-      const job = jobs.get(jobId);
-      if (job && job.status !== 'failed') {
-        updateJob(jobId, { status: 'failed', error: err.message, completedAt: Date.now() });
-      }
-    });
+    void runCompositionJob(jobId, req.files, isPreview, jobUploadsDir).catch(
+      (err) => {
+        console.error(`[Job ${jobId}] Unhandled error:`, err);
+        const job = jobs.get(jobId);
+        if (job && job.status !== 'failed') {
+          updateJob(jobId, {
+            status: 'failed',
+            error: err.message,
+            completedAt: Date.now(),
+          });
+        }
+      },
+    );
   },
 );
 
@@ -504,7 +748,8 @@ router.get('/progress/:jobId', authenticateToken, (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering
   res.flushHeaders();
 
-  const send = (evt, data) => res.write(`event: ${evt}\ndata: ${JSON.stringify(data)}\n\n`);
+  const send = (evt, data) =>
+    res.write(`event: ${evt}\ndata: ${JSON.stringify(data)}\n\n`);
 
   // Send current state immediately
   const current = jobs.get(jobId);
@@ -515,7 +760,11 @@ router.get('/progress/:jobId', authenticateToken, (req, res) => {
   }
 
   const onUpdate = (j) => {
-    send('progress', { status: j.status, progress: j.progress || 0, error: j.error || null });
+    send('progress', {
+      status: j.status,
+      progress: j.progress || 0,
+      error: j.error || null,
+    });
     if (j.status === 'done' || j.status === 'failed') cleanup();
   };
 
@@ -539,7 +788,11 @@ router.get('/status/:jobId', authenticateToken, (req, res) => {
   if (job.userId && job.userId !== req.user.id) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  res.json({ status: job.status, progress: job.progress, error: job.error || null });
+  res.json({
+    status: job.status,
+    progress: job.progress,
+    error: job.error || null,
+  });
 });
 
 // GET /result/:jobId — download the finished video (auth required)
@@ -549,25 +802,39 @@ router.get('/result/:jobId', authenticateToken, (req, res) => {
   if (job.userId && job.userId !== req.user.id) {
     return res.status(403).json({ error: 'Access denied' });
   }
-  if (job.status === 'failed') return res.status(422).json({ error: job.error || 'Composition failed' });
-  if (job.status !== 'done') return res.status(409).json({ status: job.status, message: 'Job not finished yet' });
+  if (job.status === 'failed')
+    return res.status(422).json({ error: job.error || 'Composition failed' });
+  if (job.status !== 'done')
+    return res
+      .status(409)
+      .json({ status: job.status, message: 'Job not finished yet' });
   if (!job.outputPath || !fs.existsSync(job.outputPath)) {
-    return res.status(410).json({ error: 'Output file is no longer available' });
+    return res
+      .status(410)
+      .json({ error: 'Output file is no longer available' });
   }
 
   const stats = fs.statSync(job.outputPath);
   res.setHeader('Content-Type', 'video/mp4');
   res.setHeader('Content-Length', stats.size);
-  res.setHeader('Content-Disposition', 'attachment; filename="composition.mp4"');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="composition.mp4"',
+  );
 
   const readStream = fs.createReadStream(job.outputPath);
   readStream.on('error', (streamErr) => {
     console.error('Stream error:', streamErr);
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to stream video' });
+    if (!res.headersSent)
+      res.status(500).json({ error: 'Failed to stream video' });
   });
   // Clean up only after the response is fully sent (res 'finish')
   res.on('finish', () => {
-    try { fs.unlinkSync(job.outputPath); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(job.outputPath);
+    } catch {
+      /* ignore */
+    }
     jobs.delete(req.params.jobId);
   });
   readStream.pipe(res);

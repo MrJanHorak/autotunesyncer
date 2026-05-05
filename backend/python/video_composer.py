@@ -348,9 +348,9 @@ class VideoComposer:
             return {
                 'resolution': '1920x1080',
                 'preset': 'fast',       # CPU: fast, GPU: p4
-                'crf': '26',            # Slightly lower quality for intermediate chunks; final pass re-encodes at 28
+                'crf': '23',            # Keep chunk detail higher so enlarged tiles stay crisp after final encode
                 'audio_bitrate': '192k',
-                'video_bitrate': '3M',  # Reduced from 8M — GPU hard cap; CPU uses CRF only
+                'video_bitrate': '5M',  # Used by non-CRF encoders; moderate bump helps larger tiles retain detail
                 'scale_filter': 'scale=1920:1080'
             }
 
@@ -361,7 +361,7 @@ class VideoComposer:
         if self.ffmpeg_hwaccel == 'cuda':
             # NVENC settings with safer, more compatible options
             # Preset: p1 (fastest) to p7 (highest quality) — use p2-p4 for balanced speed/quality
-            _prod_preset = os.environ.get('ATS_NVENC_PRESET', 'p2')
+            _prod_preset = os.environ.get('ATS_NVENC_PRESET', 'p4')
             _prod_bitrate = os.environ.get('ATS_NVENC_BITRATE', '')
             _prod_maxrate = os.environ.get('ATS_NVENC_MAXRATE', '')
 
@@ -1578,6 +1578,13 @@ class VideoComposer:
         try:
             grid_arrangement = self.midi_data.get('gridArrangement', {})
             logging.info(f"Grid arrangement received: {grid_arrangement}")
+
+            def parse_grid_int(value, fallback=None, minimum=0):
+                try:
+                    parsed = int(round(float(value)))
+                except (TypeError, ValueError):
+                    return fallback
+                return max(minimum, parsed)
             
             if not grid_arrangement:
                 logging.warning("No grid arrangement provided, creating default arrangement")
@@ -1606,13 +1613,21 @@ class VideoComposer:
             
             # Store positions and validate
             self.grid_positions = {}
+            self.grid_stage_rows = 1
+            self.grid_stage_cols = 1
             
             # Handle different grid arrangement formats
             if 'layout' in grid_arrangement:
                 # New format with layout matrix
                 layout = grid_arrangement['layout']
-                rows = grid_arrangement.get('rows', len(layout))
-                cols = grid_arrangement.get('cols', len(layout[0]) if layout else 1)
+                rows = parse_grid_int(grid_arrangement.get('rows', len(layout)), max(1, len(layout)), 1)
+                cols = parse_grid_int(
+                    grid_arrangement.get('cols', len(layout[0]) if layout else 1),
+                    max(1, len(layout[0]) if layout else 1),
+                    1,
+                )
+                self.grid_stage_rows = rows
+                self.grid_stage_cols = cols
                 
                 logging.info(f"Processing layout matrix: {rows}x{cols}")
                 
@@ -1622,11 +1637,46 @@ class VideoComposer:
                             track_id = str(cell.get('track', f"{cell['instrument']}"))
                             self.grid_positions[track_id] = {
                                 'row': row_idx,
-                                'column': col_idx
+                                'column': col_idx,
+                                'w': parse_grid_int(cell.get('w', 1), 1, 1),
+                                'h': parse_grid_int(cell.get('h', 1), 1, 1),
                             }
                             logging.info(f"Mapped track {track_id} ({cell['instrument']}) to position row={row_idx}, col={col_idx}")
+            elif isinstance(grid_arrangement.get('items'), dict):
+                items = grid_arrangement.get('items', {})
+                self.grid_stage_rows = parse_grid_int(grid_arrangement.get('rows'), 1, 1)
+                self.grid_stage_cols = parse_grid_int(grid_arrangement.get('columns'), 1, 1)
+
+                logging.info(
+                    f"Processing span-aware grid items: {self.grid_stage_rows}x{self.grid_stage_cols}"
+                )
+
+                for track_id, pos_data in items.items():
+                    if not isinstance(pos_data, dict):
+                        logging.error(f"Invalid v2 position data for {track_id}: {pos_data}")
+                        continue
+
+                    row = parse_grid_int(pos_data.get('y', pos_data.get('row')), None, 0)
+                    column = parse_grid_int(pos_data.get('x', pos_data.get('column')), None, 0)
+                    if row is None or column is None:
+                        logging.error(f"Invalid v2 coordinates for {track_id}: {pos_data}")
+                        continue
+
+                    width = parse_grid_int(pos_data.get('w', 1), 1, 1)
+                    height = parse_grid_int(pos_data.get('h', 1), 1, 1)
+                    self.grid_positions[str(track_id)] = {
+                        'row': row,
+                        'column': column,
+                        'w': width,
+                        'h': height,
+                    }
+                    logging.info(
+                        f"Mapped v2 track {track_id} to row={row}, col={column}, span={width}x{height}"
+                    )
             else:
                 # Original format with direct track ID mappings
+                max_row_end = 1
+                max_col_end = 1
                 for track_id, pos_data in grid_arrangement.items():
                     if isinstance(pos_data, dict):
                         # Validate position data - check for required keys
@@ -1634,13 +1684,35 @@ class VideoComposer:
                         if not all(k in pos_data for k in required_keys):
                             logging.error(f"Invalid position data for {track_id}: {pos_data}")
                             continue
+
+                        row = parse_grid_int(pos_data.get('row'), None, 0)
+                        column = parse_grid_int(pos_data.get('column'), None, 0)
+                        if row is None or column is None:
+                            logging.error(f"Invalid position data for {track_id}: {pos_data}")
+                            continue
+
+                        width = parse_grid_int(pos_data.get('w', 1), 1, 1)
+                        height = parse_grid_int(pos_data.get('h', 1), 1, 1)
                         
                         # Store position based on track index
                         self.grid_positions[track_id] = {
-                            'row': int(pos_data['row']),
-                            'column': int(pos_data['column'])
+                            'row': row,
+                            'column': column,
+                            'w': width,
+                            'h': height,
                         }
-                        logging.info(f"Mapped track {track_id} to position row={pos_data['row']}, col={pos_data['column']}")
+                        max_row_end = max(max_row_end, row + height)
+                        max_col_end = max(max_col_end, column + width)
+                        logging.info(
+                            f"Mapped track {track_id} to position row={row}, col={column}, span={width}x{height}"
+                        )
+
+                self.grid_stage_rows = max(1, max_row_end)
+                self.grid_stage_cols = max(1, max_col_end)
+
+            logging.info(
+                f"Grid stage contract: {self.grid_stage_rows} rows x {self.grid_stage_cols} columns"
+            )
 
             # Add this call to analyze MIDI timing data
             self._analyze_midi_timing()
@@ -1648,6 +1720,113 @@ class VideoComposer:
         except Exception as e:
             logging.error(f"Error setting up track configuration: {e}")
             raise
+
+    def _get_grid_stage_dimensions(self):
+        grid_rows = int(getattr(self, 'grid_stage_rows', 0) or 0)
+        grid_cols = int(getattr(self, 'grid_stage_cols', 0) or 0)
+
+        if grid_rows > 0 and grid_cols > 0:
+            return grid_rows, grid_cols
+
+        max_row_end = max(
+            (
+                int(pos.get('row', 0)) + max(1, int(pos.get('h', 1) or 1))
+                for pos in self.grid_positions.values()
+            ),
+            default=1,
+        )
+        max_col_end = max(
+            (
+                int(pos.get('column', 0)) + max(1, int(pos.get('w', 1) or 1))
+                for pos in self.grid_positions.values()
+            ),
+            default=1,
+        )
+        return max(1, max_row_end), max(1, max_col_end)
+
+    def _build_grid_render_slots(self, track_segments, target_width, target_height):
+        def coerce_int(value, fallback, minimum=0):
+            try:
+                parsed = int(round(float(value)))
+            except (TypeError, ValueError):
+                return fallback
+            return max(minimum, parsed)
+
+        grid_rows, grid_cols = self._get_grid_stage_dimensions()
+        unit_width = max(2, (target_width // grid_cols) & ~1)
+        unit_height = max(2, (target_height // grid_rows) & ~1)
+        slots = []
+        occupied_cells = {}
+
+        for segment in track_segments:
+            track_id = segment.get('track_id')
+            position = self.grid_positions.get(track_id, {})
+            row = coerce_int(segment.get('grid_row', position.get('row')), None, 0)
+            column = coerce_int(segment.get('grid_col', position.get('column')), None, 0)
+            if row is None or column is None:
+                logging.warning(
+                    f"   ⚠️ No resolved grid position found for track_id: {track_id}. It will be excluded."
+                )
+                continue
+
+            span_w = coerce_int(segment.get('grid_w', position.get('w', 1)), 1, 1)
+            span_h = coerce_int(segment.get('grid_h', position.get('h', 1)), 1, 1)
+
+            if row + span_h > grid_rows or column + span_w > grid_cols:
+                logging.warning(
+                    f"   ❌ Track {track_id} span ({row}, {column}, {span_w}, {span_h}) is out of bounds for grid {grid_rows}x{grid_cols}."
+                )
+                continue
+
+            overlap_owner = None
+            for r in range(row, row + span_h):
+                for c in range(column, column + span_w):
+                    owner = occupied_cells.get((r, c))
+                    if owner and owner != track_id:
+                        overlap_owner = owner
+                        break
+                if overlap_owner:
+                    break
+
+            if overlap_owner:
+                logging.warning(
+                    f"   ⚠️ Track {track_id} overlaps grid cells already assigned to {overlap_owner}. Later overlay order will win."
+                )
+
+            for r in range(row, row + span_h):
+                for c in range(column, column + span_w):
+                    occupied_cells[(r, c)] = track_id
+
+            pixel_x = column * unit_width
+            pixel_y = row * unit_height
+            pixel_width = (
+                target_width - pixel_x if column + span_w >= grid_cols else unit_width * span_w
+            )
+            pixel_height = (
+                target_height - pixel_y if row + span_h >= grid_rows else unit_height * span_h
+            )
+
+            slots.append({
+                'segment': segment,
+                'track_id': track_id,
+                'row': row,
+                'column': column,
+                'span_w': span_w,
+                'span_h': span_h,
+                'pixel_x': pixel_x,
+                'pixel_y': pixel_y,
+                'pixel_width': max(2, int(pixel_width) & ~1),
+                'pixel_height': max(2, int(pixel_height) & ~1),
+            })
+
+        slots.sort(key=lambda slot: (slot['row'], slot['column'], str(slot.get('track_id', ''))))
+        return {
+            'grid_rows': grid_rows,
+            'grid_cols': grid_cols,
+            'unit_width': unit_width,
+            'unit_height': unit_height,
+            'slots': slots,
+        }
 
     def encode_video(cmd):
         logging.info(f"Encoding video with command: {' '.join(cmd)}")
@@ -2893,12 +3072,12 @@ class VideoComposer:
             def _build_cmd(use_gpu: bool) -> list:
                 if use_gpu:
                     _final_preset = os.environ.get('ATS_NVENC_FINAL_PRESET', 'p5')
-                    _final_bitrate = os.environ.get('ATS_NVENC_FINAL_BITRATE', '2M')
-                    _final_maxrate = os.environ.get('ATS_NVENC_FINAL_MAXRATE', '4M')
+                    _final_bitrate = os.environ.get('ATS_NVENC_FINAL_BITRATE', '6M')
+                    _final_maxrate = os.environ.get('ATS_NVENC_FINAL_MAXRATE', '12M')
                     video_enc = ['-c:v', 'h264_nvenc', '-preset', _final_preset,
                                  '-b:v', _final_bitrate, '-maxrate', _final_maxrate]
                 else:
-                    video_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '28']
+                    video_enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '23']
                 cmd = ['ffmpeg', '-y', '-i', input_path]
                 if overlay_chain:
                     if fc_script_path:
@@ -4053,8 +4232,13 @@ class VideoComposer:
                 if position:
                     segment['grid_row'] = position.get('row', 0)
                     segment['grid_col'] = position.get('column', 0)
+                    segment['grid_w'] = position.get('w', 1)
+                    segment['grid_h'] = position.get('h', 1)
                     positioned_segments.append(segment)
-                    logging.info(f"      ✅ Positioned at grid ({position.get('row')}, {position.get('column')}) using {strategy_used}")
+                    logging.info(
+                        f"      ✅ Positioned at grid ({position.get('row')}, {position.get('column')}) "
+                        f"span {position.get('w', 1)}x{position.get('h', 1)} using {strategy_used}"
+                    )
                 else:
                     unmapped_segments.append({
                         'track_id': track_id,
@@ -4364,7 +4548,7 @@ class VideoComposer:
 
         next_label = f'v_pad_{output_label[1:-1]}'
         filter_parts.append(
-            f"{current}scale={cell_w}:{cell_h}:force_original_aspect_ratio=increase,"
+            f"{current}scale={cell_w}:{cell_h}:flags=lanczos:force_original_aspect_ratio=increase,"
             f"crop={cell_w}:{cell_h}[{next_label}]"
         )
         logging.info(f"[style] cell={track_id!r} zoom-to-fill → {cell_w}x{cell_h}")
@@ -5822,57 +6006,27 @@ class VideoComposer:
                 )
             
             logging.info(f"📐 Calculating grid dimensions...")
-            
-            # Determine grid dimensions from the master grid_positions
-            max_row = max((pos.get('row', 0) for pos in self.grid_positions.values()), default=0)
-            max_col = max((pos.get('column', 0) for pos in self.grid_positions.values()), default=0)
-            grid_rows = max_row + 1
-            grid_cols = max_col + 1
-            
-            logging.info(f"   Grid dimensions: {grid_rows} rows x {grid_cols} columns")
-            
-            if grid_rows == 0 or grid_cols == 0:
-                logging.error("❌ Grid dimensions are zero, cannot create layout.")
-                return None
 
-            # Use render config resolution for cell calculations
+            # Use render config resolution for stage-aware tile calculations
             target_width, target_height = map(int, self.render_config['resolution'].split('x'))
-            # Ensure even dimensions — libx264 requires width/height divisible by 2
-            cell_width = (target_width // grid_cols) & ~1
-            cell_height = (target_height // grid_rows) & ~1
+            layout_plan = self._build_grid_render_slots(track_segments, target_width, target_height)
+            grid_rows = layout_plan['grid_rows']
+            grid_cols = layout_plan['grid_cols']
+            cell_width = layout_plan['unit_width']
+            cell_height = layout_plan['unit_height']
+            render_slots = layout_plan['slots']
             
             logging.info(f"   Target resolution: {target_width}x{target_height} ({'PREVIEW' if self.preview_mode else 'PRODUCTION'})")
-            logging.info(f"   Cell dimensions: {cell_width}x{cell_height} pixels")
+            logging.info(f"   Base cell dimensions: {cell_width}x{cell_height} pixels")
+            logging.info(f"📊 Grid placement summary: {len(render_slots)}/{len(track_segments)} segments placed")
 
-            # Create a placeholder for each cell in the grid
-            grid_cells = [[None for _ in range(grid_cols)] for _ in range(grid_rows)]
-            
-            logging.info(f"🗂️ Placing segments in grid cells...")
-
-            # Place each segment into its correct cell using its track_id
-            placed_count = 0
-            for segment in track_segments:
-                track_id = segment.get('track_id')
-                segment_type = segment.get('type', 'unknown')
-                
-                if track_id in self.grid_positions:
-                    pos = self.grid_positions[track_id]
-                    row, col = pos.get('row'), pos.get('column')
-                    if row < grid_rows and col < grid_cols:
-                        grid_cells[row][col] = segment
-                        placed_count += 1
-                        logging.info(f"   ✅ Placed {segment_type} {track_id} in grid cell ({row}, {col})")
-                    else:
-                        logging.warning(f"   ❌ Track {track_id} position ({row}, {col}) is out of bounds for grid {grid_rows}x{grid_cols}.")
-                else:
-                    logging.warning(f"   ⚠️ No grid position found for track_id: {track_id}. It will be excluded.")
-            
-            logging.info(f"📊 Grid placement summary: {placed_count}/{len(track_segments)} segments placed")
+            if not render_slots:
+                logging.error("❌ No valid render slots resolved for grid layout.")
+                return None
 
             # Build the FFmpeg command from the populated grid
             cmd = ['ffmpeg', '-y']
             filter_parts = []
-            video_inputs_for_stack = []
             audio_inputs_for_mix = []
             input_idx = 0
             style_temp_files = []  # Temp files created during styling (cleaned up after ffmpeg)
@@ -5887,100 +6041,111 @@ class VideoComposer:
             bg_hex = cs.get('backgroundColor', '#0a0a0f')
             bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
 
-            # Add a placeholder input for empty cells using background color
-            cmd.extend(['-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s={cell_width}x{cell_height}:r=30:d={duration}'])
-            black_video_input_idx = input_idx
+            # Add a full-canvas background input so tiles can be overlaid at arbitrary spans.
+            cmd.extend(['-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s={target_width}x{target_height}:r=30:d={duration}'])
+            canvas_video_input_idx = input_idx
             input_idx += 1
             cmd.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}'])
             silent_audio_input_idx = input_idx
             input_idx += 1
+            filter_parts.append(f"[{canvas_video_input_idx}:v]null[grid_base]")
             
             logging.info(f"🎛️ Building FFmpeg filter complex...")
-            logging.info(f"   Added bg placeholder ({bg_hex}, input {black_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
+            logging.info(f"   Added canvas background ({bg_hex}, input {canvas_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
 
             # ── Pre-process: extend short clips to chunk_duration ────────────
-            # xstack fills terminated streams with BLACK (the fill= option only
-            # handles unassigned grid positions, not streams that end early).
-            # Solution: for every clip shorter than chunk_duration, run a standalone
-            # FFmpeg to append background-colored frames before building the main
-            # filter_complex. This guarantees xstack never sees a terminated stream.
+            # Even with overlay composition, pre-extending clips preserves clip-specific
+            # idle backgrounds and keeps note-triggered cells visually stable across the
+            # full chunk duration.
             preprocess_temp_files = []
             extended_clips = {}  # original_path -> extended_path
 
-            for r in range(grid_rows):
-                for c in range(grid_cols):
-                    seg = grid_cells[r][c]
-                    if not seg:
-                        continue
-                    orig = seg.get('video_path', '')
-                    if not orig or not os.path.exists(orig) or orig in extended_clips:
-                        continue
-                    track_id = seg.get('track_id', f'{r}_{c}')
-                    clip_style, _, matched_key = self._resolve_clip_style(track_id)
-                    clip_bg_hex = bg_hex
-                    if (
-                        clip_style.get('bgColorEnabled')
-                        and clip_style.get('bgColor')
-                        and not clip_style.get('transparentBg')
-                    ):
-                        clip_bg_hex = clip_style.get('bgColor')
-                        logging.info(
-                            f"[style] cell={track_id!r} extending idle frames with {clip_bg_hex} "
-                            f"({matched_key or 'direct track id'})"
-                        )
-                    ext, is_temp = self._preprocess_extend_clip(orig, duration, clip_bg_hex)
-                    extended_clips[orig] = ext
-                    if is_temp:
-                        preprocess_temp_files.append(ext)
+            for slot in render_slots:
+                seg = slot['segment']
+                orig = seg.get('video_path', '')
+                if not orig or not os.path.exists(orig) or orig in extended_clips:
+                    continue
+                track_id = seg.get('track_id', f"{slot['row']}_{slot['column']}")
+                clip_style, _, matched_key = self._resolve_clip_style(track_id)
+                clip_bg_hex = bg_hex
+                if (
+                    clip_style.get('bgColorEnabled')
+                    and clip_style.get('bgColor')
+                    and not clip_style.get('transparentBg')
+                ):
+                    clip_bg_hex = clip_style.get('bgColor')
+                    logging.info(
+                        f"[style] cell={track_id!r} extending idle frames with {clip_bg_hex} "
+                        f"({matched_key or 'direct track id'})"
+                    )
+                ext, is_temp = self._preprocess_extend_clip(orig, duration, clip_bg_hex)
+                extended_clips[orig] = ext
+                if is_temp:
+                    preprocess_temp_files.append(ext)
 
             if preprocess_temp_files:
                 logging.info(f"   📼 Pre-processed {len(preprocess_temp_files)} short clip(s) → extended to {duration:.2f}s")
             # ── End pre-process ──────────────────────────────────────────────
 
-            # Process each cell in the grid
-            cells_processed = 0
+            # Process each resolved tile slot in the grid
+            cells_processed = len(render_slots)
             cells_with_content = 0
+            overlay_slots = []
             decode_args = self._get_ffmpeg_decode_args()
-            for r in range(grid_rows):
-                for c in range(grid_cols):
-                    cells_processed += 1
-                    cell_segment = grid_cells[r][c]
-                    if cell_segment and os.path.exists(cell_segment['video_path']):
-                        cells_with_content += 1
-                        # Use extended clip if available (avoids black fill after short clip ends)
-                        video_path = extended_clips.get(cell_segment['video_path'], cell_segment['video_path'])
-                        cmd.extend([*decode_args, '-i', video_path])
+            for slot_index, slot in enumerate(render_slots):
+                cell_segment = slot['segment']
+                if cell_segment and os.path.exists(cell_segment['video_path']):
+                    cells_with_content += 1
+                    # Use extended clip if available (avoids idle cells falling back to global bg too early)
+                    video_path = extended_clips.get(cell_segment['video_path'], cell_segment['video_path'])
+                    cmd.extend([*decode_args, '-i', video_path])
 
-                        # Apply per-cell style filters (scale, pad/bgColor, grade, flash, label, border)
-                        track_id = cell_segment.get('track_id', f'{r}_{c}')
-                        self._apply_cell_style_filters(
-                            filter_parts, f"[{input_idx}:v]", f"[v{r}_{c}]",
-                            cell_width, cell_height, track_id, cell_segment, style_temp_files,
-                            chunk_duration=duration,
-                            beat_sync_stats=beat_sync_stats,
-                        )
-                        video_inputs_for_stack.append(f"[v{r}_{c}]")
-                        
-                        # --- VOLUME FIX START ---
-                        vol_db = float(self._resolve_segment_volume(cell_segment))
-                        velocity_val = (
-                            cell_segment.get('velocity')
-                            or cell_segment.get('midi_velocity')
-                            or cell_segment.get('note_velocity')
-                        )
-                        vol_db += self._velocity_to_db(velocity_val)
-                        vol_linear = 10 ** (vol_db / 20.0)
-                        filter_parts.append(f"[{input_idx}:a]volume={vol_linear:.2f}[a{r}_{c}]")
-                        audio_inputs_for_mix.append(f"[a{r}_{c}]")
-                        # --- VOLUME FIX END ---
+                    track_id = cell_segment.get('track_id', f"{slot['row']}_{slot['column']}")
+                    video_output_label = f"[v_{slot_index}]"
+                    self._apply_cell_style_filters(
+                        filter_parts,
+                        f"[{input_idx}:v]",
+                        video_output_label,
+                        slot['pixel_width'],
+                        slot['pixel_height'],
+                        track_id,
+                        cell_segment,
+                        style_temp_files,
+                        chunk_duration=duration,
+                        beat_sync_stats=beat_sync_stats,
+                    )
+                    overlay_slots.append({
+                        'label': video_output_label,
+                        'x': slot['pixel_x'],
+                        'y': slot['pixel_y'],
+                        'track_id': track_id,
+                        'input_idx': input_idx,
+                        'segment': cell_segment,
+                    })
 
-                        logging.info(f"      Cell ({r},{c}): {cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB")
-                        input_idx += 1
-                    else:
-                        # lavfi color sources can be referenced multiple times in a filter graph
-                        # (they are generated streams, not file streams), so direct reuse is safe.
-                        video_inputs_for_stack.append(f"[{black_video_input_idx}:v]")
-                        logging.info(f"      Cell ({r},{c}): EMPTY (using bg placeholder)")
+                    # --- VOLUME FIX START ---
+                    vol_db = float(self._resolve_segment_volume(cell_segment))
+                    velocity_val = (
+                        cell_segment.get('velocity')
+                        or cell_segment.get('midi_velocity')
+                        or cell_segment.get('note_velocity')
+                    )
+                    vol_db += self._velocity_to_db(velocity_val)
+                    vol_linear = 10 ** (vol_db / 20.0)
+                    filter_parts.append(f"[{input_idx}:a]volume={vol_linear:.2f}[a_{slot_index}]")
+                    audio_inputs_for_mix.append(f"[a_{slot_index}]")
+                    # --- VOLUME FIX END ---
+
+                    logging.info(
+                        f"      Cell ({slot['row']},{slot['column']}) span {slot['span_w']}x{slot['span_h']} "
+                        f"→ {slot['pixel_width']}x{slot['pixel_height']} @ ({slot['pixel_x']},{slot['pixel_y']}): "
+                        f"{cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB"
+                    )
+                    input_idx += 1
+                else:
+                    logging.warning(
+                        f"      Cell ({slot['row']},{slot['column']}) has no usable video input and will remain background only"
+                    )
             
             logging.info(f"   Grid cells: {cells_with_content}/{cells_processed} contain actual content")
             gstyle = getattr(self, 'composition_style', {}) or {}
@@ -6008,18 +6173,14 @@ class VideoComposer:
             if solo_mode_enabled and cells_with_content == 1:
                 solo_w = target_width & ~1
                 solo_h = target_height & ~1
-                # The single video is always at input index 2
-                # (index 0 = bg placeholder, 1 = silent audio, 2 = first video)
                 filter_parts.clear()
                 style_temp_files.clear()
-                solo_segment = next(
-                    (grid_cells[r][c] for r in range(grid_rows) for c in range(grid_cols)
-                     if grid_cells[r][c] and os.path.exists(grid_cells[r][c].get('video_path', ''))),
-                    None
-                )
+                solo_slot = overlay_slots[0] if overlay_slots else None
+                solo_segment = solo_slot.get('segment') if solo_slot else None
                 solo_track_id = solo_segment.get('track_id', 'solo') if solo_segment else 'solo'
+                solo_input_idx = solo_slot.get('input_idx', 2) if solo_slot else 2
                 self._apply_cell_style_filters(
-                    filter_parts, '[2:v]', '[v_solo]',
+                    filter_parts, f'[{solo_input_idx}:v]', '[v_solo]',
                     solo_w, solo_h, solo_track_id, solo_segment, style_temp_files,
                     chunk_duration=duration,
                     beat_sync_stats={},
@@ -6034,7 +6195,7 @@ class VideoComposer:
                     vol_db += self._velocity_to_db(velocity_val)
                     vol_linear = 10 ** (vol_db / 20.0)
                     filter_parts.append(
-                        f"[2:a]volume={vol_linear:.2f},"
+                        f"[{solo_input_idx}:a]volume={vol_linear:.2f},"
                         f"aformat=sample_fmts=fltp:channel_layouts=stereo[audio_pre]"
                     )
                 else:
@@ -6098,12 +6259,16 @@ class VideoComposer:
                     f"(e.g., export ATS_MAX_CONCURRENT_STREAMS=64 or set in .env)"
                 )
 
-            # Create the xstack and amix filters
-            layout_string = "|".join([f"{c*cell_width}_{r*cell_height}" for r in range(grid_rows) for c in range(grid_cols)])
-            # xstack fill= sets the color for cells whose stream ends before the longest
-            # stream (i.e., short note-triggered clips). Default is black; set to the
-            # global bg color so idle cells match the canvas instead of going black.
-            filter_parts.append(f"{''.join(video_inputs_for_stack)}xstack=inputs={grid_rows*grid_cols}:layout={layout_string}:fill={bg_ffmpeg}[xstack_out]")
+            current_video_label = 'grid_base'
+            for slot_index, overlay_slot in enumerate(overlay_slots):
+                next_video_label = f'grid_ov_{slot_index}'
+                filter_parts.append(
+                    f"[{current_video_label}]{overlay_slot['label']}overlay="
+                    f"x={overlay_slot['x']}:y={overlay_slot['y']}:eof_action=pass:format=auto"
+                    f"[{next_video_label}]"
+                )
+                current_video_label = next_video_label
+
             # Mix only actual audio inputs to avoid normalization over empty streams
             audio_input_count = len(audio_inputs_for_mix)
             if audio_input_count == 0:
@@ -6118,7 +6283,7 @@ class VideoComposer:
 
             # Apply global composition effects (title, tagline, watermark, waveform, vignette, glitch)
             final_video, final_audio = self._apply_global_style_filters(
-                filter_parts, 'xstack_out', target_width, target_height,
+                filter_parts, current_video_label, target_width, target_height,
                 duration, 'audio_pre', style_temp_files
             )
             final_video_map = final_video if final_video.startswith('[') else f'[{final_video}]'
@@ -6127,7 +6292,7 @@ class VideoComposer:
             logging.info(f"🎬 Final FFmpeg command construction:")
             logging.info(f"   Total inputs: {input_idx}")
             logging.info(f"   Filter complex parts: {len(filter_parts)}")
-            logging.info(f"   Grid layout: {layout_string}")
+            logging.info(f"   Overlay slots: {len(overlay_slots)}")
 
             # Use filter_complex_script on Windows to avoid the 32k cmd-line length limit.
             # (-/filter_complex is the non-deprecated form but has parsing issues in this

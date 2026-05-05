@@ -24,6 +24,10 @@ import {
   getJobStatus,
 } from '../services/queueService.js';
 import videoProcessor from '../utils/videoProcessor.js';
+import {
+  hasGridArrangement,
+  toLegacyGridArrangement,
+} from '../../shared/gridLayout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -253,7 +257,9 @@ async function processVideoWithPython(
       const enhancedMidiData = {
         ...midiData,
         gridArrangement:
-          midiData.gridArrangement ||
+          (hasGridArrangement(midiData.gridArrangement)
+            ? midiData.gridArrangement
+            : null) ||
           calculateOptimalGridLayout(Object.keys(videoFilesForPython)),
         uploadsDir: UPLOADS_DIR, // Add uploads directory path for VideoComposer
         processingMetadata: {

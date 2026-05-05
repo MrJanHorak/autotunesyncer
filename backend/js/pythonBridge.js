@@ -3,6 +3,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import os from 'os';
+import {
+  hasGridArrangement,
+  toLegacyGridArrangement,
+} from '../../shared/gridLayout.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -68,6 +72,7 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
     try {
       // Read the config file
       const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const gridArrangement = config.gridArrangement || {};
 
       // Create separate JSON files for MIDI data and video files
       const tempDir = path.dirname(configPath);
@@ -79,20 +84,17 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
 
       const midiData = {
         tracks: config.tracks || [],
-        gridArrangement: config.gridArrangement || {},
+        gridArrangement,
         trackVolumes: config.trackVolumes || {},
         compositionStyle: config.compositionStyle || {},
         clipStyles: config.clipStyles || {},
       };
 
       // Add validation to ensure grid arrangement is not empty
-      if (
-        !config.gridArrangement ||
-        Object.keys(config.gridArrangement).length === 0
-      ) {
+      if (!hasGridArrangement(gridArrangement)) {
         console.error(
           'Python Bridge - Grid arrangement is empty or missing:',
-          config.gridArrangement,
+          gridArrangement,
         );
         reject(new Error('Grid arrangement is required but was not provided'));
         return;
@@ -100,7 +102,7 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
 
       console.log(
         'Python Bridge - Grid arrangement being sent:',
-        JSON.stringify(config.gridArrangement, null, 2),
+        JSON.stringify(gridArrangement, null, 2),
       );
       console.log(
         'Python Bridge - MIDI data structure:',
@@ -108,7 +110,7 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
       );
       console.log(
         'Python Bridge - Grid arrangement validation passed:',
-        Object.keys(config.gridArrangement).length,
+        Object.keys(toLegacyGridArrangement(gridArrangement)).length,
         'positions',
       );
 
@@ -116,9 +118,14 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
       fs.writeFileSync(videoJsonPath, JSON.stringify(config.videos || {}));
 
       _spawnPythonProcessor({
-        midiJsonPath, videoJsonPath, outputPath,
+        midiJsonPath,
+        videoJsonPath,
+        outputPath,
         isPreview: config.preview === true,
-        onProgress, cleanup, resolve, reject,
+        onProgress,
+        cleanup,
+        resolve,
+        reject,
       });
     } catch (error) {
       cleanup();
@@ -142,44 +149,64 @@ export const runPythonProcessorDirect = (
   { isPreview = false, jobId, outputDir, onProgress } = {},
 ) => {
   return new Promise((resolve, reject) => {
+    const gridArrangement = midiData?.gridArrangement || {};
+
     // Validate before touching disk
-    if (!midiData?.gridArrangement || Object.keys(midiData.gridArrangement).length === 0) {
+    if (!hasGridArrangement(gridArrangement)) {
       reject(new Error('Grid arrangement is required but was not provided'));
       return;
     }
+
+    const legacyGridArrangement = toLegacyGridArrangement(gridArrangement);
 
     const baseName = `video-config-${jobId || Date.now()}`;
     const jsonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ats-bridge-'));
     const midiJsonPath = path.join(jsonDir, `${baseName}-midi.json`);
     const videoJsonPath = path.join(jsonDir, `${baseName}-videos.json`);
     // Output lands in outputDir (same device as permanentOutputPath for atomic rename)
-    const outputPath = path.join(outputDir || jsonDir, `${baseName}-output.mp4`);
+    const outputPath = path.join(
+      outputDir || jsonDir,
+      `${baseName}-output.mp4`,
+    );
 
     const cleanup = () => {
       for (const p of [midiJsonPath, videoJsonPath]) {
-        try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (_) {}
+        try {
+          if (fs.existsSync(p)) fs.unlinkSync(p);
+        } catch (_) {}
       }
-      try { fs.rmdirSync(jsonDir); } catch (_) {}
+      try {
+        fs.rmdirSync(jsonDir);
+      } catch (_) {}
     };
 
     try {
-      fs.writeFileSync(midiJsonPath, JSON.stringify({
-        tracks: midiData.tracks || [],
-        gridArrangement: midiData.gridArrangement || {},
-        trackVolumes: midiData.trackVolumes || {},
-        compositionStyle: midiData.compositionStyle || {},
-        clipStyles: midiData.clipStyles || {},
-      }));
+      fs.writeFileSync(
+        midiJsonPath,
+        JSON.stringify({
+          tracks: midiData.tracks || [],
+          gridArrangement,
+          trackVolumes: midiData.trackVolumes || {},
+          compositionStyle: midiData.compositionStyle || {},
+          clipStyles: midiData.clipStyles || {},
+        }),
+      );
       fs.writeFileSync(videoJsonPath, JSON.stringify(videos || {}));
 
       console.log(
         'Python Bridge (direct) — grid positions:',
-        Object.keys(midiData.gridArrangement).length,
+        Object.keys(legacyGridArrangement).length,
       );
 
       _spawnPythonProcessor({
-        midiJsonPath, videoJsonPath, outputPath,
-        isPreview, onProgress, cleanup, resolve, reject,
+        midiJsonPath,
+        videoJsonPath,
+        outputPath,
+        isPreview,
+        onProgress,
+        cleanup,
+        resolve,
+        reject,
       });
     } catch (error) {
       cleanup();
@@ -192,15 +219,28 @@ export const runPythonProcessorDirect = (
  * Shared internal: spawn video_processor.py and wire up all event handlers.
  * Preserves: progress parsing, timeout + process-tree kill, cleanup on exit.
  */
-function _spawnPythonProcessor({ midiJsonPath, videoJsonPath, outputPath, isPreview, onProgress, cleanup, resolve, reject }) {
+function _spawnPythonProcessor({
+  midiJsonPath,
+  videoJsonPath,
+  outputPath,
+  isPreview,
+  onProgress,
+  cleanup,
+  resolve,
+  reject,
+}) {
   const pythonScript = path.join(__dirname, '../utils/video_processor.py');
   const pythonArgs = [
     pythonScript,
-    '--midi-json', midiJsonPath,
-    '--video-files-json', videoJsonPath,
-    '--output-path', outputPath,
+    '--midi-json',
+    midiJsonPath,
+    '--video-files-json',
+    videoJsonPath,
+    '--output-path',
+    outputPath,
     '--performance-mode',
-    '--memory-limit', '4',
+    '--memory-limit',
+    '4',
   ];
 
   if (isPreview) {
@@ -228,8 +268,11 @@ function _spawnPythonProcessor({ midiJsonPath, videoJsonPath, outputPath, isPrev
     );
     killProcessTree(pythonProcess);
     finish(
-      resolve, reject,
-      new Error(`Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${stderrRing.get()}`),
+      resolve,
+      reject,
+      new Error(
+        `Composition timed out after ${COMPOSITION_TIMEOUT_MS / 60000} minutes.\nLast output:\n${stderrRing.get()}`,
+      ),
       true,
     );
   }, COMPOSITION_TIMEOUT_MS);
@@ -251,27 +294,34 @@ function _spawnPythonProcessor({ midiJsonPath, videoJsonPath, outputPath, isPrev
   });
 
   pythonProcess.once('error', (err) => {
-    finish(resolve, reject,
-      new Error(`Failed to spawn Python process: ${err.message}\n${stderrRing.get()}`),
+    finish(
+      resolve,
+      reject,
+      new Error(
+        `Failed to spawn Python process: ${err.message}\n${stderrRing.get()}`,
+      ),
       true,
     );
   });
 
   pythonProcess.on('close', (code) => {
     if (code !== 0) {
-      finish(resolve, reject,
+      finish(
+        resolve,
+        reject,
         new Error(`Python process failed (code ${code})\n${stderrRing.get()}`),
         true,
       );
     } else {
-      finish(resolve, reject,
+      finish(
+        resolve,
+        reject,
         { success: true, outputPath, message: output.trim() },
         false,
       );
     }
   });
 }
-
 
 export const preprocessVideo = async (
   inputPath,

@@ -60,7 +60,7 @@ class VideoPreprocessor:
                     # Zoom-to-fill: scale so video fills the entire cell, then center-crop.
                     # This works for any cell aspect ratio without black letterbox bars.
                     scale_filter = (
-                        f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+                        f'scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase,'
                         f'crop={width}:{height}'
                     )
                     cmd.extend(['-vf', scale_filter])
@@ -119,7 +119,7 @@ class VideoPreprocessor:
                 width, height = target_size.split('x')
                 # Zoom-to-fill: scale so video fills the entire cell, then center-crop.
                 scale_filter = (
-                    f'scale={width}:{height}:force_original_aspect_ratio=increase,'
+                    f'scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase,'
                     f'crop={width}:{height}'
                 )
                 cmd.extend(['-vf', scale_filter])

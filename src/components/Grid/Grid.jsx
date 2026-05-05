@@ -1,22 +1,16 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import PropTypes from 'prop-types';
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  rectSortingStrategy,
-} from '@dnd-kit/sortable';
-import { SortableItem } from './SortableItems';
+import GridLayout from 'react-grid-layout';
+import { GridClipItem } from './SortableItems';
 import { DEFAULT_COMPOSITION_STYLE } from '../../js/styleDefaults';
 import { isDrumTrack, getDrumName } from '../../js/drumUtils';
+import {
+  getGridArrangementBounds,
+  hasGridArrangement,
+  normalizeGridArrangement,
+} from '../../../shared/gridLayout.js';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
 import './Grid.css';
 
 const FONT_FAMILY_MAP = {
@@ -31,6 +25,170 @@ const FONT_FAMILY_MAP = {
   comic: '"Comic Sans MS", cursive',
 };
 const getFontFamily = (font) => FONT_FAMILY_MAP[font] || 'inherit';
+const BASE_EDITOR_GRID_UNITS = 12;
+const EDITOR_GRID_SNAP_FACTOR = 2;
+const EDITOR_GRID_UNITS = BASE_EDITOR_GRID_UNITS * EDITOR_GRID_SNAP_FACTOR;
+const DEFAULT_STAGE_WIDTH = 960;
+const MIN_TILE_SPAN = 2 * EDITOR_GRID_SNAP_FACTOR;
+const MAX_TILE_SPAN = 6 * EDITOR_GRID_SNAP_FACTOR;
+const getArrangementId = (item) => item.id.replace(/^(track-|drum-)/, '');
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const sortEditorLayout = (a, b) => {
+  if (a.y !== b.y) return a.y - b.y;
+  if (a.x !== b.x) return a.x - b.x;
+  return String(a.i).localeCompare(String(b.i));
+};
+
+const getDefaultTileSpan = (itemCount) => {
+  if (itemCount <= 4) return 6 * EDITOR_GRID_SNAP_FACTOR;
+  if (itemCount <= 9) return 4 * EDITOR_GRID_SNAP_FACTOR;
+  if (itemCount <= 16) return 3 * EDITOR_GRID_SNAP_FACTOR;
+  return 2 * EDITOR_GRID_SNAP_FACTOR;
+};
+
+const normalizeEditorLayout = (layout) =>
+  [...(layout || [])]
+    .map((entry) => {
+      const size = clamp(
+        Math.round(
+          Math.max(
+            Number(entry?.w) || MIN_TILE_SPAN,
+            Number(entry?.h) || MIN_TILE_SPAN,
+          ),
+        ),
+        MIN_TILE_SPAN,
+        MAX_TILE_SPAN,
+      );
+      const maxOrigin = EDITOR_GRID_UNITS - size;
+
+      return {
+        i: entry.i,
+        x: clamp(Math.round(Number(entry?.x) || 0), 0, maxOrigin),
+        y: clamp(Math.round(Number(entry?.y) || 0), 0, maxOrigin),
+        w: size,
+        h: size,
+      };
+    })
+    .sort(sortEditorLayout);
+
+const areEditorLayoutsEqual = (left, right) => {
+  const leftLayout = normalizeEditorLayout(left);
+  const rightLayout = normalizeEditorLayout(right);
+  if (leftLayout.length !== rightLayout.length) return false;
+
+  return leftLayout.every((item, index) => {
+    const other = rightLayout[index];
+    return (
+      item.i === other.i &&
+      item.x === other.x &&
+      item.y === other.y &&
+      item.w === other.w &&
+      item.h === other.h
+    );
+  });
+};
+
+const buildDefaultEditorLayout = (processedItems) => {
+  const span = getDefaultTileSpan(processedItems.length);
+  const itemsPerRow = Math.max(1, Math.floor(EDITOR_GRID_UNITS / span));
+
+  return normalizeEditorLayout(
+    processedItems.map((item, index) => ({
+      i: item.id,
+      x: (index % itemsPerRow) * span,
+      y: Math.floor(index / itemsPerRow) * span,
+      w: span,
+      h: span,
+    })),
+  );
+};
+
+const buildEditorLayoutFromArrangement = (processedItems, arrangement) => {
+  const normalizedArrangement = normalizeGridArrangement(arrangement, {
+    defaultColumns: EDITOR_GRID_UNITS,
+    defaultRows: EDITOR_GRID_UNITS,
+  });
+
+  if (!hasGridArrangement(normalizedArrangement)) {
+    return buildDefaultEditorLayout(processedItems);
+  }
+
+  const arrangementIdToItemId = new Map(
+    processedItems.map((item) => [getArrangementId(item), item.id]),
+  );
+  const matchingEntries = Object.entries(normalizedArrangement.items).filter(
+    ([arrangementId]) => arrangementIdToItemId.has(arrangementId),
+  );
+
+  if (matchingEntries.length !== processedItems.length) {
+    return buildDefaultEditorLayout(processedItems);
+  }
+
+  const sourceBounds = getGridArrangementBounds(normalizedArrangement);
+  const shouldScale = normalizedArrangement.columns !== EDITOR_GRID_UNITS;
+  const scale = shouldScale
+    ? Math.max(
+        1,
+        Math.floor(
+          EDITOR_GRID_UNITS /
+            Math.max(
+              1,
+              normalizedArrangement.columns,
+              sourceBounds.columnCount,
+              sourceBounds.rowCount,
+            ),
+        ),
+      )
+    : 1;
+
+  return normalizeEditorLayout(
+    matchingEntries.map(([arrangementId, item]) => {
+      const size = shouldScale
+        ? Math.max(item.w * scale, item.h * scale, scale)
+        : Math.max(item.w, item.h);
+
+      return {
+        i: arrangementIdToItemId.get(arrangementId),
+        x: item.x * scale,
+        y: item.y * scale,
+        w: size,
+        h: size,
+      };
+    }),
+  );
+};
+
+const buildArrangementFromEditorLayout = (layout) => {
+  const items = Object.fromEntries(
+    normalizeEditorLayout(layout).map((item, index) => [
+      item.i.replace(/^(track-|drum-)/, ''),
+      {
+        x: item.x,
+        y: item.y,
+        w: item.w,
+        h: item.h,
+        position: index,
+        type: item.i.startsWith('drum-') ? 'drum' : 'track',
+      },
+    ]),
+  );
+
+  return normalizeGridArrangement(
+    {
+      version: 2,
+      columns: EDITOR_GRID_UNITS,
+      rows: EDITOR_GRID_UNITS,
+      items,
+    },
+    {
+      defaultColumns: EDITOR_GRID_UNITS,
+      defaultRows: EDITOR_GRID_UNITS,
+    },
+  );
+};
+
 const hexToRgba = (hex, alpha = 1) => {
   const normalized = (hex || '').replace('#', '');
   const safe =
@@ -156,62 +314,15 @@ const Grid = ({
     return [...trackData, ...Array.from(drumData.values())];
   }, [midiData]);
 
-  // 2. Calculate optimal columns based on processed data
-  const calculateOptimalColumns = useMemo(() => {
-    const itemCount = processedData.length;
-    const optimalColumns = [];
-
-    for (let cols = 1; cols <= Math.min(5, itemCount); cols++) {
-      const rows = Math.ceil(itemCount / cols);
-      const gridWidth = cols * 16;
-      const gridHeight = rows * 9;
-      const gridAspectRatio = gridWidth / gridHeight;
-
-      const isViable =
-        gridAspectRatio >= 1 &&
-        gridAspectRatio <= 2 &&
-        rows <= 3 &&
-        rows * cols >= itemCount;
-
-      if (isViable) {
-        optimalColumns.push({
-          cols,
-          ratio: Math.abs(1.7777 - gridAspectRatio),
-        });
-      }
-    }
-
-    optimalColumns.sort((a, b) => a.ratio - b.ratio);
-    return optimalColumns.length > 0
-      ? optimalColumns.map((col) => col.cols)
-      : [Math.ceil(Math.sqrt(itemCount))];
-  }, [processedData.length]);
-
-  // 3. Create initial grid data with empty spaces
-  const initialGridData = useMemo(() => {
-    const totalColumns = calculateOptimalColumns[0] || 4;
-    const totalRows = Math.ceil(processedData.length / totalColumns);
-    const totalSpaces = totalRows * totalColumns;
-
-    const emptySpaces = Array.from(
-      { length: totalSpaces - processedData.length },
-      (_, index) => ({
-        id: `empty-${index}`,
-        name: '',
-        count: 0,
-        isEmpty: true,
-      }),
-    );
-
-    return [...processedData, ...emptySpaces];
-  }, [processedData, calculateOptimalColumns]);
-
-  // 4. Initialize state
-  const [items, setItems] = useState(initialGridData);
-  const [columnCount, setColumnCount] = useState(
-    calculateOptimalColumns[0] || 4,
+  const stageRef = useRef(null);
+  const [stageWidth, setStageWidth] = useState(DEFAULT_STAGE_WIDTH);
+  const initialEditorLayout = useMemo(
+    () => buildEditorLayoutFromArrangement(processedData, initialArrangement),
+    [processedData, initialArrangement],
   );
-  const arrangementRestoredRef = useRef(false);
+  const [editorLayout, setEditorLayout] = useState(initialEditorLayout);
+  const gridHeight = useMemo(() => (stageWidth * 9) / 16, [stageWidth]);
+  const rowHeight = useMemo(() => gridHeight / EDITOR_GRID_UNITS, [gridHeight]);
 
   // Intro card preview playback state
   const [showIntroCard, setShowIntroCard] = useState(false);
@@ -444,77 +555,67 @@ const Grid = ({
     beatSyncPulseMs,
   ]);
 
-  // Restore saved drag order once (on first non-empty initialArrangement)
   useEffect(() => {
-    if (arrangementRestoredRef.current) return;
-    if (!initialArrangement || Object.keys(initialArrangement).length === 0)
-      return;
-    arrangementRestoredRef.current = true;
-    setItems((current) =>
-      [...current].sort((a, b) => {
-        const idA = a.id.replace(/^(track-|drum-)/, '');
-        const idB = b.id.replace(/^(track-|drum-)/, '');
-        const posA = initialArrangement[idA]?.position ?? Infinity;
-        const posB = initialArrangement[idB]?.position ?? Infinity;
-        return posA - posB;
-      }),
+    setEditorLayout((currentLayout) =>
+      areEditorLayoutsEqual(currentLayout, initialEditorLayout)
+        ? currentLayout
+        : initialEditorLayout,
     );
-  }, [initialArrangement]);
+  }, [initialEditorLayout]);
 
-  // DND setup
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  );
+  useEffect(() => {
+    const stageNode = stageRef.current;
+    if (!stageNode) return undefined;
 
-  // Handlers
-  // const handleDragEnd = (event) => {
-  //   const { active, over } = event;
+    const updateWidth = () => {
+      const nextWidth = Math.max(
+        stageNode.clientWidth || DEFAULT_STAGE_WIDTH,
+        320,
+      );
+      setStageWidth((currentWidth) =>
+        Math.abs(currentWidth - nextWidth) < 1 ? currentWidth : nextWidth,
+      );
+    };
 
-  //   if (active.id !== over.id) {
-  //     setItems((items) => {
-  //       const oldIndex = items.findIndex((item) => item.id === active.id);
-  //       const newIndex = items.findIndex((item) => item.id === over.id);
+    updateWidth();
 
-  //       if (oldIndex !== -1 && newIndex !== -1) {
-  //         return arrayMove(items, oldIndex, newIndex);
-  //       }
-  //       return items;
-  //     });
-  //   }
-  // };
+    if (typeof ResizeObserver === 'undefined') return undefined;
 
-  const handleDragEnd = (event) => {
-    const { active, over } = event;
-    if (active.id !== over.id) {
-      setItems((items) => {
-        const oldIndex = items.findIndex((item) => item.id === active.id);
-        const newIndex = items.findIndex((item) => item.id === over.id);
-        const newItems = arrayMove(items, oldIndex, newIndex);
+    const observer = new ResizeObserver(() => updateWidth());
+    observer.observe(stageNode);
+    return () => observer.disconnect();
+  }, []);
 
-        const arrangement = newItems.reduce((acc, item, index) => {
-          const id = item.isEmpty
-            ? item.id
-            : item.id.replace(/^(track-|drum-)/, '');
-          acc[id] = {
-            position: index,
-            row: Math.floor(index / columnCount),
-            column: index % columnCount,
-            type: item.isEmpty
-              ? 'empty'
-              : item.id.startsWith('drum-')
-                ? 'drum'
-                : 'track',
-            isEmpty: item.isEmpty || false,
-          };
-          return acc;
-        }, {});
-        onArrangementChange(arrangement);
-        return newItems;
-      });
-    }
+  useEffect(() => {
+    if (!processedData.length) return;
+    if (hasGridArrangement(initialArrangement)) return;
+    onArrangementChange(buildArrangementFromEditorLayout(initialEditorLayout));
+  }, [
+    processedData.length,
+    initialArrangement,
+    initialEditorLayout,
+    onArrangementChange,
+  ]);
+
+  const updateEditorLayout = (nextLayout) => {
+    const normalizedLayout = normalizeEditorLayout(nextLayout);
+    setEditorLayout((currentLayout) =>
+      areEditorLayoutsEqual(currentLayout, normalizedLayout)
+        ? currentLayout
+        : normalizedLayout,
+    );
+    return normalizedLayout;
+  };
+
+  const commitEditorLayout = (nextLayout) => {
+    const normalizedLayout = updateEditorLayout(nextLayout);
+    onArrangementChange(buildArrangementFromEditorLayout(normalizedLayout));
+  };
+
+  const handleResetLayout = () => {
+    const nextLayout = buildDefaultEditorLayout(processedData);
+    setEditorLayout(nextLayout);
+    onArrangementChange(buildArrangementFromEditorLayout(nextLayout));
   };
 
   // Heat map calculations with modern spectrum gradient - 10 tier system for maximum distinction
@@ -556,7 +657,7 @@ const Grid = ({
   };
 
   const getHeatIntensity = (count) => {
-    const maxCount = Math.max(...items.map((item) => item.count || 0));
+    const maxCount = Math.max(...processedData.map((item) => item.count || 0));
     return maxCount > 0 ? count / maxCount : 0;
   };
 
@@ -564,41 +665,6 @@ const Grid = ({
   const getAccentColor = () => {
     return '#ffffff'; // Always white for best readability
   };
-  useEffect(() => {
-    if (calculateOptimalColumns.length > 0) {
-      const optimalColumnCount = calculateOptimalColumns[0];
-      setColumnCount(optimalColumnCount);
-      document.documentElement.style.setProperty(
-        '--column-count',
-        optimalColumnCount,
-      );
-    }
-  }, [calculateOptimalColumns]);
-
-  // Initialize arrangement on load
-  useEffect(() => {
-    if (items.length > 0) {
-      const arrangement = items.reduce((acc, item, index) => {
-        const id = item.isEmpty
-          ? item.id
-          : item.id.replace(/^(track-|drum-)/, '');
-        acc[id] = {
-          position: index,
-          row: Math.floor(index / columnCount),
-          column: index % columnCount,
-          type: item.isEmpty
-            ? 'empty'
-            : item.id.startsWith('drum-')
-              ? 'drum'
-              : 'track',
-          isEmpty: item.isEmpty || false,
-        };
-        return acc;
-      }, {});
-      onArrangementChange(arrangement);
-    }
-  }, [items, columnCount, onArrangementChange]);
-
   const getTitlePositionStyle = () => {
     if (titleUsesFullscreenBackground) {
       return {
@@ -917,302 +983,317 @@ const Grid = ({
   const trackCellsBeatPulseClass = hasBeatTarget('track-cells')
     ? beatPulseClass
     : '';
+  const canEditLayout = !isPreviewPlaying && processedData.length > 0;
 
   return (
     <div className='grid-container'>
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={handleDragEnd}
+      {canEditLayout && (
+        <div className='grid-layout-toolbar'>
+          <span className='grid-layout-note'>
+            Drag from the grip to move clips. Resize from the lower-right corner
+            to spotlight instruments.
+          </span>
+          <button className='grid-layout-reset' onClick={handleResetLayout}>
+            Reset Layout
+          </button>
+        </div>
+      )}
+
+      <div
+        ref={stageRef}
+        className={[
+          'grid-preview-stage',
+          stageTransitionStyle.className,
+          stageOutroStyle.className,
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style={{
+          background: previewStyle.backgroundColor || '#0a0a0f',
+          height: `${gridHeight}px`,
+          ...stageTransitionStyle.style,
+          ...stageOutroStyle.style,
+        }}
       >
+        <GridLayout
+          className='grid'
+          layout={editorLayout}
+          cols={EDITOR_GRID_UNITS}
+          rowHeight={rowHeight}
+          width={stageWidth}
+          autoSize={false}
+          margin={[0, 0]}
+          containerPadding={[0, 0]}
+          compactType={null}
+          resizeHandles={['se']}
+          draggableHandle='.grid-cell__drag-handle'
+          draggableCancel='.cell-style-btn,.clip-style-popover,.clip-style-popover *,input,button,select,label'
+          isDraggable={!isPreviewPlaying}
+          isResizable={!isPreviewPlaying}
+          preventCollision
+          isBounded
+          maxRows={EDITOR_GRID_UNITS}
+          style={{ height: `${gridHeight}px` }}
+          onLayoutChange={updateEditorLayout}
+          onDragStop={commitEditorLayout}
+          onResizeStop={commitEditorLayout}
+        >
+          {processedData.map((item) => {
+            const intensity = getHeatIntensity(item.count);
+            const videoKey = item.id.startsWith('drum-')
+              ? item.id.replace('drum-', '')
+              : (item.name || '').toLowerCase().replace(/\s+/g, '_');
+            const videoUrl = instrumentVideos?.[videoKey] || null;
+
+            return (
+              <div key={item.id} className='grid-layout-item'>
+                <GridClipItem
+                  id={item.id}
+                  item={item}
+                  getHeatColor={getHeatColor(intensity)}
+                  accentColor={getAccentColor(intensity)}
+                  isEmpty={false}
+                  clipStyle={clipStyles?.[item.id]}
+                  onClipStyleChange={(newStyle) =>
+                    onClipStyleChange?.(item.id, newStyle)
+                  }
+                  videoUrl={videoUrl}
+                  isPreviewPlaying={isPreviewPlaying}
+                  activeLevel={activeLevels?.[videoKey]}
+                  beatPulseClass={trackCellsBeatPulseClass}
+                  isEditable={canEditLayout}
+                  fillParent
+                />
+              </div>
+            );
+          })}
+        </GridLayout>
+
         <div
-          className={[
-            'grid-preview-stage',
-            stageTransitionStyle.className,
-            stageOutroStyle.className,
-          ]
+          className={['grid-preview-overlay', overlayBeatPulseClass]
             .filter(Boolean)
             .join(' ')}
-          style={{
-            background: previewStyle.backgroundColor || '#0a0a0f',
-            ...stageTransitionStyle.style,
-            ...stageOutroStyle.style,
-          }}
+          aria-hidden='true'
         >
-          <div
-            className='grid'
-            style={{
-              display: 'grid',
-              gridTemplateColumns: `repeat(${columnCount}, 1fr)`,
-              gap: '8px',
-              aspectRatio: '16/9',
-              width: '100%',
-              height: 'auto',
-              maxHeight: '100%',
-            }}
-          >
-            <SortableContext items={items} strategy={rectSortingStrategy}>
-              {items.map((item) => {
-                const intensity = getHeatIntensity(item.count);
-                // Derive the instrumentVideos key from the item id/name
-                const videoKey = item.id.startsWith('drum-')
-                  ? item.id.replace('drum-', '')
-                  : (item.name || '').toLowerCase().replace(/\s+/g, '_');
-                const videoUrl = instrumentVideos?.[videoKey] || null;
-                return (
-                  <SortableItem
-                    key={item.id}
-                    id={item.id}
-                    item={item}
-                    getHeatColor={
-                      item.isEmpty ? 'transparent' : getHeatColor(intensity)
-                    }
-                    accentColor={
-                      item.isEmpty ? '#9ca3af' : getAccentColor(intensity)
-                    }
-                    isEmpty={item.isEmpty}
-                    clipStyle={clipStyles?.[item.id]}
-                    onClipStyleChange={(newStyle) =>
-                      onClipStyleChange?.(item.id, newStyle)
-                    }
-                    videoUrl={videoUrl}
-                    isPreviewPlaying={isPreviewPlaying}
-                    activeLevel={activeLevels?.[videoKey]}
-                    beatPulseClass={trackCellsBeatPulseClass}
-                  />
-                );
-              })}
-            </SortableContext>
-          </div>
+          {previewStyle.vignetteEnabled && (
+            <div
+              className='grid-preview-vignette'
+              style={{
+                opacity: Math.min(
+                  Math.max(previewStyle.vignetteStrength ?? 0.5, 0.1),
+                  1,
+                ),
+              }}
+            />
+          )}
 
-          <div
-            className={['grid-preview-overlay', overlayBeatPulseClass]
-              .filter(Boolean)
-              .join(' ')}
-            aria-hidden='true'
-          >
-            {previewStyle.vignetteEnabled && (
+          {previewStyle.glitchEnabled && (
+            <div
+              className={`grid-preview-glitch grid-preview-glitch--${previewStyle.glitchIntensity || 'subtle'}`}
+            />
+          )}
+
+          {previewStyle.waveformEnabled && (
+            <div
+              className='grid-preview-waveform'
+              style={{
+                '--waveform-height': `${Math.max(16, Math.min(220, Number(previewStyle.waveformHeight ?? 60)))}px`,
+                '--waveform-color': previewStyle.waveformColor || '#00ff88',
+                '--waveform-active': isPreviewPlaying ? '1' : '0.58',
+                '--waveform-level': waveformLevel.toFixed(3),
+              }}
+            >
+              {waveformBars.map((height, index) => (
+                <span
+                  key={`wave-${index}`}
+                  className='grid-preview-waveform__bar'
+                  style={{ height }}
+                />
+              ))}
+            </div>
+          )}
+
+          {previewStyle.titleEnabled && titleText && !showIntroCard && (
+            <div
+              key={`title-${previewPlayCycle}`}
+              data-title-animation={previewStyle.titleAnimationPreset || 'fade'}
+              className={[
+                titleUsesFullscreenBackground
+                  ? 'grid-preview-title grid-preview-title--fullscreen'
+                  : titleUsesCard
+                    ? 'grid-preview-title-card'
+                    : 'grid-preview-title',
+                previewStyle.titleAnimated && isPreviewPlaying
+                  ? [
+                      'grid-preview-title--fade-in',
+                      titleAnimationStyle.className,
+                      titleBeatPulseClass,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')
+                  : titleBeatPulseClass,
+                (previewStyle.titleDuration ?? 0) > 0 && isPreviewPlaying
+                  ? 'grid-preview-title--fade-out'
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              style={{
+                ...getTitlePositionStyle(),
+                '--grid-title-transform': titleUsesFullscreenBackground
+                  ? 'translateY(0)'
+                  : getTitlePositionStyle().transform || 'translateX(-50%)',
+                ...(previewStyle.titleAnimated
+                  ? titleAnimationStyle.style
+                  : {}),
+                color: titleColor,
+                fontSize: `${previewStyle.titleFontSize}px`,
+                fontFamily: getFontFamily(titleFont),
+                ...(previewStyle.titleGlowEnabled && {
+                  textShadow: `0 0 ${previewStyle.titleGlowSize || 8}px ${previewStyle.titleGlowColor || '#ffffff'}, 
+                                 0 ${previewStyle.titleShadowSize || 2}px ${previewStyle.titleShadowSize || 2}px rgba(0,0,0,0.5)`,
+                }),
+                ...(!previewStyle.titleGlowEnabled &&
+                  previewStyle.titleShadowEnabled && {
+                    textShadow: `0 ${previewStyle.titleShadowSize || 2}px ${previewStyle.titleShadowSize || 2}px rgba(0,0,0,0.55)`,
+                  }),
+                ...(titleUsesCard &&
+                  !titleUsesFullscreenBackground && {
+                    background: hexToRgba(titleCardBg, titleCardOpacity),
+                    border: '1px solid rgba(255,255,255,0.16)',
+                    borderRadius: '18px',
+                    padding: '0.75rem 1.1rem',
+                    boxShadow: '0 18px 48px rgba(0,0,0,0.28)',
+                    backdropFilter: 'blur(14px)',
+                  }),
+                ...(titleUsesFullscreenBackground && {
+                  background: hexToRgba(titleCardBg, titleCardOpacity),
+                  padding: '2rem',
+                  backdropFilter: 'blur(14px)',
+                }),
+                ...((previewStyle.titleDuration ?? 0) > 0 && {
+                  '--title-fade-out-delay': `${(previewStyle.titleDuration ?? 0) + (previewStyle.titleAnimated ? titleAnimationStyle.delay : 0)}s`,
+                }),
+              }}
+            >
+              <span className='grid-preview-title__text'>{titleText}</span>
+              {titleSubtitleText && (
+                <span
+                  className='grid-preview-title__subtext'
+                  style={{
+                    color: previewStyle.titleSubtitleColor || '#d8d8e6',
+                    fontSize: `${previewStyle.titleSubtitleFontSize ?? Math.max(14, Math.round(previewStyle.titleFontSize * 0.43))}px`,
+                    fontFamily: getFontFamily(titleFont),
+                  }}
+                >
+                  {titleSubtitleText}
+                </span>
+              )}
+            </div>
+          )}
+
+          {previewStyle.taglineEnabled && taglineText && !showIntroCard && (
+            <div
+              className={[
+                'grid-preview-tagline',
+                getTaglineAnimationStyle().className,
+                taglineBeatPulseClass,
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              style={{
+                ...getTaglinePositionStyle(),
+                ...getTaglineAnimationStyle().style,
+                color: previewStyle.taglineColor,
+                fontSize: `${previewStyle.taglineFontSize}px`,
+                fontFamily: getFontFamily(previewStyle.taglineFont),
+                textAlign: previewStyle.taglineAlignment || 'center',
+                maxWidth: 'calc(100% - 28px)',
+                ...(previewStyle.taglineShadowEnabled && {
+                  textShadow: `0 ${previewStyle.taglineShadowSize || 2}px ${previewStyle.taglineShadowSize || 2}px ${hexToRgba(previewStyle.taglineShadowColor || '#000000', 0.55)}`,
+                }),
+                ...getTaglineSurfaceStyle(),
+              }}
+            >
+              {taglineText}
+            </div>
+          )}
+
+          {previewStyle.watermarkEnabled &&
+            previewStyle.watermarkText?.trim() && (
               <div
-                className='grid-preview-vignette'
+                className='grid-preview-watermark'
                 style={{
+                  ...getWatermarkPositionStyle(),
+                  color: previewStyle.watermarkColor,
+                  fontSize: `${previewStyle.watermarkFontSize}px`,
+                  fontFamily: getFontFamily(previewStyle.watermarkFont),
                   opacity: Math.min(
-                    Math.max(previewStyle.vignetteStrength ?? 0.5, 0.1),
+                    Math.max(previewStyle.watermarkOpacity ?? 0.5, 0.1),
                     1,
                   ),
                 }}
-              />
-            )}
-
-            {previewStyle.glitchEnabled && (
-              <div
-                className={`grid-preview-glitch grid-preview-glitch--${previewStyle.glitchIntensity || 'subtle'}`}
-              />
-            )}
-
-            {previewStyle.waveformEnabled && (
-              <div
-                className='grid-preview-waveform'
-                style={{
-                  '--waveform-height': `${Math.max(16, Math.min(220, Number(previewStyle.waveformHeight ?? 60)))}px`,
-                  '--waveform-color': previewStyle.waveformColor || '#00ff88',
-                  '--waveform-active': isPreviewPlaying ? '1' : '0.58',
-                  '--waveform-level': waveformLevel.toFixed(3),
-                }}
               >
-                {waveformBars.map((height, index) => (
-                  <span
-                    key={`wave-${index}`}
-                    className='grid-preview-waveform__bar'
-                    style={{ height }}
-                  />
-                ))}
+                {previewStyle.watermarkText}
               </div>
             )}
 
-            {previewStyle.titleEnabled && titleText && !showIntroCard && (
+          {/* Intro card: full-screen overlay at start of preview playback */}
+          {showIntroCard && (
+            <div
+              className={`grid-intro-card${previewStyle.introCardAnimated ? ' grid-intro-card--animated' : ''}${introCardFadingOut ? ' grid-intro-card--hiding' : ''}${titleUsesFullscreenBackground ? ' grid-intro-card--fullscreen' : ' grid-intro-card--panel'}`}
+              style={{
+                background: titleUsesFullscreenBackground
+                  ? hexToRgba(
+                      titleCardBg,
+                      Math.min(titleCardOpacity + 0.13, 0.95),
+                    )
+                  : 'transparent',
+              }}
+            >
               <div
-                key={`title-${previewPlayCycle}`}
-                data-title-animation={
-                  previewStyle.titleAnimationPreset || 'fade'
-                }
-                className={[
+                className={
                   titleUsesFullscreenBackground
-                    ? 'grid-preview-title grid-preview-title--fullscreen'
-                    : titleUsesCard
-                      ? 'grid-preview-title-card'
-                      : 'grid-preview-title',
-                  previewStyle.titleAnimated && isPreviewPlaying
-                    ? [
-                        'grid-preview-title--fade-in',
-                        titleAnimationStyle.className,
-                        titleBeatPulseClass,
-                      ]
-                        .filter(Boolean)
-                        .join(' ')
-                    : titleBeatPulseClass,
-                  (previewStyle.titleDuration ?? 0) > 0 && isPreviewPlaying
-                    ? 'grid-preview-title--fade-out'
-                    : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-                style={{
-                  ...getTitlePositionStyle(),
-                  '--grid-title-transform': titleUsesFullscreenBackground
-                    ? 'translateY(0)'
-                    : getTitlePositionStyle().transform || 'translateX(-50%)',
-                  ...(previewStyle.titleAnimated
-                    ? titleAnimationStyle.style
-                    : {}),
-                  color: titleColor,
-                  fontSize: `${previewStyle.titleFontSize}px`,
-                  fontFamily: getFontFamily(titleFont),
-                  ...(previewStyle.titleGlowEnabled && {
-                    textShadow: `0 0 ${previewStyle.titleGlowSize || 8}px ${previewStyle.titleGlowColor || '#ffffff'}, 
-                                 0 ${previewStyle.titleShadowSize || 2}px ${previewStyle.titleShadowSize || 2}px rgba(0,0,0,0.5)`,
-                  }),
-                  ...(!previewStyle.titleGlowEnabled &&
-                    previewStyle.titleShadowEnabled && {
-                      textShadow: `0 ${previewStyle.titleShadowSize || 2}px ${previewStyle.titleShadowSize || 2}px rgba(0,0,0,0.55)`,
-                    }),
-                  ...(titleUsesCard &&
-                    !titleUsesFullscreenBackground && {
-                      background: hexToRgba(titleCardBg, titleCardOpacity),
-                      border: '1px solid rgba(255,255,255,0.16)',
-                      borderRadius: '18px',
-                      padding: '0.75rem 1.1rem',
-                      boxShadow: '0 18px 48px rgba(0,0,0,0.28)',
-                      backdropFilter: 'blur(14px)',
-                    }),
-                  ...(titleUsesFullscreenBackground && {
-                    background: hexToRgba(titleCardBg, titleCardOpacity),
-                    padding: '2rem',
-                    backdropFilter: 'blur(14px)',
-                  }),
-                  ...((previewStyle.titleDuration ?? 0) > 0 && {
-                    '--title-fade-out-delay': `${(previewStyle.titleDuration ?? 0) + (previewStyle.titleAnimated ? titleAnimationStyle.delay : 0)}s`,
-                  }),
-                }}
+                    ? 'grid-intro-card__content'
+                    : 'grid-intro-card__content grid-intro-card__content--panel'
+                }
+                style={
+                  titleUsesFullscreenBackground
+                    ? undefined
+                    : {
+                        background: hexToRgba(
+                          titleCardBg,
+                          Math.min(titleCardOpacity + 0.13, 0.95),
+                        ),
+                      }
+                }
               >
-                <span className='grid-preview-title__text'>{titleText}</span>
-                {titleSubtitleText && (
-                  <span
-                    className='grid-preview-title__subtext'
-                    style={{
-                      color: previewStyle.titleSubtitleColor || '#d8d8e6',
-                      fontSize: `${previewStyle.titleSubtitleFontSize ?? Math.max(14, Math.round(previewStyle.titleFontSize * 0.43))}px`,
-                      fontFamily: getFontFamily(titleFont),
-                    }}
-                  >
-                    {titleSubtitleText}
-                  </span>
-                )}
-              </div>
-            )}
-
-            {previewStyle.taglineEnabled && taglineText && !showIntroCard && (
-              <div
-                className={[
-                  'grid-preview-tagline',
-                  getTaglineAnimationStyle().className,
-                  taglineBeatPulseClass,
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-                style={{
-                  ...getTaglinePositionStyle(),
-                  ...getTaglineAnimationStyle().style,
-                  color: previewStyle.taglineColor,
-                  fontSize: `${previewStyle.taglineFontSize}px`,
-                  fontFamily: getFontFamily(previewStyle.taglineFont),
-                  textAlign: previewStyle.taglineAlignment || 'center',
-                  maxWidth: 'calc(100% - 28px)',
-                  ...(previewStyle.taglineShadowEnabled && {
-                    textShadow: `0 ${previewStyle.taglineShadowSize || 2}px ${previewStyle.taglineShadowSize || 2}px ${hexToRgba(previewStyle.taglineShadowColor || '#000000', 0.55)}`,
-                  }),
-                  ...getTaglineSurfaceStyle(),
-                }}
-              >
-                {taglineText}
-              </div>
-            )}
-
-            {previewStyle.watermarkEnabled &&
-              previewStyle.watermarkText?.trim() && (
-                <div
-                  className='grid-preview-watermark'
+                <p
+                  className='grid-intro-card__title'
                   style={{
-                    ...getWatermarkPositionStyle(),
-                    color: previewStyle.watermarkColor,
-                    fontSize: `${previewStyle.watermarkFontSize}px`,
-                    fontFamily: getFontFamily(previewStyle.watermarkFont),
-                    opacity: Math.min(
-                      Math.max(previewStyle.watermarkOpacity ?? 0.5, 0.1),
-                      1,
-                    ),
+                    color: titleColor,
+                    fontFamily: getFontFamily(titleFont),
                   }}
                 >
-                  {previewStyle.watermarkText}
-                </div>
-              )}
-
-            {/* Intro card: full-screen overlay at start of preview playback */}
-            {showIntroCard && (
-              <div
-                className={`grid-intro-card${previewStyle.introCardAnimated ? ' grid-intro-card--animated' : ''}${introCardFadingOut ? ' grid-intro-card--hiding' : ''}${titleUsesFullscreenBackground ? ' grid-intro-card--fullscreen' : ' grid-intro-card--panel'}`}
-                style={{
-                  background: titleUsesFullscreenBackground
-                    ? hexToRgba(
-                        titleCardBg,
-                        Math.min(titleCardOpacity + 0.13, 0.95),
-                      )
-                    : 'transparent',
-                }}
-              >
-                <div
-                  className={
-                    titleUsesFullscreenBackground
-                      ? 'grid-intro-card__content'
-                      : 'grid-intro-card__content grid-intro-card__content--panel'
-                  }
-                  style={
-                    titleUsesFullscreenBackground
-                      ? undefined
-                      : {
-                          background: hexToRgba(
-                            titleCardBg,
-                            Math.min(titleCardOpacity + 0.13, 0.95),
-                          ),
-                        }
-                  }
-                >
+                  {introTitleText || 'Untitled'}
+                </p>
+                {introTitleSubtitleText && (
                   <p
-                    className='grid-intro-card__title'
+                    className='grid-intro-card__subtext'
                     style={{
-                      color: titleColor,
+                      color: previewStyle.titleSubtitleColor || '#d8d8e6',
                       fontFamily: getFontFamily(titleFont),
+                      fontSize: `${previewStyle.titleSubtitleFontSize ?? 24}px`,
                     }}
                   >
-                    {introTitleText || 'Untitled'}
+                    {introTitleSubtitleText}
                   </p>
-                  {introTitleSubtitleText && (
-                    <p
-                      className='grid-intro-card__subtext'
-                      style={{
-                        color: previewStyle.titleSubtitleColor || '#d8d8e6',
-                        fontFamily: getFontFamily(titleFont),
-                        fontSize: `${previewStyle.titleSubtitleFontSize ?? 24}px`,
-                      }}
-                    >
-                      {introTitleSubtitleText}
-                    </p>
-                  )}
-                </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
-      </DndContext>
+      </div>
     </div>
   );
 };

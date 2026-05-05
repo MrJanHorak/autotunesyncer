@@ -1,6 +1,8 @@
 import assert from 'assert';
-import express from 'express';
-import processVideosRouter from './routes/processVideos.js';
+import {
+  getResolvedVideoLayout,
+  validateComposeInputs,
+} from './routes/processVideos.js';
 
 const makeMidiPayload = (overrides = {}) => ({
   tracks: [
@@ -16,140 +18,127 @@ const makeMidiPayload = (overrides = {}) => ({
   ...overrides,
 });
 
-const withServer = async (fn) => {
-  const app = express();
-  app.use('/api/process-videos', processVideosRouter);
+const makeVideoFiles = () => [
+  { fieldname: 'videos', originalname: 'piano.mp4' },
+];
 
-  const server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
-  });
-
-  const { port } = server.address();
-  const baseUrl = `http://127.0.0.1:${port}`;
-
-  try {
-    await fn(baseUrl);
-  } finally {
-    await new Promise((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
-  }
-};
-
-const postForm = async (baseUrl, form) => {
-  const response = await fetch(`${baseUrl}/api/process-videos`, {
-    method: 'POST',
-    body: form,
-  });
-
-  let data = null;
-  try {
-    data = await response.json();
-  } catch {
-    data = { error: 'non-json-response' };
-  }
-
-  return { response, data };
-};
-
-const testInvalidMidiJson = async (baseUrl) => {
-  const form = new FormData();
-  form.append(
-    'midiData',
-    new Blob(['{not-json'], { type: 'application/json' }),
-    'midi.json',
-  );
-
-  const { response, data } = await postForm(baseUrl, form);
+const testInvalidMidiPayload = () => {
   assert.strictEqual(
-    response.status,
-    400,
-    'Invalid midiData JSON should return 400',
-  );
-  assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(
-    String(data.details || '').includes('Invalid midiData JSON payload'),
+    validateComposeInputs(null, makeVideoFiles()),
+    'Invalid MIDI payload',
   );
 };
 
-const testMissingGridArrangement = async (baseUrl) => {
-  const form = new FormData();
+const testMissingGridArrangement = () => {
   const midiPayload = makeMidiPayload({ gridArrangement: {} });
-  form.append(
-    'midiData',
-    new Blob([JSON.stringify(midiPayload)], { type: 'application/json' }),
-    'midi.json',
-  );
-  form.append(
-    'videos',
-    new Blob(['fake-video'], { type: 'video/mp4' }),
-    'piano.mp4',
-  );
-
-  const { response, data } = await postForm(baseUrl, form);
   assert.strictEqual(
-    response.status,
-    400,
-    'Missing grid arrangement should return 400',
-  );
-  assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(String(data.details || '').includes('Grid arrangement is empty'));
-};
-
-const testMissingVideos = async (baseUrl) => {
-  const form = new FormData();
-  form.append(
-    'midiData',
-    new Blob([JSON.stringify(makeMidiPayload())], { type: 'application/json' }),
-    'midi.json',
-  );
-
-  const { response, data } = await postForm(baseUrl, form);
-  assert.strictEqual(response.status, 400, 'Missing videos should return 400');
-  assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(
-    String(data.details || '').includes('At least one video file is required'),
+    validateComposeInputs(midiPayload, makeVideoFiles()),
+    'Grid arrangement is empty',
   );
 };
 
-const testInvalidGridPosition = async (baseUrl) => {
-  const form = new FormData();
+const testMissingVideos = () => {
+  assert.strictEqual(
+    validateComposeInputs(makeMidiPayload(), []),
+    'At least one video file is required',
+  );
+};
+
+const testV2GridArrangementAccepted = () => {
+  const midiPayload = makeMidiPayload({
+    gridArrangement: {
+      version: 2,
+      columns: 1,
+      rows: 1,
+      items: {
+        track_0_piano: { x: 0, y: 0, w: 1, h: 1 },
+      },
+    },
+  });
+  assert.strictEqual(
+    validateComposeInputs(midiPayload, makeVideoFiles()),
+    null,
+  );
+};
+
+const testInvalidGridPosition = () => {
   const midiPayload = makeMidiPayload({
     gridArrangement: {
       track_0_piano: { row: -1, column: 0 },
     },
   });
-
-  form.append(
-    'midiData',
-    new Blob([JSON.stringify(midiPayload)], { type: 'application/json' }),
-    'midi.json',
-  );
-  form.append(
-    'videos',
-    new Blob(['fake-video'], { type: 'video/mp4' }),
-    'piano.mp4',
-  );
-
-  const { response, data } = await postForm(baseUrl, form);
   assert.strictEqual(
-    response.status,
-    400,
-    'Invalid grid position should return 400',
+    validateComposeInputs(midiPayload, makeVideoFiles()),
+    'Grid arrangement contains invalid row/column positions',
   );
-  assert.strictEqual(data.error, 'Invalid composition input');
-  assert.ok(
-    String(data.details || '').includes('invalid row/column positions'),
+};
+
+const testV2GridArrangementOutOfBounds = () => {
+  const midiPayload = makeMidiPayload({
+    gridArrangement: {
+      version: 2,
+      columns: 12,
+      rows: 12,
+      items: {
+        track_0_piano: { x: 11, y: 11, w: 2, h: 2 },
+      },
+    },
+  });
+  assert.strictEqual(
+    validateComposeInputs(midiPayload, makeVideoFiles()),
+    'Grid arrangement contains tiles outside the available 12x12 layout space',
+  );
+};
+
+const testInstrumentVideoLayoutResolvesNumericTrackKey = () => {
+  const layout = getResolvedVideoLayout(
+    'piano',
+    {
+      0: { row: 1, column: 2, w: 3, h: 2 },
+    },
+    {
+      tracks: [
+        {
+          instrument: { name: 'Piano', family: 'piano' },
+        },
+      ],
+      totalWidth: 1920,
+      totalHeight: 1080,
+      gridColumns: 12,
+      gridRows: 12,
+    },
+  );
+
+  assert.deepStrictEqual(
+    {
+      matchKey: layout.matchKey,
+      row: layout.row,
+      column: layout.column,
+      spanW: layout.spanW,
+      spanH: layout.spanH,
+      width: layout.width,
+      height: layout.height,
+    },
+    {
+      matchKey: '0',
+      row: 1,
+      column: 2,
+      spanW: 3,
+      spanH: 2,
+      width: 480,
+      height: 180,
+    },
   );
 };
 
 const run = async () => {
-  await withServer(async (baseUrl) => {
-    await testInvalidMidiJson(baseUrl);
-    await testMissingGridArrangement(baseUrl);
-    await testMissingVideos(baseUrl);
-    await testInvalidGridPosition(baseUrl);
-  });
+  testInvalidMidiPayload();
+  testMissingGridArrangement();
+  testMissingVideos();
+  testV2GridArrangementAccepted();
+  testInvalidGridPosition();
+  testV2GridArrangementOutOfBounds();
+  testInstrumentVideoLayoutResolvesNumericTrackKey();
 
   console.log('PASS test_processVideos_validation');
 };

@@ -6,6 +6,10 @@ import {
 } from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 import { shareComposition } from '../../services/apiService.js';
+import {
+  hasGridArrangement,
+  toLegacyGridArrangement,
+} from '../../../shared/gridLayout.js';
 import './VideoComposer.css';
 
 const VideoComposer = ({
@@ -43,6 +47,10 @@ const VideoComposer = ({
   // Preserved across finally so Retry knows which mode was last used.
   const lastModeRef = useRef(false);
   const MIN_NOTE_DURATION_SECONDS = 1 / 120;
+  const normalizedGridArrangement = useMemo(
+    () => toLegacyGridArrangement(gridArrangement),
+    [gridArrangement],
+  );
 
   const getNormalizedNoteTime = (note) => {
     const candidates = [note?.time, note?.start, note?.startTime];
@@ -106,10 +114,7 @@ const VideoComposer = ({
       );
     }
 
-    const nonEmptyArrangement = Object.fromEntries(
-      Object.entries(gridArrangement || {}).filter(([, v]) => !v.isEmpty),
-    );
-    if (Object.keys(nonEmptyArrangement).length === 0) {
+    if (!hasGridArrangement(normalizedGridArrangement)) {
       errors.push('Grid arrangement is missing.');
     }
 
@@ -130,7 +135,7 @@ const VideoComposer = ({
     }
 
     return errors;
-  }, [midiData, instrumentTrackMap, gridArrangement, videoFiles]);
+  }, [midiData, instrumentTrackMap, normalizedGridArrangement, videoFiles]);
 
   const canCompose = validationErrors.length === 0;
 
@@ -160,7 +165,7 @@ const VideoComposer = ({
     abortRef.current = abort;
     lastModeRef.current = isPreview;
 
-    console.log('Grid arrangement:', gridArrangement);
+    console.log('Grid arrangement:', normalizedGridArrangement);
     onStart?.();
     setIsProcessing(true);
     setProcessingMode(isPreview ? 'preview' : 'full');
@@ -195,9 +200,7 @@ const VideoComposer = ({
       const midiPayload = {
         ...midiData,
         tracks: normalizedTracks,
-        gridArrangement: Object.fromEntries(
-          Object.entries(gridArrangement || {}).filter(([, v]) => !v.isEmpty),
-        ),
+        gridArrangement: gridArrangement || normalizedGridArrangement,
         trackVolumes: effectiveVolumes,
         compositionStyle: compositionStyle || {},
         clipStyles: clipStyles || {},

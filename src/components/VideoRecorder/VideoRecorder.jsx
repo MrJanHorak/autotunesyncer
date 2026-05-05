@@ -6,6 +6,7 @@ import LoadingSpinner from '../LoadingSpinner/LoadingSpinner';
 import SampleSoundButton from '../SampleSoundButton/SampleSoundButton';
 import '../styles.css';
 import { isDrumTrack } from '../../js/drumUtils';
+import { CONFIG } from '../../../config.js';
 import CountdownTimer from '../CountdownTimer/CountdownTimer';
 import ToggleSwitch from '../ToggleSwitch/ToggleSwitch';
 
@@ -103,7 +104,8 @@ const VideoRecorder = ({
 
   const [isAutotuneEnabled, setIsAutotuneEnabled] = useState(false);
   const [isDrum] = useState(() => isDrumTrack(instrument));
-  const isPercussion = isDrum ||
+  const isPercussion =
+    isDrum ||
     ['percussion', 'percussive'].includes(instrument.family?.toLowerCase());
   const [isUploadMode, setIsUploadMode] = useState(false);
   const [showTrimmer, setShowTrimmer] = useState(false);
@@ -140,7 +142,9 @@ const VideoRecorder = ({
       });
 
       const stream = videoElement.captureStream();
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      const mimeType = MediaRecorder.isTypeSupported(
+        'video/webm;codecs=vp9,opus',
+      )
         ? 'video/webm;codecs=vp9,opus'
         : 'video/webm';
       const mediaRecorder = new MediaRecorder(stream, { mimeType });
@@ -150,16 +154,23 @@ const VideoRecorder = ({
         mediaRecorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunks.push(e.data);
         };
-        mediaRecorder.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' }));
+        mediaRecorder.onstop = () =>
+          resolve(new Blob(chunks, { type: 'video/webm' }));
         mediaRecorder.onerror = (e) => reject(e.error);
 
-        videoElement.play().then(() => {
-          mediaRecorder.start(100);
-          setTimeout(() => {
-            mediaRecorder.stop();
-            videoElement.pause();
-          }, (end - start) * 1000);
-        }).catch(reject);
+        videoElement
+          .play()
+          .then(() => {
+            mediaRecorder.start(100);
+            setTimeout(
+              () => {
+                mediaRecorder.stop();
+                videoElement.pause();
+              },
+              (end - start) * 1000,
+            );
+          })
+          .catch(reject);
       });
     } catch (error) {
       console.error('Error trimming video:', error);
@@ -283,7 +294,11 @@ const VideoRecorder = ({
   const handleRecord = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, aspectRatio: { ideal: 16 / 9 } },
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          aspectRatio: { ideal: 16 / 9 },
+        },
         audio: true,
       });
 
@@ -294,10 +309,15 @@ const VideoRecorder = ({
       }
 
       return new Promise((resolve) => {
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        const mimeType = MediaRecorder.isTypeSupported(
+          'video/webm;codecs=vp9,opus',
+        )
           ? 'video/webm;codecs=vp9,opus'
           : 'video/webm';
-        const mediaRecorder = new MediaRecorder(stream, { mimeType });
+        const mediaRecorder = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: CONFIG.recording.videoBitsPerSecond,
+        });
         const chunks = [];
 
         mediaRecorder.ondataavailable = (e) => {
@@ -736,7 +756,10 @@ const VideoRecorder = ({
             )}
           {renderVideo()}
           {recordingState.isRecording && (
-            <div className='duration-badge' style={{ top: 'auto', bottom: '10px' }}>
+            <div
+              className='duration-badge'
+              style={{ top: 'auto', bottom: '10px' }}
+            >
               {recordingState.recordingDuration}s / {minDuration}s min
             </div>
           )}
@@ -768,7 +791,11 @@ const VideoRecorder = ({
               <span>Duration: {formatTime(endTime - startTime)}</span>
               <span>End: {formatTime(endTime)}</span>
             </div>
-            <button onClick={handleTrim} className='control-button' disabled={isTrimming}>
+            <button
+              onClick={handleTrim}
+              className='control-button'
+              disabled={isTrimming}
+            >
               {isTrimming ? 'Trimming…' : 'Apply Trim'}
             </button>
           </div>

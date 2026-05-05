@@ -1,6 +1,10 @@
 import Queue from 'bull';
 import process from 'process';
 import cacheService from './cacheService.js';
+import {
+  hasGridArrangement,
+  toLegacyGridArrangement,
+} from '../../shared/gridLayout.js';
 
 // Initialize queue with Redis connection
 const videoProcessingQueue = new Queue('video processing', {
@@ -86,11 +90,18 @@ videoProcessingQueue.process('compose', QUEUE_CONCURRENCY, async (job) => {
     });
 
     // Write enhanced data files
+    const normalizedGridArrangement = hasGridArrangement(
+      midiData?.gridArrangement,
+    )
+      ? midiData.gridArrangement
+      : {};
+
     writeFileSync(
       midiJsonPath,
       JSON.stringify(
         {
           ...midiData,
+          gridArrangement: normalizedGridArrangement,
           compositionStyle:
             midiData?.compositionStyle || compositionStyle || {},
           clipStyles: midiData?.clipStyles || clipStyles || {},

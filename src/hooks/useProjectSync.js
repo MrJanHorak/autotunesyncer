@@ -1,6 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
-import { DEFAULT_COMPOSITION_STYLE, DEFAULT_CLIP_STYLE } from '../js/styleDefaults';
+import {
+  DEFAULT_COMPOSITION_STYLE,
+  DEFAULT_CLIP_STYLE,
+} from '../js/styleDefaults';
 import { apiFetch } from '../services/apiService';
+import {
+  hasGridArrangement,
+  normalizeGridArrangement,
+} from '../../shared/gridLayout.js';
 
 /**
  * Manages all project-scoped persistence side-effects:
@@ -45,7 +52,11 @@ export function useProjectSync({
 
     setInstrumentVideos((prev) => {
       Object.values(prev).forEach((url) => {
-        try { URL.revokeObjectURL(url); } catch { /* ignore */ }
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          /* ignore */
+        }
       });
       return {};
     });
@@ -70,22 +81,29 @@ export function useProjectSync({
     loadProjectState(currentProject.id)
       .then((state) => {
         if (clipsLoadingVersion.current !== version) return;
-        shadowStateRef.current = state || {};  // seed shadow from server
+        shadowStateRef.current = state || {}; // seed shadow from server
         if (state?.midiFileBase64) {
           const [header, data] = state.midiFileBase64.split(',');
           const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
           const bytes = atob(data);
           const arr = new Uint8Array(bytes.length);
           for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-          const file = new File([arr], state.midiFileName || 'project.mid', { type: mime });
+          const file = new File([arr], state.midiFileName || 'project.mid', {
+            type: mime,
+          });
           setMidiFile(file);
         }
-        if (state?.gridArrangement && Object.keys(state.gridArrangement).length > 0)
-          setGridArrangement(state.gridArrangement);
+        if (hasGridArrangement(state?.gridArrangement)) {
+          setGridArrangement(normalizeGridArrangement(state.gridArrangement));
+        }
         if (state?.trackVolumes && Object.keys(state.trackVolumes).length > 0)
           setTrackVolumes(state.trackVolumes);
         if (state?.compositionStyle)
-          setCompositionStyle((prev) => ({ ...DEFAULT_COMPOSITION_STYLE, ...prev, ...state.compositionStyle }));
+          setCompositionStyle((prev) => ({
+            ...DEFAULT_COMPOSITION_STYLE,
+            ...prev,
+            ...state.compositionStyle,
+          }));
         if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {
           setClipStyles(
             Object.fromEntries(
@@ -97,7 +115,9 @@ export function useProjectSync({
           );
         }
       })
-      .catch((err) => console.warn('[clips] Failed to load project state:', err));
+      .catch((err) =>
+        console.warn('[clips] Failed to load project state:', err),
+      );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
 
@@ -112,24 +132,38 @@ export function useProjectSync({
       if (!savedClipKeys.has(key)) continue;
 
       if (clipBlobCache.current[key]) {
-        setVideoFiles((prev) => prev[key] ? prev : { ...prev, [key]: clipBlobCache.current[key] });
+        setVideoFiles((prev) =>
+          prev[key] ? prev : { ...prev, [key]: clipBlobCache.current[key] },
+        );
         setInstrumentVideos((prev) =>
-          prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(clipBlobCache.current[key]) },
+          prev[key]
+            ? prev
+            : {
+                ...prev,
+                [key]: URL.createObjectURL(clipBlobCache.current[key]),
+              },
         );
         continue;
       }
 
       apiFetch(`/projects/${projectId}/clips/${encodeURIComponent(key)}/file`)
-        .then((r) => { if (clipsLoadingVersion.current !== version) return null; return r.blob(); })
+        .then((r) => {
+          if (clipsLoadingVersion.current !== version) return null;
+          return r.blob();
+        })
         .then((blob) => {
           if (!blob || clipsLoadingVersion.current !== version) return;
           clipBlobCache.current[key] = blob;
-          setVideoFiles((prev) => prev[key] ? prev : { ...prev, [key]: blob });
+          setVideoFiles((prev) =>
+            prev[key] ? prev : { ...prev, [key]: blob },
+          );
           setInstrumentVideos((prev) =>
             prev[key] ? prev : { ...prev, [key]: URL.createObjectURL(blob) },
           );
         })
-        .catch((err) => console.warn(`[clips] Failed to fetch clip for ${key}:`, err));
+        .catch((err) =>
+          console.warn(`[clips] Failed to fetch clip for ${key}:`, err),
+        );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instruments, savedClipKeys, currentProject?.id]);
@@ -141,8 +175,14 @@ export function useProjectSync({
     const reader = new FileReader();
     reader.onload = async () => {
       try {
-        const patch = { midiFileBase64: reader.result, midiFileName: midiFile.name };
-        shadowStateRef.current = { ...(shadowStateRef.current || {}), ...patch };
+        const patch = {
+          midiFileBase64: reader.result,
+          midiFileName: midiFile.name,
+        };
+        shadowStateRef.current = {
+          ...(shadowStateRef.current || {}),
+          ...patch,
+        };
         await saveProjectState(shadowStateRef.current);
       } catch (err) {
         console.warn('[clips] Failed to save MIDI to project state:', err);
@@ -154,18 +194,32 @@ export function useProjectSync({
 
   // ── 4. Debounced save of arrangement, volumes, and style ──────────────────
   useEffect(() => {
-    if (!currentProject || Object.keys(gridArrangement).length === 0) return;
+    if (!currentProject || !hasGridArrangement(gridArrangement)) return;
     clearTimeout(saveArrangementTimeoutRef.current);
     saveArrangementTimeoutRef.current = setTimeout(async () => {
       try {
-        const patch = { gridArrangement, trackVolumes, compositionStyle, clipStyles };
-        shadowStateRef.current = { ...(shadowStateRef.current || {}), ...patch };
+        const patch = {
+          gridArrangement: normalizeGridArrangement(gridArrangement),
+          trackVolumes,
+          compositionStyle,
+          clipStyles,
+        };
+        shadowStateRef.current = {
+          ...(shadowStateRef.current || {}),
+          ...patch,
+        };
         await saveProjectState(shadowStateRef.current);
       } catch (err) {
         console.warn('[state] Failed to save arrangement:', err);
       }
     }, 1500);
-  }, [gridArrangement, trackVolumes, compositionStyle, clipStyles, currentProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [
+    gridArrangement,
+    trackVolumes,
+    compositionStyle,
+    clipStyles,
+    currentProject?.id,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { savedClipKeys, setSavedClipKeys, clipBlobCache };
 }

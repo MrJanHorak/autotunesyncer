@@ -5,7 +5,13 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { DEFAULT_CLIP_STYLE, COLOR_GRADE_LABELS } from '../../js/styleDefaults';
 
-const SVG_COLOR_GRADES = new Set(['warm', 'cool', 'vintage', 'cyberpunk', 'vivid']);
+const SVG_COLOR_GRADES = new Set([
+  'warm',
+  'cool',
+  'vintage',
+  'cyberpunk',
+  'vivid',
+]);
 
 const getClipColorFilter = (colorGrade, filterIds) => {
   switch (colorGrade) {
@@ -26,7 +32,9 @@ const getClipColorFilter = (colorGrade, filterIds) => {
   }
 };
 
-const ClipColorGradeFilterDefs = memo(function ClipColorGradeFilterDefs({ filterIds }) {
+const ClipColorGradeFilterDefs = memo(function ClipColorGradeFilterDefs({
+  filterIds,
+}) {
   return (
     <svg
       aria-hidden='true'
@@ -396,15 +404,59 @@ export const SortableItem = memo(function SortableItem({
   isPreviewPlaying,
   activeLevel,
   beatPulseClass,
+  isEditable = true,
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition } =
+    useSortable({ id });
+
+  return (
+    <GridClipItem
+      id={id}
+      item={item}
+      getHeatColor={getHeatColor}
+      accentColor={accentColor}
+      isEmpty={isEmpty}
+      clipStyle={clipStyle}
+      onClipStyleChange={onClipStyleChange}
+      videoUrl={videoUrl}
+      isPreviewPlaying={isPreviewPlaying}
+      activeLevel={activeLevel}
+      beatPulseClass={beatPulseClass}
+      isEditable={isEditable}
+      containerRef={setNodeRef}
+      containerProps={{ ...attributes, ...listeners }}
+      containerStyle={{
+        transform: transform ? CSS.Transform.toString(transform) : '',
+        transition: isPreviewPlaying ? 'none' : transition,
+      }}
+      fillParent={false}
+    />
+  );
+});
+
+export const GridClipItem = memo(function GridClipItem({
+  id,
+  item,
+  getHeatColor,
+  accentColor,
+  isEmpty,
+  clipStyle,
+  onClipStyleChange,
+  videoUrl,
+  isPreviewPlaying,
+  activeLevel,
+  beatPulseClass,
+  isEditable = true,
+  containerRef = null,
+  containerProps = {},
+  containerStyle = null,
+  fillParent = true,
 }) {
   const [showStylePicker, setShowStylePicker] = useState(false);
   const videoRef = useRef(null);
   const wasActiveRef = useRef(false);
   const btnRef = useRef(null);
   const gradeFilterIdSeed = useId().replace(/[^a-zA-Z0-9_-]/g, '');
-
-  const { attributes, listeners, setNodeRef, transform, transition } =
-    useSortable({ id });
 
   // Opacity logic:
   //   idle (no preview)      → 0.35, looping
@@ -500,8 +552,6 @@ export const SortableItem = memo(function SortableItem({
       : 0;
 
   const cellStyle = {
-    transform: transform ? CSS.Transform.toString(transform) : '',
-    transition: isPreviewPlaying ? 'none' : transition,
     background: isPreviewPlaying
       ? isEmpty
         ? 'transparent'
@@ -510,7 +560,9 @@ export const SortableItem = memo(function SortableItem({
         ? '#f3f4f6'
         : getHeatColor,
     borderRadius: cs.roundedCorners ? `${cs.cornerRadius}px` : '12px',
-    aspectRatio: '16/9',
+    ...(fillParent
+      ? { width: '100%', height: '100%' }
+      : { aspectRatio: '16/9' }),
     border:
       cs.borderWidth > 0
         ? `${cs.borderWidth}px solid ${cs.borderColor}`
@@ -518,6 +570,7 @@ export const SortableItem = memo(function SortableItem({
     boxSizing: 'border-box',
     position: 'relative',
     overflow: 'hidden',
+    ...(containerStyle || {}),
   };
 
   const cellContentStyle = {
@@ -526,14 +579,26 @@ export const SortableItem = memo(function SortableItem({
 
   return (
     <div
-      ref={setNodeRef}
+      ref={containerRef}
       style={cellStyle}
       className={`grid-cell ${isEmpty ? 'empty' : ''} ${isPreviewPlaying ? 'preview-active' : ''} ${beatPulseClass || ''}`}
-      {...attributes}
-      {...listeners}
+      {...containerProps}
     >
       {!isEmpty && usesSvgColorGrade && (
         <ClipColorGradeFilterDefs filterIds={gradeFilterIds} />
+      )}
+
+      {!isEmpty && !isPreviewPlaying && isEditable && (
+        <div
+          className='grid-cell__drag-handle'
+          title='Drag clip to reposition'
+          aria-hidden='true'
+        >
+          <span className='grid-cell__drag-dot' />
+          <span className='grid-cell__drag-dot' />
+          <span className='grid-cell__drag-dot' />
+          <span className='grid-cell__drag-dot' />
+        </div>
       )}
 
       {/* Video — use display:none (not opacity:0) when hidden so the browser's
