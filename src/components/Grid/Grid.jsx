@@ -51,6 +51,95 @@ const getOverlapArea = (left, right) => {
   return overlapWidth * overlapHeight;
 };
 
+const isOverlapping = (left, right) => getOverlapArea(left, right) > 0;
+
+const canPlaceEditorItem = (candidate, occupiedItems) =>
+  occupiedItems.every(
+    (item) => item.i === candidate.i || !isOverlapping(candidate, item),
+  );
+
+const getPositionDistance = (left, right) =>
+  Math.abs(left.x - right.x) + Math.abs(left.y - right.y);
+
+const getShrinkCandidates = (item, blocker) => {
+  const itemRight = item.x + item.w;
+  const itemBottom = item.y + item.h;
+  const blockerRight = blocker.x + blocker.w;
+  const blockerBottom = blocker.y + blocker.h;
+
+  return [
+    {
+      x: item.x,
+      y: item.y,
+      size: Math.min(Math.max(0, blocker.x - item.x), item.h),
+    },
+    {
+      x: blockerRight,
+      y: item.y,
+      size: Math.min(Math.max(0, itemRight - blockerRight), item.h),
+    },
+    {
+      x: item.x,
+      y: item.y,
+      size: Math.min(item.w, Math.max(0, blocker.y - item.y)),
+    },
+    {
+      x: item.x,
+      y: blockerBottom,
+      size: Math.min(item.w, Math.max(0, itemBottom - blockerBottom)),
+    },
+  ]
+    .filter((candidate) => candidate.size >= MIN_TILE_SPAN)
+    .map((candidate) => ({
+      i: item.i,
+      x: candidate.x,
+      y: candidate.y,
+      w: candidate.size,
+      h: candidate.size,
+    }))
+    .sort((left, right) => {
+      if (right.w !== left.w) return right.w - left.w;
+      return getPositionDistance(left, item) - getPositionDistance(right, item);
+    });
+};
+
+const findNearestOpenSlot = (item, occupiedItems) => {
+  for (let size = item.w; size >= MIN_TILE_SPAN; size -= 1) {
+    const maxOrigin = EDITOR_GRID_UNITS - size;
+    const positions = [];
+
+    for (let y = 0; y <= maxOrigin; y += 1) {
+      for (let x = 0; x <= maxOrigin; x += 1) {
+        positions.push({ x, y });
+      }
+    }
+
+    positions.sort((left, right) => {
+      const leftDistance = getPositionDistance(left, item);
+      const rightDistance = getPositionDistance(right, item);
+      if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+      if (left.y !== right.y) return left.y - right.y;
+      return left.x - right.x;
+    });
+
+    for (const position of positions) {
+      const candidate = {
+        i: item.i,
+        x: position.x,
+        y: position.y,
+        w: size,
+        h: size,
+      };
+
+      if (canPlaceEditorItem(candidate, occupiedItems)) {
+        return candidate;
+      }
+    }
+  }
+
+  return item;
+};
+
 const findSwapTarget = (layout, draggedItem) => {
   if (!draggedItem?.i) return null;
 
@@ -131,6 +220,50 @@ const normalizeEditorLayout = (layout) =>
       };
     })
     .sort(sortEditorLayout);
+
+const resolveResizeCollisions = (layout, resizedItemId) => {
+  const normalizedLayout = normalizeEditorLayout(layout);
+  if (!resizedItemId) return normalizedLayout;
+
+  const resizedItem = normalizedLayout.find((item) => item.i === resizedItemId);
+  if (!resizedItem) return normalizedLayout;
+
+  const fixedItems = [];
+  const overlappingItems = [];
+
+  normalizedLayout.forEach((item) => {
+    if (item.i === resizedItemId) return;
+
+    if (isOverlapping(item, resizedItem)) {
+      overlappingItems.push(item);
+      return;
+    }
+
+    fixedItems.push(item);
+  });
+
+  if (!overlappingItems.length) return normalizedLayout;
+
+  const occupiedItems = [resizedItem, ...fixedItems];
+  const resolvedItems = overlappingItems
+    .sort((left, right) => {
+      const overlapDiff =
+        getOverlapArea(right, resizedItem) - getOverlapArea(left, resizedItem);
+      if (overlapDiff !== 0) return overlapDiff;
+      return sortEditorLayout(left, right);
+    })
+    .map((item) => {
+      const shrinkCandidate = getShrinkCandidates(item, resizedItem).find(
+        (candidate) => canPlaceEditorItem(candidate, occupiedItems),
+      );
+      const resolvedItem =
+        shrinkCandidate || findNearestOpenSlot(item, occupiedItems);
+      occupiedItems.push(resolvedItem);
+      return resolvedItem;
+    });
+
+  return normalizeEditorLayout([resizedItem, ...fixedItems, ...resolvedItems]);
+};
 
 const areEditorLayoutsEqual = (left, right) => {
   const leftLayout = normalizeEditorLayout(left);
@@ -379,6 +512,7 @@ const Grid = ({
   );
   const stageRef = useRef(null);
   const dragStartLayoutRef = useRef(null);
+  const resizeItemIdRef = useRef(null);
   const ignoreNextLayoutChangeRef = useRef(false);
   const committedLayoutRef = useRef(initialEditorLayout);
   const [stageWidth, setStageWidth] = useState(DEFAULT_STAGE_WIDTH);
@@ -666,7 +800,9 @@ const Grid = ({
       return committedLayoutRef.current;
     }
 
-    const normalizedLayout = normalizeEditorLayout(nextLayout);
+    const normalizedLayout = resizeItemIdRef.current
+      ? resolveResizeCollisions(nextLayout, resizeItemIdRef.current)
+      : normalizeEditorLayout(nextLayout);
     setEditorLayout((currentLayout) =>
       areEditorLayoutsEqual(currentLayout, normalizedLayout)
         ? currentLayout
@@ -694,6 +830,7 @@ const Grid = ({
   };
 
   const handleDragStart = (nextLayout) => {
+    resizeItemIdRef.current = null;
     dragStartLayoutRef.current = normalizeEditorLayout(nextLayout);
   };
 
@@ -717,7 +854,25 @@ const Grid = ({
     commitEditorLayout(nextLayout);
   };
 
+  const handleResizeStart = (nextLayout, oldItem, newItem) => {
+    resizeItemIdRef.current = (newItem || oldItem)?.i || null;
+  };
+
+  const handleResize = (nextLayout, oldItem, newItem) => {
+    resizeItemIdRef.current =
+      (newItem || oldItem)?.i || resizeItemIdRef.current;
+    updateEditorLayout(nextLayout);
+  };
+
+  const handleResizeStop = (nextLayout, oldItem, newItem) => {
+    resizeItemIdRef.current =
+      (newItem || oldItem)?.i || resizeItemIdRef.current;
+    commitEditorLayout(nextLayout);
+    resizeItemIdRef.current = null;
+  };
+
   const handleResetLayout = () => {
+    resizeItemIdRef.current = null;
     const nextLayout = buildDefaultEditorLayout(processedData);
     setEditorLayout(nextLayout);
     committedLayoutRef.current = nextLayout;
@@ -1143,7 +1298,9 @@ const Grid = ({
           onLayoutChange={updateEditorLayout}
           onDragStart={handleDragStart}
           onDragStop={handleDragStop}
-          onResizeStop={commitEditorLayout}
+          onResizeStart={handleResizeStart}
+          onResize={handleResize}
+          onResizeStop={handleResizeStop}
         >
           {processedData.map((item) => {
             const intensity = getHeatIntensity(item.count);
