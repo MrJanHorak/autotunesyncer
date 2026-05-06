@@ -14,6 +14,12 @@ import { tmpdir } from 'os';
 import archiver from 'archiver';
 import AdmZip from 'adm-zip';
 import db from '../db/database.js';
+import {
+  DEFAULT_RENDER_PRESET,
+  normalizeRenderPreset,
+} from '../../shared/renderPresets.js';
+
+const PROJECT_STATE_SCHEMA_VERSION = 2;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
@@ -28,22 +34,36 @@ export const listProjects = (req, res) => {
 };
 
 export const createProject = (req, res) => {
-  const { name, description = '' } = req.body;
+  const { name, description = '', renderPreset } = req.body;
   if (!name?.trim()) {
     return res.status(400).json({ error: 'Project name is required' });
   }
 
   const id = uuidv4();
+  const normalizedRenderPreset = normalizeRenderPreset(
+    renderPreset,
+    DEFAULT_RENDER_PRESET,
+  );
+  const initialState = JSON.stringify({
+    renderPreset: normalizedRenderPreset,
+    schemaVersion: PROJECT_STATE_SCHEMA_VERSION,
+    savedAt: new Date().toISOString(),
+  });
   db.prepare(
-    'INSERT INTO projects (id, user_id, name, description) VALUES (?, ?, ?, ?)',
-  ).run(id, req.user.id, name.trim(), description.trim());
+    'INSERT INTO projects (id, user_id, name, description, state) VALUES (?, ?, ?, ?, ?)',
+  ).run(id, req.user.id, name.trim(), description.trim(), initialState);
 
   const project = db
     .prepare(
       'SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?',
     )
     .get(id);
-  res.status(201).json({ project });
+  res.status(201).json({
+    project: {
+      ...project,
+      renderPreset: normalizedRenderPreset,
+    },
+  });
 };
 
 export const getProject = (req, res) => {
@@ -112,7 +132,7 @@ export const saveProjectState = (req, res) => {
 
   const state = JSON.stringify({
     ...req.body,
-    schemaVersion: 1,
+    schemaVersion: PROJECT_STATE_SCHEMA_VERSION,
     savedAt: new Date().toISOString(),
   });
   db.prepare(
@@ -195,7 +215,11 @@ export const exportProject = (req, res) => {
 
   zip.append(
     JSON.stringify(
-      { name: project.name, id: project.id, schemaVersion: 1 },
+      {
+        name: project.name,
+        id: project.id,
+        schemaVersion: PROJECT_STATE_SCHEMA_VERSION,
+      },
       null,
       2,
     ),

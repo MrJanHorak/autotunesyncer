@@ -74,6 +74,16 @@ class VideoComposerRegressionTests(unittest.TestCase):
         self.assertEqual(drum_style['labelText'], 'Snare')
         self.assertIn('drum-drum_snare_drum', drum_candidates)
 
+    def test_resolve_clip_style_defaults_to_rounded_corners(self):
+        composer = self.make_composer()
+
+        style, candidates, matched_key = composer._resolve_clip_style('0')
+
+        self.assertIsNone(matched_key)
+        self.assertIn('track-0', candidates)
+        self.assertTrue(style['roundedCorners'])
+        self.assertEqual(style['cornerRadius'], 12)
+
     def test_note_triggered_sequence_uses_clip_background_color(self):
         source_path = self.write_dummy_media('snare-source.mp4')
         composer = self.make_composer(
@@ -89,6 +99,7 @@ class VideoComposerRegressionTests(unittest.TestCase):
         captured = {}
 
         composer._get_media_duration = lambda _path: 8.0
+        composer._get_video_info = lambda _path: (360, 640, 8.0)
         composer._build_atempo_chain = lambda _value: 'atempo=1.0'
         composer._create_simple_loop = lambda *_args, **_kwargs: 'loop-fallback.mp4'
 
@@ -111,8 +122,13 @@ class VideoComposerRegressionTests(unittest.TestCase):
 
         self.assertEqual(result, str(self.temp_dir / 'snare_regression.mp4'))
         self.assertIn(
-            'color=0x1CB52B:size=640x360:rate=30:duration=1.0',
+            'color=0x1CB52B:size=360x640:rate=30:duration=1.0',
             captured['cmd'],
+        )
+        filter_graph = ''.join(captured['filter_parts'])
+        self.assertIn(
+            'scale=360:640:flags=lanczos:force_original_aspect_ratio=increase,crop=360:640,setsar=1,',
+            filter_graph,
         )
 
     def test_background_video_keeps_note_trigger_output_transparent(self):
@@ -125,6 +141,7 @@ class VideoComposerRegressionTests(unittest.TestCase):
         captured = {}
 
         composer._get_media_duration = lambda _path: 8.0
+        composer._get_video_info = lambda _path: (360, 640, 8.0)
         composer._build_atempo_chain = lambda _value: 'atempo=1.0'
         composer._create_simple_loop = lambda *_args, **_kwargs: 'loop-fallback.mp4'
 
@@ -147,10 +164,14 @@ class VideoComposerRegressionTests(unittest.TestCase):
 
         self.assertEqual(result, str(self.temp_dir / 'lead_with-bg.mov'))
         self.assertIn(
-            'color=c=black@0.0:size=640x360:rate=30:duration=1.0',
+            'color=c=black@0.0:size=360x640:rate=30:duration=1.0',
             captured['cmd'],
         )
         alpha_filter = ''.join(captured['filter_parts'])
+        self.assertIn(
+            'scale=360:640:flags=lanczos:force_original_aspect_ratio=increase,crop=360:640,setsar=1,format=rgba,',
+            alpha_filter,
+        )
         self.assertIn('format=rgba', alpha_filter)
         self.assertIn('tpad=stop_mode=clone:stop_duration=1.000', alpha_filter)
 
@@ -240,7 +261,7 @@ class VideoComposerRegressionTests(unittest.TestCase):
 
         self.assertTrue(filter_parts)
         self.assertIn(
-            'scale=640:360:flags=lanczos:force_original_aspect_ratio=increase',
+            'scale=640:360:flags=lanczos:force_original_aspect_ratio=increase,crop=640:360,setsar=1',
             filter_parts[0],
         )
 
@@ -463,7 +484,7 @@ class VideoComposerRegressionTests(unittest.TestCase):
 
         self.assertEqual(result, str(self.temp_dir / 'single-cell-grid.mp4'))
         self.assertIn('filter_script', captured)
-        self.assertIn('overlay=x=0:y=0:eof_action=pass:format=auto', captured['filter_script'])
+        self.assertIn('overlay=x=8:y=8:eof_action=pass:format=auto', captured['filter_script'])
 
     def test_span_aware_grid_layout_uses_stage_coordinates(self):
         source_path = self.write_dummy_media('span-cell.mp4')
@@ -527,9 +548,9 @@ class VideoComposerRegressionTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, str(self.temp_dir / 'span-grid.mp4'))
-        self.assertEqual(captured['cell_sizes'], [('0', 640, 270)])
+        self.assertEqual(captured['cell_sizes'], [('0', 624, 254)])
         self.assertIn('color=0x0F172A:s=1920x1080:r=30:d=4.0', captured['cmd'])
-        self.assertIn('overlay=x=160:y=180:eof_action=pass:format=auto', captured['filter_script'])
+        self.assertIn('overlay=x=168:y=188:eof_action=pass:format=auto', captured['filter_script'])
 
     def test_legacy_midi_sync_wrapper_routes_to_create_composition(self):
         recorded = {}

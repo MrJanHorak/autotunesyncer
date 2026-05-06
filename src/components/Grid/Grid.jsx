@@ -9,6 +9,11 @@ import {
   hasGridArrangement,
   normalizeGridArrangement,
 } from '../../../shared/gridLayout.js';
+import {
+  DEFAULT_RENDER_PRESET,
+  getRenderPresetConfig,
+  normalizeRenderPreset,
+} from '../../../shared/renderPresets.js';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 import './Grid.css';
@@ -29,6 +34,7 @@ const BASE_EDITOR_GRID_UNITS = 12;
 const EDITOR_GRID_SNAP_FACTOR = 2;
 const EDITOR_GRID_UNITS = BASE_EDITOR_GRID_UNITS * EDITOR_GRID_SNAP_FACTOR;
 const DEFAULT_STAGE_WIDTH = 960;
+const PORTRAIT_STAGE_MAX_WIDTH = 560;
 const MIN_TILE_SPAN = 2 * EDITOR_GRID_SNAP_FACTOR;
 const MAX_TILE_SPAN = 6 * EDITOR_GRID_SNAP_FACTOR;
 const getArrangementId = (item) => item.id.replace(/^(track-|drum-)/, '');
@@ -408,7 +414,12 @@ const Grid = ({
   activeLevels,
   compositionStyle,
   backgroundAsset,
+  renderPreset = DEFAULT_RENDER_PRESET,
 }) => {
+  const resolvedRenderPreset = normalizeRenderPreset(renderPreset);
+  const renderPresetConfig = getRenderPresetConfig(resolvedRenderPreset);
+  const isPortraitStage =
+    renderPresetConfig.aspectRatio.height > renderPresetConfig.aspectRatio.width;
   const previewStyle = {
     ...DEFAULT_COMPOSITION_STYLE,
     ...(compositionStyle || {}),
@@ -523,7 +534,16 @@ const Grid = ({
   const committedLayoutRef = useRef(initialEditorLayout);
   const [stageWidth, setStageWidth] = useState(DEFAULT_STAGE_WIDTH);
   const [editorLayout, setEditorLayout] = useState(initialEditorLayout);
-  const gridHeight = useMemo(() => (stageWidth * 9) / 16, [stageWidth]);
+  const gridHeight = useMemo(
+    () =>
+      (stageWidth * renderPresetConfig.aspectRatio.height) /
+      renderPresetConfig.aspectRatio.width,
+    [
+      stageWidth,
+      renderPresetConfig.aspectRatio.height,
+      renderPresetConfig.aspectRatio.width,
+    ],
+  );
   const rowHeight = useMemo(() => gridHeight / EDITOR_GRID_UNITS, [gridHeight]);
 
   // Intro card preview playback state
@@ -1253,7 +1273,14 @@ const Grid = ({
   const canEditLayout = !isPreviewPlaying && processedData.length > 0;
 
   return (
-    <div className='grid-container'>
+    <div
+      className='grid-container'
+      style={{
+        '--video-width': isPortraitStage
+          ? `min(90vw, ${PORTRAIT_STAGE_MAX_WIDTH}px)`
+          : 'min(90vw, 1400px)',
+      }}
+    >
       {canEditLayout && (
         <div className='grid-layout-toolbar'>
           <span className='grid-layout-note'>
@@ -1277,6 +1304,7 @@ const Grid = ({
           .join(' ')}
         style={{
           background: previewStyle.backgroundColor || '#0a0a0f',
+          aspectRatio: `${renderPresetConfig.aspectRatio.width} / ${renderPresetConfig.aspectRatio.height}`,
           height: `${gridHeight}px`,
           ...stageTransitionStyle.style,
           ...stageOutroStyle.style,
@@ -1609,6 +1637,7 @@ Grid.propTypes = {
   activeLevels: PropTypes.object,
   compositionStyle: PropTypes.object,
   backgroundAsset: PropTypes.object,
+  renderPreset: PropTypes.string,
 };
 
 export default Grid;

@@ -142,7 +142,8 @@ export const DEFAULT_CLIP_STYLE = {
   bgColorEnabled: false,
   bgColor: '#1a1a2e',
 
-  roundedCorners: false,
+  roundedCorners: true,
+  roundedCornersConfigured: false,
   cornerRadius: 12,
 
   colorGrade: 'none', // 'none' | 'warm' | 'cool' | 'vintage' | 'cyberpunk' | 'bw' | 'vivid'

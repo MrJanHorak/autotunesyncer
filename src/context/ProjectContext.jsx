@@ -1,5 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
+import {
+  DEFAULT_RENDER_PRESET,
+  normalizeRenderPreset,
+} from '../../shared/renderPresets.js';
 
 const ProjectContext = createContext(null);
 
@@ -66,10 +70,18 @@ export function ProjectProvider({ children }) {
   }, []);
 
   const createProject = useCallback(
-    async (name, description = '') => {
+    async (
+      name,
+      description = '',
+      renderPreset = DEFAULT_RENDER_PRESET,
+    ) => {
       const res = await authFetch('/projects', {
         method: 'POST',
-        body: JSON.stringify({ name, description }),
+        body: JSON.stringify({
+          name,
+          description,
+          renderPreset: normalizeRenderPreset(renderPreset),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to create project');

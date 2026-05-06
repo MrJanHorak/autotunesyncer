@@ -8,6 +8,28 @@ import {
   hasGridArrangement,
   normalizeGridArrangement,
 } from '../../shared/gridLayout.js';
+import {
+  DEFAULT_RENDER_PRESET,
+  normalizeRenderPreset,
+} from '../../shared/renderPresets.js';
+
+const PROJECT_STATE_SCHEMA_VERSION = 2;
+
+const normalizeSavedClipStyle = (savedStyle = {}, schemaVersion = 0) => {
+  const normalizedStyle = { ...DEFAULT_CLIP_STYLE, ...savedStyle };
+
+  if (
+    Number(schemaVersion || 0) < PROJECT_STATE_SCHEMA_VERSION &&
+    savedStyle?.roundedCorners === false &&
+    savedStyle?.roundedCornersConfigured !== true
+  ) {
+    // Legacy projects rendered rounded in the grid despite the saved false
+    // default, so keep that visible behavior when loading older state.
+    normalizedStyle.roundedCorners = true;
+  }
+
+  return normalizedStyle;
+};
 
 /**
  * Manages all project-scoped persistence side-effects:
@@ -25,6 +47,7 @@ export function useProjectSync({
   midiFile,
   gridArrangement,
   trackVolumes,
+  renderPreset,
   compositionStyle,
   clipStyles,
   loadProjectState,
@@ -34,6 +57,7 @@ export function useProjectSync({
   setMidiFile,
   setGridArrangement,
   setTrackVolumes,
+  setRenderPreset,
   setCompositionStyle,
   setClipStyles,
   setVideoFiles,
@@ -69,6 +93,7 @@ export function useProjectSync({
     if (!currentProject) {
       setSavedClipKeys(new Set());
       clipBlobCache.current = {};
+      setRenderPreset(DEFAULT_RENDER_PRESET);
       return;
     }
 
@@ -84,6 +109,8 @@ export function useProjectSync({
       .then((state) => {
         if (clipsLoadingVersion.current !== version) return;
         shadowStateRef.current = state || {}; // seed shadow from server
+        const stateSchemaVersion = Number(state?.schemaVersion || 0);
+        setRenderPreset(normalizeRenderPreset(state?.renderPreset));
         if (state?.midiFileBase64) {
           const [header, data] = state.midiFileBase64.split(',');
           const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
@@ -139,7 +166,7 @@ export function useProjectSync({
             Object.fromEntries(
               Object.entries(state.clipStyles).map(([id, saved]) => [
                 id,
-                { ...DEFAULT_CLIP_STYLE, ...saved },
+                normalizeSavedClipStyle(saved, stateSchemaVersion),
               ]),
             ),
           );
@@ -228,8 +255,10 @@ export function useProjectSync({
     saveArrangementTimeoutRef.current = setTimeout(async () => {
       try {
         const patch = {
+          schemaVersion: PROJECT_STATE_SCHEMA_VERSION,
           gridArrangement: normalizeGridArrangement(gridArrangement),
           trackVolumes,
+          renderPreset: normalizeRenderPreset(renderPreset),
           compositionStyle,
           clipStyles,
         };
@@ -245,6 +274,7 @@ export function useProjectSync({
   }, [
     gridArrangement,
     trackVolumes,
+    renderPreset,
     compositionStyle,
     clipStyles,
     currentProject?.id,

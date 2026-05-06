@@ -21,6 +21,7 @@ import {
   DEFAULT_COMPOSITION_STYLE,
   DEFAULT_CLIP_STYLE,
 } from './js/styleDefaults';
+import { DEFAULT_RENDER_PRESET } from '../shared/renderPresets.js';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 import InstrumentSidebar from './components/InstrumentSidebar/InstrumentSidebar';
 import RecordingModal from './components/RecordingModal/RecordingModal';
@@ -544,6 +545,7 @@ function MainApp({ onChangeProject, onLogout }) {
   const [gridArrangement, setGridArrangement] = useState({});
   const [trackVolumes, setTrackVolumes] = useState({});
   const [muteStates, setMuteStates] = useState({});
+  const [renderPreset, setRenderPreset] = useState(DEFAULT_RENDER_PRESET);
   const [compositionStyle, setCompositionStyle] = useState(() => ({
     ...DEFAULT_COMPOSITION_STYLE,
   }));
@@ -571,6 +573,7 @@ function MainApp({ onChangeProject, onLogout }) {
     midiFile,
     gridArrangement,
     trackVolumes,
+    renderPreset,
     compositionStyle,
     clipStyles,
     loadProjectState,
@@ -580,6 +583,7 @@ function MainApp({ onChangeProject, onLogout }) {
     setMidiFile,
     setGridArrangement,
     setTrackVolumes,
+    setRenderPreset,
     setCompositionStyle,
     setClipStyles,
     setVideoFiles,
@@ -1077,6 +1081,7 @@ function MainApp({ onChangeProject, onLogout }) {
                 midiData={parsedMidiData}
                 onArrangementChange={setGridArrangement}
                 initialArrangement={gridArrangement}
+                renderPreset={renderPreset}
                 compositionStyle={compositionStyle}
                 backgroundAsset={backgroundAsset}
                 clipStyles={clipStyles}
@@ -1106,6 +1111,7 @@ function MainApp({ onChangeProject, onLogout }) {
                   soloTrack={soloTrack}
                   compositionStyle={compositionStyle}
                   clipStyles={clipStyles}
+                  renderPreset={renderPreset}
                   projectName={currentProject?.name || ''}
                 />
               )}
@@ -1153,6 +1159,7 @@ function MainApp({ onChangeProject, onLogout }) {
           instrumentVideos={instrumentVideos}
           longestNotes={longestNotes}
           midiData={parsedMidiData}
+          renderPreset={renderPreset}
           onRecordingComplete={handleRecordingComplete}
           onVideoReady={handleVideoReady}
           onClose={() => setRecordingTarget(null)}

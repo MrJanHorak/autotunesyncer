@@ -20,6 +20,10 @@ import {
   normalizeGridArrangement,
   toLegacyGridArrangement,
 } from '../../shared/gridLayout.js';
+import {
+  getRenderDimensions,
+  normalizeRenderPreset,
+} from '../../shared/renderPresets.js';
 
 // Bump when preprocessing algorithm or encoding settings change.
 const PREPROCESS_VERSION = 'v3'; // v3: stage-aware layout matching + sharper scaling/quality defaults
@@ -359,8 +363,11 @@ async function runCompositionJob(
     const gridArrangement = toLegacyGridArrangement(rawGridArrangement);
     const normalizedGridArrangement =
       normalizeGridArrangement(rawGridArrangement);
-    const totalWidth = isPreview ? 640 : 1920;
-    const totalHeight = isPreview ? 360 : 1080;
+    const renderPreset = normalizeRenderPreset(midiData.renderPreset);
+    const { width: totalWidth, height: totalHeight } = getRenderDimensions(
+      renderPreset,
+      { preview: isPreview },
+    );
     const gridColumns = Math.max(
       1,
       Number(normalizedGridArrangement.columns) || 1,
@@ -630,6 +637,8 @@ async function runCompositionJob(
       trackVolumes: midiData.trackVolumes || {},
       compositionStyle: midiData.compositionStyle || {},
       clipStyles: midiData.clipStyles || {},
+      renderPreset,
+      renderDimensions: { width: totalWidth, height: totalHeight },
       backgroundMedia,
     };
 

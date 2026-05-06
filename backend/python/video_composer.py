@@ -74,6 +74,9 @@ from drum_utils import DRUM_NOTES, is_drum_kit
 
 from processing_utils import encoder_queue, GPUManager
 
+GRID_SLOT_PADDING_REFERENCE_SIDE = 1080
+GRID_SLOT_PADDING_AT_REFERENCE = 8
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'config'))
 
@@ -151,6 +154,7 @@ class VideoComposer:
         try:
             logging.info("=== VideoComposer Initialization ===")
             self.preview_mode = preview_mode
+            self.midi_data = midi_data
             
             # Initialize render configuration for preview vs production
             self.render_config = self._get_render_config()
@@ -224,9 +228,7 @@ class VideoComposer:
             self.config = VideoComposerConfig()
             self.gpu_manager = GPUManager()
             self.output_path = output_path
-            self.midi_data = midi_data
             self._setup_paths(processed_videos_dir, output_path)
-            self.midi_data = midi_data
             self._process_midi_data(midi_data)
             self._setup_track_configuration()
             self.clip_manager = ClipManager()
@@ -341,24 +343,48 @@ class VideoComposer:
         Clean separation of rendering configurations for Preview vs Production.
         Returns a dictionary of encoding settings.
         """
+        requested_dimensions = {}
+        if isinstance(getattr(self, 'midi_data', None), dict):
+            requested_dimensions = self.midi_data.get('renderDimensions', {}) or {}
+
+        default_width = 640 if self.preview_mode else 1920
+        default_height = 360 if self.preview_mode else 1080
+
+        requested_width = requested_dimensions.get('width')
+        requested_height = requested_dimensions.get('height')
+
+        width = int(requested_width) if str(requested_width).isdigit() else default_width
+        height = int(requested_height) if str(requested_height).isdigit() else default_height
+        resolution = f'{width}x{height}'
+
         if self.preview_mode:
             return {
-                'resolution': '640x360',
+                'resolution': resolution,
                 'preset': 'ultrafast',  # CPU: ultrafast, GPU: p1/p2
                 'crf': '28',            # Lower quality
                 'audio_bitrate': '128k',
                 'video_bitrate': '1M',
-                'scale_filter': 'scale=640:360'
+                'scale_filter': f'scale={width}:{height}'
             }
         else:
             return {
-                'resolution': '1920x1080',
+                'resolution': resolution,
                 'preset': 'fast',       # CPU: fast, GPU: p4
                 'crf': '23',            # Keep chunk detail higher so enlarged tiles stay crisp after final encode
                 'audio_bitrate': '192k',
                 'video_bitrate': '5M',  # Used by non-CRF encoders; moderate bump helps larger tiles retain detail
-                'scale_filter': 'scale=1920:1080'
+                'scale_filter': f'scale={width}:{height}'
             }
+
+    def _get_target_resolution(self):
+        try:
+            return map(int, self.render_config['resolution'].split('x'))
+        except Exception:
+            return (
+                (640, 360)
+                if self.preview_mode
+                else (1920, 1080)
+            )
 
     def _get_encoding_settings(self):
         """Get FFmpeg encoding arguments based on configuration and hardware"""
@@ -1336,6 +1362,10 @@ class VideoComposer:
                 logging.warning(f"[NoteTrigger] Missing video for {track_name}")
                 return None
 
+            source_width, source_height, _ = self._get_video_info(video_path)
+            target_width = max(2, int(source_width or 640) & ~1)
+            target_height = max(2, int(source_height or 360) & ~1)
+
             # Sanitize & normalize notes
             MIN_DUR = 0.10  # 100 ms min to avoid ffmpeg micro durations
             valid = []
@@ -1496,7 +1526,8 @@ class VideoComposer:
                 if preserve_idle_alpha:
                     filter_parts.append(
                         f"[0:v]trim=start={safe_onset}:duration={video_dur},setpts=PTS-STARTPTS,"
-                        f"scale=640:360,format=rgba,"
+                        f"scale={target_width}:{target_height}:flags=lanczos:force_original_aspect_ratio=increase,"
+                        f"crop={target_width}:{target_height},setsar=1,format=rgba,"
                         f"tpad=stop_mode=clone:stop_duration={video_dur:.3f},"
                         f"trim=duration={video_dur:.3f},"
                         f"setpts=PTS-STARTPTS+{start:.3f}/TB[v{i}]"
@@ -1504,7 +1535,8 @@ class VideoComposer:
                 else:
                     filter_parts.append(
                         f"[0:v]trim=start={safe_onset}:duration={video_dur},setpts=PTS-STARTPTS,"
-                        f"scale=640:360,"
+                        f"scale={target_width}:{target_height}:flags=lanczos:force_original_aspect_ratio=increase,"
+                        f"crop={target_width}:{target_height},setsar=1,"
                         f"setpts=PTS-STARTPTS+{start:.3f}/TB[v{i}]"
                     )
 
@@ -1560,12 +1592,12 @@ class VideoComposer:
             if preserve_idle_alpha:
                 cmd += [
                     "-f", "lavfi", "-i",
-                    f"color=c=black@0.0:size=640x360:rate=30:duration={total_duration}",
+                    f"color=c=black@0.0:size={target_width}x{target_height}:rate=30:duration={total_duration}",
                 ]
             else:
                 cmd += [
                     "-f", "lavfi", "-i",
-                    f"color={bg_ffmpeg}:size=640x360:rate=30:duration={total_duration}",
+                    f"color={bg_ffmpeg}:size={target_width}x{target_height}:rate=30:duration={total_duration}",
                 ]
             cmd += [
                 "-f", "lavfi", "-i",
@@ -1835,6 +1867,19 @@ class VideoComposer:
         )
         return max(1, max_row_end), max(1, max_col_end)
 
+    def _get_grid_slot_padding(self, target_width, target_height, slot_width, slot_height):
+        base_padding = max(
+            2,
+            int(
+                round(
+                    (min(target_width, target_height) / GRID_SLOT_PADDING_REFERENCE_SIDE)
+                    * GRID_SLOT_PADDING_AT_REFERENCE
+                )
+            ),
+        )
+        max_slot_padding = max(0, min(slot_width // 6, slot_height // 6))
+        return min(base_padding, max_slot_padding)
+
     def _build_grid_render_slots(self, track_segments, target_width, target_height):
         def coerce_int(value, fallback, minimum=0):
             try:
@@ -1896,6 +1941,16 @@ class VideoComposer:
             pixel_height = (
                 target_height - pixel_y if row + span_h >= grid_rows else unit_height * span_h
             )
+            pixel_width = max(2, int(pixel_width) & ~1)
+            pixel_height = max(2, int(pixel_height) & ~1)
+            slot_padding = self._get_grid_slot_padding(
+                target_width,
+                target_height,
+                pixel_width,
+                pixel_height,
+            )
+            render_width = max(2, int(max(2, pixel_width - (slot_padding * 2))) & ~1)
+            render_height = max(2, int(max(2, pixel_height - (slot_padding * 2))) & ~1)
 
             slots.append({
                 'segment': segment,
@@ -1906,8 +1961,13 @@ class VideoComposer:
                 'span_h': span_h,
                 'pixel_x': pixel_x,
                 'pixel_y': pixel_y,
-                'pixel_width': max(2, int(pixel_width) & ~1),
-                'pixel_height': max(2, int(pixel_height) & ~1),
+                'pixel_width': pixel_width,
+                'pixel_height': pixel_height,
+                'slot_padding': slot_padding,
+                'render_x': pixel_x + slot_padding,
+                'render_y': pixel_y + slot_padding,
+                'render_width': render_width,
+                'render_height': render_height,
             })
 
         slots.sort(key=lambda slot: (slot['row'], slot['column'], str(slot.get('track_id', ''))))
@@ -1997,11 +2057,12 @@ class VideoComposer:
     def _create_placeholder_chunk(self, chunk_idx):
         """Create a placeholder chunk with silence"""
         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
+        target_width, target_height = self._get_target_resolution()
         return self._render_background_only_chunk(
             chunk_path,
             self.CHUNK_DURATION,
-            1920,
-            1080,
+            target_width,
+            target_height,
         )
         
     def has_valid_notes(self, track):
@@ -3741,11 +3802,12 @@ class VideoComposer:
         """Create a silent chunk for gaps in composition"""
         try:
             chunk_path = self.chunks_dir / f"silent_chunk_{chunk_idx}.mp4"
+            target_width, target_height = self._get_target_resolution()
             success = self._render_background_only_chunk(
                 chunk_path,
                 duration,
-                1920,
-                1080,
+                target_width,
+                target_height,
             )
             return str(chunk_path) if success and chunk_path.exists() else None
             
@@ -4638,7 +4700,12 @@ class VideoComposer:
             (candidate for candidate in candidates if candidate in clip_styles),
             None,
         )
-        return clip_styles.get(matched_key, {}), candidates, matched_key
+        resolved_style = {
+            'roundedCorners': True,
+            'cornerRadius': 12,
+        }
+        resolved_style.update(clip_styles.get(matched_key, {}) or {})
+        return resolved_style, candidates, matched_key
 
     def _write_text_tempfile(self, text, prefix='ats_text_'):
         """Write text to a temp file and return its path (for drawtext textfile= option)."""
@@ -4690,7 +4757,7 @@ class VideoComposer:
             f"[style] cell={track_id!r}  candidates={candidates}  "
             f"matched={matched_key or 'none'}  "
             f"effects={[k for k,v in style.items() if v and k.endswith('Enabled')]}  "
-            f"roundedCorners={style.get('roundedCorners', False)}  "
+            f"roundedCorners={style.get('roundedCorners', True)}  "
             f"beatFlashColor={style.get('beatFlashColor', 'N/A')}"
         )
 
@@ -4699,7 +4766,7 @@ class VideoComposer:
         border_width = int(style.get('borderWidth', 0))
         border_color = style.get('borderColor', '#7c3aed')
         color_grade = style.get('colorGrade', 'none')
-        rounded_corners = bool(style.get('roundedCorners', False))
+        rounded_corners = bool(style.get('roundedCorners', True))
         corner_radius = int(style.get('cornerRadius', 12))
         label_enabled = bool(style.get('labelEnabled', False))
         label_text = style.get('labelText', '') or ''
@@ -4730,7 +4797,7 @@ class VideoComposer:
         next_label = f'v_pad_{output_label[1:-1]}'
         filter_parts.append(
             f"{current}scale={cell_w}:{cell_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-            f"crop={cell_w}:{cell_h}{',format=rgba' if preserve_idle_alpha else ''}[{next_label}]"
+            f"crop={cell_w}:{cell_h},setsar=1{',format=rgba' if preserve_idle_alpha else ''}[{next_label}]"
         )
         logging.info(f"[style] cell={track_id!r} zoom-to-fill → {cell_w}x{cell_h}")
         current = f'[{next_label}]'
@@ -6324,8 +6391,8 @@ class VideoComposer:
                         filter_parts,
                         f"[{input_idx}:v]",
                         video_output_label,
-                        slot['pixel_width'],
-                        slot['pixel_height'],
+                        slot['render_width'],
+                        slot['render_height'],
                         track_id,
                         cell_segment,
                         style_temp_files,
@@ -6334,8 +6401,8 @@ class VideoComposer:
                     )
                     overlay_slots.append({
                         'label': video_output_label,
-                        'x': slot['pixel_x'],
-                        'y': slot['pixel_y'],
+                        'x': slot['render_x'],
+                        'y': slot['render_y'],
                         'track_id': track_id,
                         'input_idx': input_idx,
                         'segment': cell_segment,
@@ -6356,7 +6423,8 @@ class VideoComposer:
 
                     logging.info(
                         f"      Cell ({slot['row']},{slot['column']}) span {slot['span_w']}x{slot['span_h']} "
-                        f"→ {slot['pixel_width']}x{slot['pixel_height']} @ ({slot['pixel_x']},{slot['pixel_y']}): "
+                        f"→ {slot['render_width']}x{slot['render_height']} @ ({slot['render_x']},{slot['render_y']}) "
+                        f"(slot {slot['pixel_width']}x{slot['pixel_height']}, inset {slot['slot_padding']}px): "
                         f"{cell_segment.get('type', 'unknown')} - {Path(cell_segment['video_path']).name} - Vol: {vol_db}dB"
                     )
                     input_idx += 1
@@ -7020,6 +7088,7 @@ class VideoComposer:
         """Create a simple placeholder chunk"""
         try:
             output_path = chunks_dir / f"placeholder_chunk_{chunk_idx}.mp4"
+            target_width, target_height = self._get_target_resolution()
             bg_hex = (getattr(self, 'composition_style', {}) or {}).get(
                 'backgroundColor',
                 '#0a0a0f',
@@ -7028,7 +7097,7 @@ class VideoComposer:
             
             cmd = [
                 'ffmpeg', '-y',
-                '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:size=1920x1080:duration={duration}:rate=30',
+                '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:size={target_width}x{target_height}:duration={duration}:rate=30',
                 '-f', 'lavfi', '-i', f'anullsrc=channel_layout=stereo:sample_rate=44100:duration={duration}',
                 '-c:v', 'libx264', '-preset', 'ultrafast',
                 '-c:a', 'aac', '-b:a', '128k',

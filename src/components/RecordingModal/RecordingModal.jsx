@@ -24,6 +24,7 @@ function RecordingModalContent({
   instrumentVideos,
   longestNotes,
   midiData,
+  renderPreset,
   onRecordingComplete,
   onVideoReady,
   onClose,
@@ -163,6 +164,7 @@ function RecordingModalContent({
               minDuration={recSec}
               currentVideo={currentVideo}
               midiData={midiData}
+              renderPreset={renderPreset}
             />
           )}
 
@@ -189,6 +191,7 @@ RecordingModal.propTypes = {
   instrumentVideos: PropTypes.object,
   longestNotes: PropTypes.object,
   midiData: PropTypes.object,
+  renderPreset: PropTypes.string,
   onRecordingComplete: PropTypes.func.isRequired,
   onVideoReady: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,

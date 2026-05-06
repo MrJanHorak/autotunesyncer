@@ -189,6 +189,8 @@ export const runPythonProcessorDirect = (
           trackVolumes: midiData.trackVolumes || {},
           compositionStyle: midiData.compositionStyle || {},
           clipStyles: midiData.clipStyles || {},
+          renderPreset: midiData.renderPreset || null,
+          renderDimensions: midiData.renderDimensions || null,
           backgroundMedia: midiData.backgroundMedia || null,
         }),
       );

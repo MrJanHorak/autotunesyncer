@@ -9,6 +9,11 @@ import { isDrumTrack } from '../../js/drumUtils';
 import { CONFIG } from '../../../config.js';
 import CountdownTimer from '../CountdownTimer/CountdownTimer';
 import ToggleSwitch from '../ToggleSwitch/ToggleSwitch';
+import {
+  DEFAULT_RENDER_PRESET,
+  getRenderAspectRatio,
+  normalizeRenderPreset,
+} from '../../../shared/renderPresets.js';
 
 import './VideoRecorder.css';
 
@@ -92,6 +97,7 @@ const VideoRecorder = ({
   minDuration,
   currentVideo,
   midiData,
+  renderPreset = DEFAULT_RENDER_PRESET,
 }) => {
   const {
     videoRef,
@@ -115,6 +121,12 @@ const VideoRecorder = ({
   const [startTime, setStartTime] = useState(0);
   const [endTime, setEndTime] = useState(0);
   const countdownDuration = 3;
+  const resolvedRenderPreset = normalizeRenderPreset(renderPreset);
+  const cameraAspectRatio = getRenderAspectRatio(resolvedRenderPreset);
+  const preferredCameraWidth =
+    cameraAspectRatio.width >= cameraAspectRatio.height ? 1280 : 720;
+  const preferredCameraHeight =
+    cameraAspectRatio.width >= cameraAspectRatio.height ? 720 : 1280;
 
   const handleTimeUpdate = (value, isStart) => {
     const newTime = Number(value);
@@ -295,9 +307,11 @@ const VideoRecorder = ({
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          aspectRatio: { ideal: 16 / 9 },
+          width: { ideal: preferredCameraWidth },
+          height: { ideal: preferredCameraHeight },
+          aspectRatio: {
+            ideal: cameraAspectRatio.width / cameraAspectRatio.height,
+          },
         },
         audio: true,
       });

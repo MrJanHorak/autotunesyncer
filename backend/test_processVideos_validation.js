@@ -3,6 +3,7 @@ import {
   getResolvedVideoLayout,
   validateComposeInputs,
 } from './routes/processVideos.js';
+import { getRenderDimensions } from '../shared/renderPresets.js';
 
 const makeMidiPayload = (overrides = {}) => ({
   tracks: [
@@ -131,6 +132,52 @@ const testInstrumentVideoLayoutResolvesNumericTrackKey = () => {
   );
 };
 
+const testPortraitRenderDimensions = () => {
+  assert.deepStrictEqual(getRenderDimensions('portrait'), {
+    width: 1080,
+    height: 1920,
+  });
+  assert.deepStrictEqual(getRenderDimensions('portrait', { preview: true }), {
+    width: 360,
+    height: 640,
+  });
+};
+
+const testPortraitVideoLayoutScalesAgainstPortraitCanvas = () => {
+  const layout = getResolvedVideoLayout(
+    'piano',
+    {
+      0: { row: 0, column: 0, w: 6, h: 6 },
+    },
+    {
+      tracks: [
+        {
+          instrument: { name: 'Piano', family: 'piano' },
+        },
+      ],
+      totalWidth: 1080,
+      totalHeight: 1920,
+      gridColumns: 12,
+      gridRows: 12,
+    },
+  );
+
+  assert.deepStrictEqual(
+    {
+      width: layout.width,
+      height: layout.height,
+      spanW: layout.spanW,
+      spanH: layout.spanH,
+    },
+    {
+      width: 540,
+      height: 960,
+      spanW: 6,
+      spanH: 6,
+    },
+  );
+};
+
 const run = async () => {
   testInvalidMidiPayload();
   testMissingGridArrangement();
@@ -139,6 +186,8 @@ const run = async () => {
   testInvalidGridPosition();
   testV2GridArrangementOutOfBounds();
   testInstrumentVideoLayoutResolvesNumericTrackKey();
+  testPortraitRenderDimensions();
+  testPortraitVideoLayoutScalesAgainstPortraitCanvas();
 
   console.log('PASS test_processVideos_validation');
 };

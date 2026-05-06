@@ -1,5 +1,5 @@
 /* eslint-disable react/prop-types */
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   startCompositionJob,
   trackCompositionJob,
@@ -10,6 +10,7 @@ import {
   hasGridArrangement,
   toLegacyGridArrangement,
 } from '../../../shared/gridLayout.js';
+import { DEFAULT_RENDER_PRESET } from '../../../shared/renderPresets.js';
 import './VideoComposer.css';
 
 const VideoComposer = ({
@@ -22,6 +23,7 @@ const VideoComposer = ({
   soloTrack = null,
   compositionStyle = null,
   clipStyles = null,
+  renderPreset = DEFAULT_RENDER_PRESET,
   projectName = '',
   onProgress = null,
   onError = null,
@@ -52,16 +54,16 @@ const VideoComposer = ({
     [gridArrangement],
   );
 
-  const getNormalizedNoteTime = (note) => {
+  const getNormalizedNoteTime = useCallback((note) => {
     const candidates = [note?.time, note?.start, note?.startTime];
     for (const candidate of candidates) {
       const value = Number(candidate);
       if (Number.isFinite(value)) return value;
     }
     return NaN;
-  };
+  }, []);
 
-  const getNormalizedNoteDuration = (note) => {
+  const getNormalizedNoteDuration = useCallback((note) => {
     const direct = Number(note?.duration);
     if (Number.isFinite(direct)) {
       return direct > 0 ? direct : MIN_NOTE_DURATION_SECONDS;
@@ -78,7 +80,7 @@ const VideoComposer = ({
     }
 
     return NaN;
-  };
+  }, [MIN_NOTE_DURATION_SECONDS, getNormalizedNoteTime]);
 
   const validationErrors = useMemo(() => {
     const errors = [];
@@ -135,7 +137,14 @@ const VideoComposer = ({
     }
 
     return errors;
-  }, [midiData, instrumentTrackMap, normalizedGridArrangement, videoFiles]);
+  }, [
+    midiData,
+    instrumentTrackMap,
+    normalizedGridArrangement,
+    videoFiles,
+    getNormalizedNoteDuration,
+    getNormalizedNoteTime,
+  ]);
 
   const canCompose = validationErrors.length === 0;
 
@@ -204,6 +213,7 @@ const VideoComposer = ({
         trackVolumes: effectiveVolumes,
         compositionStyle: compositionStyle || {},
         clipStyles: clipStyles || {},
+        renderPreset,
       };
       console.log('Midi data being sent:', midiPayload);
       const midiBlob = new Blob([JSON.stringify(midiPayload)], {

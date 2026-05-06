@@ -239,7 +239,13 @@ const ClipStylePopover = ({
             <input
               type='checkbox'
               checked={style.roundedCorners}
-              onChange={(e) => set('roundedCorners', e.target.checked)}
+              onChange={(e) =>
+                onChange({
+                  ...style,
+                  roundedCorners: e.target.checked,
+                  roundedCornersConfigured: true,
+                })
+              }
             />
             <span className='csp-toggle__slider' />
           </label>
@@ -560,7 +566,7 @@ export const GridClipItem = memo(function GridClipItem({
       : isEmpty
         ? '#f3f4f6'
         : getHeatColor,
-    borderRadius: cs.roundedCorners ? `${cs.cornerRadius}px` : '12px',
+    borderRadius: cs.roundedCorners ? `${cs.cornerRadius}px` : '0px',
     ...(fillParent
       ? { width: '100%', height: '100%' }
       : { aspectRatio: '16/9' }),

@@ -2,6 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import { Film, Music, Calendar, MoreVertical, Trash2, Edit, Plus, FolderOpen } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useProject } from '../../context/ProjectContext';
+import {
+  DEFAULT_RENDER_PRESET,
+  RENDER_PRESETS,
+} from '../../../shared/renderPresets.js';
 import './ProjectManager.css';
 
 function formatRelative(dateStr) {
@@ -100,6 +104,7 @@ export default function ProjectManager({ onContinue }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [newRenderPreset, setNewRenderPreset] = useState(DEFAULT_RENDER_PRESET);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(null);
@@ -110,9 +115,14 @@ export default function ProjectManager({ onContinue }) {
     setCreating(true);
     setError('');
     try {
-      await createProject(newName.trim(), newDesc.trim());
+      await createProject(
+        newName.trim(),
+        newDesc.trim(),
+        newRenderPreset,
+      );
       setNewName('');
       setNewDesc('');
+      setNewRenderPreset(DEFAULT_RENDER_PRESET);
       setShowCreate(false);
     } catch (err) {
       setError(err.message);
@@ -172,6 +182,21 @@ export default function ProjectManager({ onContinue }) {
               value={newDesc}
               onChange={(e) => setNewDesc(e.target.value)}
             />
+            <label className='pm-label' htmlFor='project-render-preset'>
+              Video Format
+            </label>
+            <select
+              id='project-render-preset'
+              className='pm-input'
+              value={newRenderPreset}
+              onChange={(e) => setNewRenderPreset(e.target.value)}
+            >
+              {Object.values(RENDER_PRESETS).map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.label} - {preset.description}
+                </option>
+              ))}
+            </select>
             {error && <p className='pm-error'>{error}</p>}
             <div className='pm-create-form__actions'>
               <button

@@ -12,6 +12,7 @@ const CompositionSection = ({
   soloTrack,
   compositionStyle,
   clipStyles,
+  renderPreset,
   projectName,
 }) => {
   const [composing, setComposing] = useState(false);
@@ -60,6 +61,7 @@ const CompositionSection = ({
         soloTrack={soloTrack}
         compositionStyle={compositionStyle}
         clipStyles={clipStyles}
+        renderPreset={renderPreset}
         projectName={projectName}
         onProgress={handleCompositionProgress}
         onError={handleCompositionError}
@@ -75,6 +77,7 @@ CompositionSection.propTypes = {
   midiData: PropTypes.object.isRequired,
   instrumentTrackMap: PropTypes.object.isRequired,
   gridArrangement: PropTypes.object.isRequired,
+  renderPreset: PropTypes.string,
   projectName: PropTypes.string,
 };
 
