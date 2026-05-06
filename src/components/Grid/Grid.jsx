@@ -419,7 +419,8 @@ const Grid = ({
   const resolvedRenderPreset = normalizeRenderPreset(renderPreset);
   const renderPresetConfig = getRenderPresetConfig(resolvedRenderPreset);
   const isPortraitStage =
-    renderPresetConfig.aspectRatio.height > renderPresetConfig.aspectRatio.width;
+    renderPresetConfig.aspectRatio.height >
+    renderPresetConfig.aspectRatio.width;
   const previewStyle = {
     ...DEFAULT_COMPOSITION_STYLE,
     ...(compositionStyle || {}),

@@ -1,5 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
-import { Film, Music, Calendar, MoreVertical, Trash2, Edit, Plus, FolderOpen } from 'lucide-react';
+import {
+  Film,
+  Music,
+  Calendar,
+  MoreVertical,
+  Trash2,
+  Edit,
+  Plus,
+  FolderOpen,
+} from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -16,7 +25,10 @@ function formatRelative(dateStr) {
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   if (days < 7) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return new Date(dateStr).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
@@ -25,7 +37,9 @@ function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
 
   useEffect(() => {
     if (!menuOpen) return;
-    const close = (e) => { if (!menuRef.current?.contains(e.target)) setMenuOpen(false); };
+    const close = (e) => {
+      if (!menuRef.current?.contains(e.target)) setMenuOpen(false);
+    };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, [menuOpen]);
@@ -69,13 +83,19 @@ function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
               <div className='pm-card__dropdown'>
                 <button
                   className='pm-card__dropdown-item'
-                  onClick={() => { onSelect(project); setMenuOpen(false); }}
+                  onClick={() => {
+                    onSelect(project);
+                    setMenuOpen(false);
+                  }}
                 >
                   <Edit size={15} /> Open
                 </button>
                 <button
                   className='pm-card__dropdown-item pm-card__dropdown-item--danger'
-                  onClick={() => { onDelete(project.id); setMenuOpen(false); }}
+                  onClick={() => {
+                    onDelete(project.id);
+                    setMenuOpen(false);
+                  }}
                   disabled={deleting === project.id}
                 >
                   <Trash2 size={15} />
@@ -99,7 +119,14 @@ function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
 
 export default function ProjectManager({ onContinue }) {
   const { user } = useAuth();
-  const { projects, currentProject, loadingProjects, selectProject, createProject, deleteProject } = useProject();
+  const {
+    projects,
+    currentProject,
+    loadingProjects,
+    selectProject,
+    createProject,
+    deleteProject,
+  } = useProject();
 
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
@@ -115,11 +142,7 @@ export default function ProjectManager({ onContinue }) {
     setCreating(true);
     setError('');
     try {
-      await createProject(
-        newName.trim(),
-        newDesc.trim(),
-        newRenderPreset,
-      );
+      await createProject(newName.trim(), newDesc.trim(), newRenderPreset);
       setNewName('');
       setNewDesc('');
       setNewRenderPreset(DEFAULT_RENDER_PRESET);
@@ -132,7 +155,12 @@ export default function ProjectManager({ onContinue }) {
   };
 
   const handleDelete = async (projectId) => {
-    if (!window.confirm('Delete this project and all its uploaded clips? This cannot be undone.')) return;
+    if (
+      !window.confirm(
+        'Delete this project and all its uploaded clips? This cannot be undone.',
+      )
+    )
+      return;
     setDeleting(projectId);
     try {
       await deleteProject(projectId);
@@ -146,12 +174,15 @@ export default function ProjectManager({ onContinue }) {
   return (
     <div className='pm-page'>
       <div className='pm-container'>
-
         {/* Header */}
         <div className='pm-header'>
           <div>
             <h1 className='pm-title'>My Projects</h1>
-            {user && <p className='pm-welcome'>Welcome back, <strong>@{user.username}</strong></p>}
+            {user && (
+              <p className='pm-welcome'>
+                Welcome back, <strong>@{user.username}</strong>
+              </p>
+            )}
           </div>
           <button
             className='pm-btn-new'
@@ -218,9 +249,7 @@ export default function ProjectManager({ onContinue }) {
         )}
 
         {/* Loading */}
-        {loadingProjects && (
-          <div className='pm-loading'>Loading projects…</div>
-        )}
+        {loadingProjects && <div className='pm-loading'>Loading projects…</div>}
 
         {/* Empty state */}
         {!loadingProjects && projects.length === 0 && !showCreate && (
@@ -228,7 +257,10 @@ export default function ProjectManager({ onContinue }) {
             <FolderOpen className='pm-empty__icon' />
             <h3>No projects yet</h3>
             <p>Create your first Symphovie project to get started</p>
-            <button className='pm-btn-primary' onClick={() => setShowCreate(true)}>
+            <button
+              className='pm-btn-primary'
+              onClick={() => setShowCreate(true)}
+            >
               <Plus size={16} /> Create Project
             </button>
           </div>
@@ -255,14 +287,18 @@ export default function ProjectManager({ onContinue }) {
           <div className='pm-continue-bar'>
             <div className='pm-continue-bar__info'>
               <Film size={18} />
-              <span>Active: <strong>{currentProject.name}</strong></span>
+              <span>
+                Active: <strong>{currentProject.name}</strong>
+              </span>
             </div>
-            <button className='pm-btn-primary' onClick={() => onContinue ? onContinue() : null}>
+            <button
+              className='pm-btn-primary'
+              onClick={() => (onContinue ? onContinue() : null)}
+            >
               Continue →
             </button>
           </div>
         )}
-
       </div>
     </div>
   );

@@ -63,24 +63,27 @@ const VideoComposer = ({
     return NaN;
   }, []);
 
-  const getNormalizedNoteDuration = useCallback((note) => {
-    const direct = Number(note?.duration);
-    if (Number.isFinite(direct)) {
-      return direct > 0 ? direct : MIN_NOTE_DURATION_SECONDS;
-    }
-
-    const start = getNormalizedNoteTime(note);
-    const endCandidates = [note?.end, note?.endTime];
-    for (const candidate of endCandidates) {
-      const end = Number(candidate);
-      if (Number.isFinite(start) && Number.isFinite(end)) {
-        const computed = end - start;
-        return computed > 0 ? computed : MIN_NOTE_DURATION_SECONDS;
+  const getNormalizedNoteDuration = useCallback(
+    (note) => {
+      const direct = Number(note?.duration);
+      if (Number.isFinite(direct)) {
+        return direct > 0 ? direct : MIN_NOTE_DURATION_SECONDS;
       }
-    }
 
-    return NaN;
-  }, [MIN_NOTE_DURATION_SECONDS, getNormalizedNoteTime]);
+      const start = getNormalizedNoteTime(note);
+      const endCandidates = [note?.end, note?.endTime];
+      for (const candidate of endCandidates) {
+        const end = Number(candidate);
+        if (Number.isFinite(start) && Number.isFinite(end)) {
+          const computed = end - start;
+          return computed > 0 ? computed : MIN_NOTE_DURATION_SECONDS;
+        }
+      }
+
+      return NaN;
+    },
+    [MIN_NOTE_DURATION_SECONDS, getNormalizedNoteTime],
+  );
 
   const validationErrors = useMemo(() => {
     const errors = [];

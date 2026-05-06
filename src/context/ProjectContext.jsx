@@ -1,4 +1,10 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+} from 'react';
 import { useAuth } from './AuthContext';
 import {
   DEFAULT_RENDER_PRESET,
@@ -33,7 +39,7 @@ export function ProjectProvider({ children }) {
         },
       });
     },
-    [token]
+    [token],
   );
 
   const fetchProjects = useCallback(async () => {
@@ -70,11 +76,7 @@ export function ProjectProvider({ children }) {
   }, []);
 
   const createProject = useCallback(
-    async (
-      name,
-      description = '',
-      renderPreset = DEFAULT_RENDER_PRESET,
-    ) => {
+    async (name, description = '', renderPreset = DEFAULT_RENDER_PRESET) => {
       const res = await authFetch('/projects', {
         method: 'POST',
         body: JSON.stringify({
@@ -89,12 +91,14 @@ export function ProjectProvider({ children }) {
       selectProject(data.project);
       return data.project;
     },
-    [authFetch, selectProject]
+    [authFetch, selectProject],
   );
 
   const deleteProject = useCallback(
     async (projectId) => {
-      const res = await authFetch(`/projects/${projectId}`, { method: 'DELETE' });
+      const res = await authFetch(`/projects/${projectId}`, {
+        method: 'DELETE',
+      });
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.error || 'Failed to delete project');
@@ -102,7 +106,7 @@ export function ProjectProvider({ children }) {
       setProjects((prev) => prev.filter((p) => p.id !== projectId));
       if (currentProject?.id === projectId) selectProject(null);
     },
-    [authFetch, currentProject, selectProject]
+    [authFetch, currentProject, selectProject],
   );
 
   const saveProjectState = useCallback(
@@ -117,7 +121,7 @@ export function ProjectProvider({ children }) {
         throw new Error(data.error || 'Failed to save state');
       }
     },
-    [authFetch, currentProject]
+    [authFetch, currentProject],
   );
 
   const loadProjectState = useCallback(
@@ -129,7 +133,7 @@ export function ProjectProvider({ children }) {
       if (!res.ok) throw new Error(data.error || 'Failed to load state');
       return data.state;
     },
-    [authFetch, currentProject]
+    [authFetch, currentProject],
   );
 
   return (

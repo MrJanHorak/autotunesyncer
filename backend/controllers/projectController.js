@@ -283,11 +283,9 @@ export const importProject = (req, res) => {
     const manifestEntry = entries.find((e) => e.entryName === 'manifest.json');
     const stateEntry = entries.find((e) => e.entryName === 'state.json');
     if (!manifestEntry || !stateEntry) {
-      return res
-        .status(400)
-        .json({
-          error: 'Invalid project ZIP (missing manifest.json or state.json)',
-        });
+      return res.status(400).json({
+        error: 'Invalid project ZIP (missing manifest.json or state.json)',
+      });
     }
 
     let manifest;

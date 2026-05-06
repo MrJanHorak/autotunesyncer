@@ -129,10 +129,14 @@ function RecordingModalContent({
           <span className='recording-modal__title'>
             🎙 {displayName(instrument)}
           </span>
-          <span className='recording-modal__hint'>
-            Min. {recSec}s clip
-          </span>
-          <button className='recording-modal__close' onClick={onClose} aria-label='Close'>✕</button>
+          <span className='recording-modal__hint'>Min. {recSec}s clip</span>
+          <button
+            className='recording-modal__close'
+            onClick={onClose}
+            aria-label='Close'
+          >
+            ✕
+          </button>
         </div>
 
         {/* Body */}
