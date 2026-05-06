@@ -1336,13 +1336,6 @@ class VideoComposer:
                 logging.warning(f"[NoteTrigger] Missing video for {track_name}")
                 return None
 
-            out_path = self.temp_dir / f"{track_name}_{unique_id}.mp4"
-            if out_path.exists():
-                try:
-                    out_path.unlink()
-                except:
-                    pass
-
             # Sanitize & normalize notes
             MIN_DUR = 0.10  # 100 ms min to avoid ffmpeg micro durations
             valid = []
@@ -1395,15 +1388,24 @@ class VideoComposer:
                     note_input_index[mn] = BASE_EXTRA_IDX + len(extra_audio_inputs)
                     extra_audio_inputs.append(note_audio_map[mn])
 
-            cs = getattr(self, 'composition_style', {}) or {}
-            bg_hex = cs.get('backgroundColor', '#0a0a0f')
             background_media = self._get_active_background_media()
             style_lookup_id = style_track_id if style_track_id is not None else track_name
             clip_style, _, matched_key = self._resolve_clip_style(style_lookup_id)
-            if background_media:
+            preserve_idle_alpha = bool(background_media) or bool(clip_style.get('transparentBg'))
+            out_suffix = '.mov' if preserve_idle_alpha else '.mp4'
+            out_path = self.temp_dir / f"{track_name}_{unique_id}{out_suffix}"
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except:
+                    pass
+
+            cs = getattr(self, 'composition_style', {}) or {}
+            bg_hex = cs.get('backgroundColor', '#0a0a0f')
+            if preserve_idle_alpha:
                 logging.info(
-                    f"[style] note-trigger base for {track_name!r}: "
-                    f"{background_media['kind']} {Path(background_media['path']).name}"
+                    f"[style] note-trigger base for {track_name!r}: transparent idle gaps "
+                    f"({matched_key or style_lookup_id})"
                 )
             elif (
                 clip_style.get('bgColorEnabled')
@@ -1420,7 +1422,11 @@ class VideoComposer:
             # Build filter parts
             filter_parts = [
                 # Base cell background and silent audio come from inputs 1 & 2
-                f"[1:v]trim=0:{total_duration},setpts=PTS-STARTPTS[base_v]",
+                (
+                    f"[1:v]trim=0:{total_duration},format=rgba,colorchannelmixer=aa=0,setpts=PTS-STARTPTS[base_v]"
+                    if preserve_idle_alpha
+                    else f"[1:v]trim=0:{total_duration},setpts=PTS-STARTPTS[base_v]"
+                ),
                 f"[2:a]atrim=0:{total_duration},asetpts=PTS-STARTPTS[base_a]"
             ]
 
@@ -1445,7 +1451,10 @@ class VideoComposer:
                 logging.info(f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, safe_onset={safe_onset:.3f}s, dur={dur:.3f}s")
 
                 # Video always comes from the original source (input 0)
-                filter_parts.append(f"[0:v]trim=start={safe_onset}:duration={dur},setpts=PTS-STARTPTS,scale=640:360[v{i}]")
+                filter_parts.append(
+                    f"[0:v]trim=start={safe_onset}:duration={dur},setpts=PTS-STARTPTS,"
+                    f"scale=640:360{',format=rgba' if preserve_idle_alpha else ''}[v{i}]"
+                )
 
                 # Audio: prefer pre-tuned file → fall back to asetrate+atempo
                 if midi_note in note_input_index:
@@ -1467,7 +1476,9 @@ class VideoComposer:
                 # Overlay enable window
                 end = start + dur
                 filter_parts.append(
-                    f"{video_chain}[v{i}]overlay=enable='between(t,{start:.3f},{end:.3f})'[ov{i}]"
+                    f"{video_chain}[v{i}]overlay="
+                    f"eof_action=pass:repeatlast=0:format={'auto' if preserve_idle_alpha else 'yuv420'}:"
+                    f"enable='between(t,{start:.3f},{end:.3f})'[ov{i}]"
                 )
                 video_chain = f"[ov{i}]"
 
@@ -1484,26 +1495,19 @@ class VideoComposer:
                     f"duration=longest:dropout_transition=0[final_a]"
                 )
 
-            filter_parts.append(f"{video_chain}format=yuv420p[final_v]")
+            filter_parts.append(
+                f"{video_chain}format={'argb' if preserve_idle_alpha else 'yuv420p'}[final_v]"
+            )
 
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
             ]
-            if background_media:
-                if background_media['kind'] == 'image':
-                    cmd += [
-                        "-loop", "1",
-                        "-t", f"{total_duration:.3f}",
-                        "-i", str(background_media['path']),
-                    ]
-                else:
-                    cmd += ["-stream_loop", "-1", "-i", str(background_media['path'])]
-                filter_parts[0] = (
-                    f"[1:v]fps=30,format=yuv420p,setsar=1,"
-                    f"scale=640:360:flags=lanczos:force_original_aspect_ratio=increase,"
-                    f"crop=640:360,trim=0:{total_duration},setpts=PTS-STARTPTS[base_v]"
-                )
+            if preserve_idle_alpha:
+                cmd += [
+                    "-f", "lavfi", "-i",
+                    f"color=c=black@0.0:size=640x360:rate=30:duration={total_duration}",
+                ]
             else:
                 cmd += [
                     "-f", "lavfi", "-i",
@@ -1520,10 +1524,10 @@ class VideoComposer:
             tail_args = [
                 "-map", "[final_v]", "-map", "[final_a]",
                 "-t", f"{total_duration:.3f}",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *( ["-c:v", "qtrle"] if preserve_idle_alpha else ["-c:v", "libx264", "-preset", "fast", "-crf", "23"] ),
                 "-c:a", "aac", "-b:a", "192k",
                 "-r", "30",
-                "-pix_fmt", "yuv420p",
+                "-pix_fmt", "argb" if preserve_idle_alpha else "yuv420p",
                 "-movflags", "+faststart",
                 "-avoid_negative_ts", "make_zero",
                 str(out_path)
@@ -4114,6 +4118,7 @@ class VideoComposer:
                     'track_id': str(track_id),  # Use original track ID (string) for grid positioning
                     'track_name': track_name,
                     'notes': chunk_notes_with_rel,
+                    'preserve_idle_alpha': triggered_video.lower().endswith('.mov'),
                     'type': 'instrument'
                 }
             else:
@@ -4651,6 +4656,7 @@ class VideoComposer:
         fade_enabled = bool(style.get('fadeEnabled', False))
         fade_duration = float(style.get('fadeDuration', 0.15))
         transparent_bg = bool(style.get('transparentBg', False))
+        preserve_idle_alpha = bool(cell_segment and cell_segment.get('preserve_idle_alpha'))
 
         font_path = self._get_windows_font_path(label_font)
         current = input_label
@@ -4669,7 +4675,7 @@ class VideoComposer:
         next_label = f'v_pad_{output_label[1:-1]}'
         filter_parts.append(
             f"{current}scale={cell_w}:{cell_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-            f"crop={cell_w}:{cell_h}[{next_label}]"
+            f"crop={cell_w}:{cell_h}{',format=rgba' if preserve_idle_alpha else ''}[{next_label}]"
         )
         logging.info(f"[style] cell={track_id!r} zoom-to-fill → {cell_w}x{cell_h}")
         current = f'[{next_label}]'
@@ -4952,7 +4958,8 @@ class VideoComposer:
             # corners always apply to the video itself. Fill corners with the
             # composition background so they blend seamlessly into the canvas.
             rx, ry, rw, rh = content_x, content_y, content_w, content_h
-            corner_fill = self._hex_to_ffmpeg_color(comp_bg_color)
+            corner_fill = 'black' if preserve_idle_alpha else self._hex_to_ffmpeg_color(comp_bg_color)
+            corner_fill_alpha = '0.0' if preserve_idle_alpha else '1'
             r = min(corner_radius, rw // 4, rh // 4)
             if r > 0:
                 next_label = f'v_rnd_{output_label[1:-1]}'
@@ -4974,13 +4981,13 @@ class VideoComposer:
                     if xw <= 0:
                         continue
                     # top-left
-                    boxes.append(f"drawbox=x={rx}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    boxes.append(f"drawbox=x={rx}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
                     # top-right
-                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
                     # bottom-left  (mirror: rows ry+rh-y1 to ry+rh-y0)
-                    boxes.append(f"drawbox=x={rx}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    boxes.append(f"drawbox=x={rx}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
                     # bottom-right
-                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@1:t=fill")
+                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
                 if boxes:
                     filter_parts.append(
                         f"{current}" + ','.join(boxes) + f"[{next_label}]"
@@ -6205,6 +6212,12 @@ class VideoComposer:
                 orig = seg.get('video_path', '')
                 if not orig or not os.path.exists(orig) or orig in extended_clips:
                     continue
+                if seg.get('preserve_idle_alpha'):
+                    extended_clips[orig] = orig
+                    logging.info(
+                        f"[style] cell={seg.get('track_id', 'unknown')!r} keeping alpha note-trigger clip without gap-fill extension"
+                    )
+                    continue
                 track_id = seg.get('track_id', f"{slot['row']}_{slot['column']}")
                 clip_style, _, matched_key = self._resolve_clip_style(track_id)
                 clip_bg_hex = bg_hex
@@ -6238,7 +6251,8 @@ class VideoComposer:
                     cells_with_content += 1
                     # Use extended clip if available (avoids idle cells falling back to global bg too early)
                     video_path = extended_clips.get(cell_segment['video_path'], cell_segment['video_path'])
-                    cmd.extend([*decode_args, '-i', video_path])
+                    per_input_decode_args = [] if cell_segment.get('preserve_idle_alpha') else decode_args
+                    cmd.extend([*per_input_decode_args, '-i', video_path])
 
                     track_id = cell_segment.get('track_id', f"{slot['row']}_{slot['column']}")
                     video_output_label = f"[v_{slot_index}]"
@@ -6622,6 +6636,7 @@ class VideoComposer:
                         'end_time': end_time,
                         'drum_name': drum_name,
                         'midi_note': midi_note,
+                        'preserve_idle_alpha': triggered_video.lower().endswith('.mov'),
                         'type': 'drum'
                     }
                     drum_segments.append(drum_segment)
@@ -6842,7 +6857,8 @@ class VideoComposer:
                 return {
                     'video_path': triggered_video,
                     'track_name': track_name,
-                    'notes': chunk_notes
+                    'notes': chunk_notes,
+                    'preserve_idle_alpha': triggered_video.lower().endswith('.mov')
                 }
             else:
                 logging.warning(f"Failed to create triggered video for {track_name}")

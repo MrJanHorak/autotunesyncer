@@ -108,7 +108,11 @@ export function useProjectSync({
           }));
         const savedBackground = state?.compositionStyle?.backgroundMedia;
         const backgroundMode = state?.compositionStyle?.backgroundMode;
-        if (savedBackground?.saved && backgroundMode && backgroundMode !== 'color') {
+        if (
+          savedBackground?.saved &&
+          backgroundMode &&
+          backgroundMode !== 'color'
+        ) {
           fetchProjectBackgroundFile(currentProject.id)
             .then((blob) => {
               if (!blob || clipsLoadingVersion.current !== version) return;
@@ -124,7 +128,10 @@ export function useProjectSync({
               });
             })
             .catch((err) =>
-              console.warn('[background] Failed to load project background:', err),
+              console.warn(
+                '[background] Failed to load project background:',
+                err,
+              ),
             );
         }
         if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {

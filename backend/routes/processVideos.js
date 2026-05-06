@@ -754,19 +754,17 @@ router.post(
       isPreview,
       jobUploadsDir,
       backgroundMedia,
-    ).catch(
-      (err) => {
-        console.error(`[Job ${jobId}] Unhandled error:`, err);
-        const job = jobs.get(jobId);
-        if (job && job.status !== 'failed') {
-          updateJob(jobId, {
-            status: 'failed',
-            error: err.message,
-            completedAt: Date.now(),
-          });
-        }
-      },
-    );
+    ).catch((err) => {
+      console.error(`[Job ${jobId}] Unhandled error:`, err);
+      const job = jobs.get(jobId);
+      if (job && job.status !== 'failed') {
+        updateJob(jobId, {
+          status: 'failed',
+          error: err.message,
+          completedAt: Date.now(),
+        });
+      }
+    });
   },
 );
 

@@ -47,7 +47,12 @@ export async function apiFetch(path, options = {}) {
   });
   if (!res.ok) {
     let msg = `API error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res;
@@ -72,7 +77,12 @@ export async function uploadProjectVideo(blob, filename = 'clip.mp4') {
 
   if (!res.ok) {
     let msg = `Upload error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -94,7 +104,12 @@ export async function submitComposeJob(formData) {
 
   if (!res.ok) {
     let msg = `Compose error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -118,7 +133,12 @@ export async function uploadClip(projectId, instrumentKey, blob) {
 
   if (!res.ok) {
     let msg = `Clip upload error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -137,7 +157,12 @@ export async function uploadProjectBackground(projectId, file) {
 
   if (!res.ok) {
     let msg = `Background upload error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -151,7 +176,12 @@ export async function fetchProjectBackgroundFile(projectId) {
 
   if (!res.ok) {
     let msg = `Background fetch error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 
@@ -167,7 +197,12 @@ export async function deleteProjectBackground(projectId) {
 
   if (!res.ok) {
     let msg = `Background delete error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 
@@ -185,7 +220,12 @@ export async function downloadProjectExport(projectId, projectName) {
   });
   if (!res.ok) {
     let msg = `Export error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   const blob = await res.blob();
@@ -215,7 +255,12 @@ export async function importProjectFromZip(zipFile) {
   });
   if (!res.ok) {
     let msg = `Import error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -237,7 +282,12 @@ export async function shareComposition(videoBlob) {
   });
   if (!res.ok) {
     let msg = `Share error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json(); // { url, expiresInSeconds }

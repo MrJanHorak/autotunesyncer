@@ -396,13 +396,17 @@ const CompositionStylePanel = ({
             <option value='color'>Color</option>
             <option
               value='image'
-              disabled={!hasBackgroundMedia || backgroundAsset?.kind !== 'image'}
+              disabled={
+                !hasBackgroundMedia || backgroundAsset?.kind !== 'image'
+              }
             >
               Uploaded Image
             </option>
             <option
               value='video'
-              disabled={!hasBackgroundMedia || backgroundAsset?.kind !== 'video'}
+              disabled={
+                !hasBackgroundMedia || backgroundAsset?.kind !== 'video'
+              }
             >
               Uploaded Video
             </option>

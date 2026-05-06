@@ -868,7 +868,10 @@ function MainApp({ onChangeProject, onLogout }) {
         throw new Error('Select a project before uploading a background');
       }
 
-      const { background } = await uploadProjectBackground(currentProject.id, file);
+      const { background } = await uploadProjectBackground(
+        currentProject.id,
+        file,
+      );
       setBackgroundAsset({
         blob: file,
         url: URL.createObjectURL(file),
@@ -1111,7 +1114,8 @@ function MainApp({ onChangeProject, onLogout }) {
             <div className='editor-empty'>
               <span className='editor-empty__title'>🎵 AutoTune Syncer</span>
               <span className='editor-empty__sub'>
-                Drop a MIDI file above or click &quot;Load MIDI&quot; to get started
+                Drop a MIDI file above or click &quot;Load MIDI&quot; to get
+                started
               </span>
             </div>
           )}

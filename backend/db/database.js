@@ -105,8 +105,12 @@ if (!userCols.includes('bio')) {
 
 const compCols = db.pragma('table_info(compositions)').map((c) => c.name);
 if (!compCols.includes('visibility')) {
-  db.exec(`ALTER TABLE compositions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_compositions_visibility ON compositions(visibility)`);
+  db.exec(
+    `ALTER TABLE compositions ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_compositions_visibility ON compositions(visibility)`,
+  );
 }
 
 // Notifications table

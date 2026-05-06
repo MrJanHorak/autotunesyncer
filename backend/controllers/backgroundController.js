@@ -1,4 +1,10 @@
-import { createReadStream, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  unlinkSync,
+} from 'fs';
 import { extname, join, resolve } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db/database.js';
@@ -52,7 +58,9 @@ export const saveBackground = (req, res) => {
 
   const mediaKind = getMediaKind(req.file.mimetype || '');
   if (!mediaKind) {
-    return res.status(400).json({ error: 'Background must be an image or video file' });
+    return res
+      .status(400)
+      .json({ error: 'Background must be an image or video file' });
   }
 
   deleteExistingBackgroundFile(projectId);
@@ -61,7 +69,8 @@ export const saveBackground = (req, res) => {
   mkdirSync(uploadsDir, { recursive: true });
 
   const fileExtension =
-    extname(req.file.originalname || '') || DEFAULT_EXTENSION_BY_KIND[mediaKind];
+    extname(req.file.originalname || '') ||
+    DEFAULT_EXTENSION_BY_KIND[mediaKind];
   const filePath = join(
     uploadsDir,
     `background_${uuidv4()}${fileExtension.toLowerCase()}`,
@@ -119,7 +128,10 @@ export const getBackgroundFile = (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
-  res.setHeader('Content-Type', background.mime_type || 'application/octet-stream');
+  res.setHeader(
+    'Content-Type',
+    background.mime_type || 'application/octet-stream',
+  );
   res.setHeader('Cache-Control', 'no-store');
   createReadStream(background.file_path).pipe(res);
 };

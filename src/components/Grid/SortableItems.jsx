@@ -530,7 +530,9 @@ export const GridClipItem = memo(function GridClipItem({
       ? cs.bgColor
       : 'transparent';
   const previewCellBackground =
-    isPreviewPlaying && hasStageBackgroundMedia ? 'transparent' : clipBackground;
+    isPreviewPlaying && hasStageBackgroundMedia
+      ? 'transparent'
+      : clipBackground;
   const fadeDuration = Math.max(cs.fadeDuration ?? 0.15, 0.05);
   const videoVisible =
     !isPreviewPlaying || isInstrumentActive || cs.fadeEnabled;
