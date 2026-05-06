@@ -115,6 +115,112 @@ class VideoComposerRegressionTests(unittest.TestCase):
             captured['cmd'],
         )
 
+    def test_background_video_keeps_note_trigger_output_transparent(self):
+        source_path = self.write_dummy_media('lead-source.mp4')
+        composer = self.make_composer(
+            background_media={'kind': 'video', 'path': str(self.write_dummy_media('stage-bg.mp4'))},
+            composition_style={'backgroundColor': '#112233', 'backgroundMode': 'video'},
+            clip_styles={'track-4': {'transparentBg': False}},
+        )
+        captured = {}
+
+        composer._get_media_duration = lambda _path: 8.0
+        composer._build_atempo_chain = lambda _value: 'atempo=1.0'
+        composer._create_simple_loop = lambda *_args, **_kwargs: 'loop-fallback.mp4'
+
+        def fake_run_ffmpeg(cmd, filter_parts, tail_args):
+            captured['cmd'] = cmd
+            captured['filter_parts'] = filter_parts
+            captured['tail_args'] = tail_args
+            return SimpleNamespace(returncode=0, stderr='')
+
+        composer._run_ffmpeg_with_filter_script = fake_run_ffmpeg
+
+        result = composer._create_note_triggered_video_sequence_fixed(
+            str(source_path),
+            [{'time': 0.0, 'duration': 0.4, 'midi': 60}],
+            1.0,
+            'lead',
+            'with-bg',
+            style_track_id='4',
+        )
+
+        self.assertEqual(result, str(self.temp_dir / 'lead_with-bg.mov'))
+        self.assertIn(
+            'color=c=black@0.0:size=640x360:rate=30:duration=1.0',
+            captured['cmd'],
+        )
+        alpha_filter = ''.join(captured['filter_parts'])
+        self.assertIn('format=rgba', alpha_filter)
+        self.assertIn('tpad=stop_mode=clone:stop_duration=1.000', alpha_filter)
+
+    def test_transparent_note_trigger_output_clones_last_visible_frame(self):
+        source_path = self.write_dummy_media('alpha-source.mov')
+        composer = self.make_composer(
+            clip_styles={'track-2': {'transparentBg': True}},
+        )
+        captured = {}
+
+        composer._get_media_duration = lambda _path: 0.6
+        composer._build_atempo_chain = lambda _value: 'atempo=1.0'
+        composer._create_simple_loop = lambda *_args, **_kwargs: 'loop-fallback.mov'
+
+        def fake_run_ffmpeg(cmd, filter_parts, tail_args):
+            captured['cmd'] = cmd
+            captured['filter_parts'] = filter_parts
+            captured['tail_args'] = tail_args
+            return SimpleNamespace(returncode=0, stderr='')
+
+        composer._run_ffmpeg_with_filter_script = fake_run_ffmpeg
+
+        result = composer._create_note_triggered_video_sequence_fixed(
+            str(source_path),
+            [{'time': 0.0, 'duration': 1.0, 'midi': 60}],
+            1.2,
+            'alpha',
+            'clone-last-frame',
+            style_track_id='2',
+        )
+
+        self.assertEqual(result, str(self.temp_dir / 'alpha_clone-last-frame.mov'))
+        alpha_filter = ''.join(captured['filter_parts'])
+        self.assertIn('format=rgba', alpha_filter)
+        self.assertIn('tpad=stop_mode=clone:stop_duration=1.200', alpha_filter)
+        self.assertIn('trim=duration=1.200,setpts=PTS-STARTPTS+0.000/TB[v0]', alpha_filter)
+
+    def test_note_trigger_video_segments_are_shifted_to_note_time(self):
+        source_path = self.write_dummy_media('retrigger-source.mp4')
+        composer = self.make_composer()
+        captured = {}
+
+        composer._get_media_duration = lambda _path: 8.0
+        composer._build_atempo_chain = lambda _value: 'atempo=1.0'
+        composer._create_simple_loop = lambda *_args, **_kwargs: 'loop-fallback.mp4'
+
+        def fake_run_ffmpeg(cmd, filter_parts, tail_args):
+            captured['cmd'] = cmd
+            captured['filter_parts'] = filter_parts
+            captured['tail_args'] = tail_args
+            return SimpleNamespace(returncode=0, stderr='')
+
+        composer._run_ffmpeg_with_filter_script = fake_run_ffmpeg
+
+        result = composer._create_note_triggered_video_sequence_fixed(
+            str(source_path),
+            [
+                {'time': 0.0, 'duration': 0.4, 'midi': 60},
+                {'time': 2.0, 'duration': 0.4, 'midi': 62},
+            ],
+            3.0,
+            'retrigger',
+            'timed-notes',
+        )
+
+        self.assertEqual(result, str(self.temp_dir / 'retrigger_timed-notes.mp4'))
+        filter_graph = ''.join(captured['filter_parts'])
+        self.assertIn('setpts=PTS-STARTPTS+2.000/TB[v1]', filter_graph)
+        self.assertIn("enable='between(t,2.000,3.000)'", filter_graph)
+
     def test_cell_style_filters_use_lanczos_scaling(self):
         composer = self.make_composer()
         filter_parts = []

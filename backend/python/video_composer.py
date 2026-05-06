@@ -1341,8 +1341,8 @@ class VideoComposer:
             valid = []
             for n in notes or []:
                 raw_start = float(n.get("time", 0.0))
-                dur = float(n.get("duration", 0.0))
-                if dur <= 0:
+                audio_dur = float(n.get("duration", 0.0))
+                if audio_dur <= 0:
                     continue
 
                 # Convert to chunk-relative
@@ -1352,29 +1352,51 @@ class VideoComposer:
                 if rel_start < -0.001:
                     # Starts before this chunk; trim head
                     head_trim = -rel_start
-                    dur -= head_trim
+                    audio_dur -= head_trim
                     rel_start = 0.0
                 if rel_start >= total_duration:
                     continue
 
                 # Clamp to chunk boundary
-                if rel_start + dur > total_duration:
-                    dur = total_duration - rel_start
-                if dur <= 0:
+                if rel_start + audio_dur > total_duration:
+                    audio_dur = total_duration - rel_start
+                if audio_dur <= 0:
                     continue
-                if dur < MIN_DUR:
-                    dur = min(MIN_DUR, max(0.0, total_duration - rel_start))
-                    if dur <= 0:
+                if audio_dur < MIN_DUR:
+                    audio_dur = min(MIN_DUR, max(0.0, total_duration - rel_start))
+                    if audio_dur <= 0:
                         continue
 
                 midi_note = int(n.get("midi", 60))
-                valid.append((round(rel_start, 3), round(dur, 3), midi_note))
+                valid.append({
+                    'start': round(rel_start, 3),
+                    'audio_duration': round(audio_dur, 3),
+                    'midi_note': midi_note,
+                    'note_ref': n,
+                })
 
             if not valid:
                 # Fallback: simple loop (keeps something visible)
                 return self._create_simple_loop(video_path, out_path, total_duration)
 
-            valid.sort(key=lambda x: x[0])
+            valid.sort(key=lambda item: item['start'])
+            visual_timing_notes = self._calculate_visual_durations(
+                [
+                    {
+                        'time': item['start'],
+                        'duration': item['audio_duration'],
+                    }
+                    for item in valid
+                ],
+                total_duration,
+            )
+            for item, visual_note in zip(valid, visual_timing_notes):
+                visual_duration = round(
+                    float(visual_note.get('visual_duration', item['audio_duration'])),
+                    3,
+                )
+                item['video_duration'] = visual_duration
+                item['note_ref']['visual_duration'] = visual_duration
 
             # Build the mapping from midi_note → FFmpeg input index for pre-tuned audio.
             # Inputs 0, 1, 2 are: source video, black frame, silent audio.
@@ -1383,7 +1405,13 @@ class VideoComposer:
             extra_audio_inputs: list = []  # paths appended as additional -i args
             BASE_EXTRA_IDX = 3
             if note_audio_map:
-                unique_cached = sorted({mn for (_, _, mn) in valid if mn in note_audio_map})
+                unique_cached = sorted(
+                    {
+                        item['midi_note']
+                        for item in valid
+                        if item['midi_note'] in note_audio_map
+                    }
+                )
                 for mn in unique_cached:
                     note_input_index[mn] = BASE_EXTRA_IDX + len(extra_audio_inputs)
                     extra_audio_inputs.append(note_audio_map[mn])
@@ -1402,7 +1430,12 @@ class VideoComposer:
 
             cs = getattr(self, 'composition_style', {}) or {}
             bg_hex = cs.get('backgroundColor', '#0a0a0f')
-            if preserve_idle_alpha:
+            if background_media:
+                logging.info(
+                    f"[style] note-trigger base for {track_name!r}: "
+                    f"{background_media['kind']} {Path(background_media['path']).name}"
+                )
+            elif preserve_idle_alpha:
                 logging.info(
                     f"[style] note-trigger base for {track_name!r}: transparent idle gaps "
                     f"({matched_key or style_lookup_id})"
@@ -1437,44 +1470,65 @@ class VideoComposer:
             onset_base = 0.0 if onset_offset is None else max(0.0, min(float(onset_offset), 5.0))
             source_duration = self._get_media_duration(video_path)
 
-            for i, (start, dur, midi_note) in enumerate(valid):
+            for i, item in enumerate(valid):
+                start = item['start']
+                audio_dur = item['audio_duration']
+                video_dur = item['video_duration']
+                midi_note = item['midi_note']
+
                 # Pitch factor relative to C4 (60)
                 pitch_factor = 2 ** ((midi_note - 60) / 12.0)
 
                 # Compute safe onset per note so trim doesn't overshoot
                 safe_onset = onset_base
                 if source_duration > 0.0:
-                    max_start = max(0.0, source_duration - dur - 0.01)
+                    max_start = max(0.0, source_duration - video_dur - 0.01)
                     safe_onset = min(onset_base, max_start)
                 if safe_onset < 0.0:
                     safe_onset = 0.0
-                logging.info(f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, safe_onset={safe_onset:.3f}s, dur={dur:.3f}s")
+                logging.info(
+                    f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, "
+                    f"safe_onset={safe_onset:.3f}s, audio_dur={audio_dur:.3f}s, "
+                    f"video_dur={video_dur:.3f}s"
+                )
 
                 # Video always comes from the original source (input 0)
-                filter_parts.append(
-                    f"[0:v]trim=start={safe_onset}:duration={dur},setpts=PTS-STARTPTS,"
-                    f"scale=640:360{',format=rgba' if preserve_idle_alpha else ''}[v{i}]"
-                )
+                if preserve_idle_alpha:
+                    filter_parts.append(
+                        f"[0:v]trim=start={safe_onset}:duration={video_dur},setpts=PTS-STARTPTS,"
+                        f"scale=640:360,format=rgba,"
+                        f"tpad=stop_mode=clone:stop_duration={video_dur:.3f},"
+                        f"trim=duration={video_dur:.3f},"
+                        f"setpts=PTS-STARTPTS+{start:.3f}/TB[v{i}]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[0:v]trim=start={safe_onset}:duration={video_dur},setpts=PTS-STARTPTS,"
+                        f"scale=640:360,"
+                        f"setpts=PTS-STARTPTS+{start:.3f}/TB[v{i}]"
+                    )
 
                 # Audio: prefer pre-tuned file → fall back to asetrate+atempo
                 if midi_note in note_input_index:
                     idx = note_input_index[midi_note]
                     filter_parts.append(
-                        f"[{idx}:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]"
+                        f"[{idx}:a]atrim=start={safe_onset}:duration={audio_dur},asetpts=PTS-STARTPTS[a{i}]"
                     )
                 elif abs(pitch_factor - 1.0) > 0.01:
                     # asetrate shifts pitch but compresses/stretches duration by 1/pitch_factor.
                     # atempo chain compensates to restore the original duration.
                     atempo = self._build_atempo_chain(1.0 / pitch_factor)
                     filter_parts.append(
-                        f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS,"
+                        f"[0:a]atrim=start={safe_onset}:duration={audio_dur},asetpts=PTS-STARTPTS,"
                         f"asetrate=44100*{pitch_factor},aresample=44100,{atempo}[a{i}]"
                     )
                 else:
-                    filter_parts.append(f"[0:a]atrim=start={safe_onset}:duration={dur},asetpts=PTS-STARTPTS[a{i}]")
+                    filter_parts.append(
+                        f"[0:a]atrim=start={safe_onset}:duration={audio_dur},asetpts=PTS-STARTPTS[a{i}]"
+                    )
 
                 # Overlay enable window
-                end = start + dur
+                end = start + video_dur
                 filter_parts.append(
                     f"{video_chain}[v{i}]overlay="
                     f"eof_action=pass:repeatlast=0:format={'auto' if preserve_idle_alpha else 'yuv420'}:"
@@ -4684,7 +4738,7 @@ class VideoComposer:
         active_note_windows = []
         for note in notes:
             t = float(note.get('chunk_time', note.get('time', 0)))
-            dur = float(note.get('duration', 0.3))
+            dur = float(note.get('visual_duration', note.get('duration', 0.3)))
             if t >= 0 and dur > 0:
                 active_note_windows.append((round(t, 3), round(t + dur, 3)))
 
@@ -4769,7 +4823,10 @@ class VideoComposer:
             velocity_samples = []
             for note in notes:
                 t = float(note.get('chunk_time', note.get('time', 0)))
-                dur = max(0.02, float(note.get('duration', 0.25)))
+                dur = max(
+                    0.02,
+                    float(note.get('visual_duration', note.get('duration', 0.25))),
+                )
                 if t >= 0 and dur > 0:
                     windows.append((round(t, 3), round(t + dur, 3)))
                 v = note.get('velocity')
@@ -4909,7 +4966,7 @@ class VideoComposer:
             windows = []
             for n in notes:
                 t = float(n.get('chunk_time', n.get('time', 0)))
-                dur = float(n.get('duration', 0.3))
+                dur = float(n.get('visual_duration', n.get('duration', 0.3)))
                 windows.append((round(max(0.0, t), 3), round(t + dur, 3)))
             windows.sort(key=lambda w: w[0])
             # Merge overlapping windows
