@@ -4694,6 +4694,7 @@ class VideoComposer:
             f"beatFlashColor={style.get('beatFlashColor', 'N/A')}"
         )
 
+        bg_color_enabled = bool(style.get('bgColorEnabled', False))
         bg_color = style.get('bgColor') or None   # None = use composition background
         border_width = int(style.get('borderWidth', 0))
         border_color = style.get('borderColor', '#7c3aed')
@@ -5015,8 +5016,14 @@ class VideoComposer:
             # corners always apply to the video itself. Fill corners with the
             # composition background so they blend seamlessly into the canvas.
             rx, ry, rw, rh = content_x, content_y, content_w, content_h
-            corner_fill = 'black' if preserve_idle_alpha else self._hex_to_ffmpeg_color(comp_bg_color)
+            corner_bg_hex = (
+                bg_color
+                if bg_color_enabled and bg_color and not transparent_bg
+                else comp_bg_color
+            )
+            corner_fill = 'black' if preserve_idle_alpha else self._hex_to_ffmpeg_color(corner_bg_hex)
             corner_fill_alpha = '0.0' if preserve_idle_alpha else '1'
+            corner_fill_replace = ':replace=1' if preserve_idle_alpha else ''
             r = min(corner_radius, rw // 4, rh // 4)
             if r > 0:
                 next_label = f'v_rnd_{output_label[1:-1]}'
@@ -5038,13 +5045,13 @@ class VideoComposer:
                     if xw <= 0:
                         continue
                     # top-left
-                    boxes.append(f"drawbox=x={rx}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
+                    boxes.append(f"drawbox=x={rx}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill{corner_fill_replace}")
                     # top-right
-                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
+                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+y0}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill{corner_fill_replace}")
                     # bottom-left  (mirror: rows ry+rh-y1 to ry+rh-y0)
-                    boxes.append(f"drawbox=x={rx}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
+                    boxes.append(f"drawbox=x={rx}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill{corner_fill_replace}")
                     # bottom-right
-                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill")
+                    boxes.append(f"drawbox=x={rx+rw-xw}:y={ry+rh-y1}:w={xw}:h={hs}:color={corner_fill}@{corner_fill_alpha}:t=fill{corner_fill_replace}")
                 if boxes:
                     filter_parts.append(
                         f"{current}" + ','.join(boxes) + f"[{next_label}]"

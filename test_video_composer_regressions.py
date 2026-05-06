@@ -282,6 +282,64 @@ class VideoComposerRegressionTests(unittest.TestCase):
             border_filters[0],
         )
 
+    def test_cell_style_rounded_corners_replace_alpha_pixels_for_stage_background(self):
+        composer = self.make_composer(
+            composition_style={'backgroundColor': '#112233', 'backgroundMode': 'video'},
+            clip_styles={
+                'track-0': {
+                    'roundedCorners': True,
+                    'cornerRadius': 18,
+                }
+            },
+        )
+        filter_parts = []
+
+        composer._apply_cell_style_filters(
+            filter_parts,
+            '[0:v]',
+            '[v0]',
+            640,
+            360,
+            '0',
+            {'notes': [], 'preserve_idle_alpha': True},
+            [],
+            chunk_duration=1.0,
+            beat_sync_stats={},
+        )
+
+        rounded_filter = ''.join(filter_parts)
+        self.assertIn('color=black@0.0:t=fill:replace=1', rounded_filter)
+
+    def test_cell_style_rounded_corners_use_clip_background_color(self):
+        composer = self.make_composer(
+            composition_style={'backgroundColor': '#112233'},
+            clip_styles={
+                'track-0': {
+                    'roundedCorners': True,
+                    'cornerRadius': 18,
+                    'bgColorEnabled': True,
+                    'bgColor': '#1cb52b',
+                }
+            },
+        )
+        filter_parts = []
+
+        composer._apply_cell_style_filters(
+            filter_parts,
+            '[0:v]',
+            '[v0]',
+            640,
+            360,
+            '0',
+            {'notes': []},
+            [],
+            chunk_duration=1.0,
+            beat_sync_stats={},
+        )
+
+        rounded_filter = ''.join(filter_parts)
+        self.assertIn('color=0x1CB52B@1:t=fill', rounded_filter)
+
     def test_grid_layout_aborts_when_segment_has_no_mapping(self):
         source_path = self.write_dummy_media('grid-segment.mp4')
         composer = self.make_composer(grid_positions={'0': {'row': 0, 'column': 0}})
