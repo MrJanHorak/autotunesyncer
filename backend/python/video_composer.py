@@ -386,6 +386,37 @@ class VideoComposer:
                 else (1920, 1080)
             )
 
+    def _get_preview_stage_scale_factor(self):
+        """Scale editor preview-authored pixel values to target render pixels."""
+        try:
+            preview_dimensions = self.midi_data.get('previewStageDimensions', {}) or {}
+            preview_width = float(preview_dimensions.get('width') or 0)
+            preview_height = float(preview_dimensions.get('height') or 0)
+            target_width, target_height = self._get_target_resolution()
+
+            # The interactive stage can expand well beyond the preset preview canvas
+            # on desktop. Text styling is authored against the preset preview size,
+            # so clamp the reference box to that canonical canvas to avoid exporting
+            # titles and watermarks at an undersized scale.
+            canonical_preview_width = max(1.0, float(target_width) / 3.0)
+            canonical_preview_height = max(1.0, float(target_height) / 3.0)
+
+            reference_width = preview_width if preview_width > 0 else canonical_preview_width
+            reference_height = preview_height if preview_height > 0 else canonical_preview_height
+            reference_width = min(reference_width, canonical_preview_width)
+            reference_height = min(reference_height, canonical_preview_height)
+
+            width_scale = float(target_width) / reference_width
+            height_scale = float(target_height) / reference_height
+            scale = min(width_scale, height_scale)
+
+            if scale <= 0:
+                return 1.0
+
+            return max(0.1, min(10.0, scale))
+        except Exception:
+            return 1.0
+
     def _get_encoding_settings(self):
         """Get FFmpeg encoding arguments based on configuration and hardware"""
         config = self.render_config
@@ -4424,7 +4455,19 @@ class VideoComposer:
         'comic':     'comic.ttf',
     }
 
-    def _get_windows_font_path(self, font_key=None):
+    _FONT_FILES_BOLD = {
+        'default':   'segoeuib.ttf',
+        'arial':     'arialbd.ttf',
+        'verdana':   'verdanab.ttf',
+        'impact':    'impact.ttf',
+        'courier':   'courbd.ttf',
+        'times':     'timesbd.ttf',
+        'georgia':   'georgiab.ttf',
+        'trebuchet': 'trebucbd.ttf',
+        'comic':     'comicbd.ttf',
+    }
+
+    def _get_windows_font_path(self, font_key=None, bold=False):
         """Return the escaped font path for FFmpeg drawtext's fontfile= option.
 
         font_key: one of the values from FONT_OPTIONS (e.g. 'arial', 'impact').
@@ -4434,6 +4477,14 @@ class VideoComposer:
         base = r'C:/Windows/Fonts/'
         candidates = []
 
+        if bold:
+            if font_key in (None, 'default'):
+                candidates.append(base + self._FONT_FILES_BOLD['default'])
+            else:
+                bold_name = self._FONT_FILES_BOLD.get(font_key)
+                if bold_name:
+                    candidates.append(base + bold_name)
+
         if font_key and font_key != 'default':
             fname = self._FONT_FILES.get(font_key)
             if fname:
@@ -4441,7 +4492,9 @@ class VideoComposer:
 
         # Always append a safe fallback chain so some font is found
         candidates += [
+            base + 'segoeuib.ttf',
             base + 'arial.ttf',
+            base + 'arialbd.ttf',
             base + 'verdana.ttf',
             base + 'segoeui.ttf',
             base + 'calibri.ttf',
@@ -4452,10 +4505,16 @@ class VideoComposer:
         # only fall back to system fonts when no key is given.
         if font_key and font_key != 'default':
             # Try the requested font only — no silent substitution
-            p = base + (self._FONT_FILES.get(font_key) or '')
+            font_map = self._FONT_FILES_BOLD if bold else self._FONT_FILES
+            p = base + (font_map.get(font_key) or '')
             if p and os.path.exists(p.replace('/', os.sep)):
                 return self._escape_path_for_filter(p)
             return None  # font not found — caller uses no fontfile= (FFmpeg default)
+
+        if font_key == 'default' and bold:
+            p = base + self._FONT_FILES_BOLD['default']
+            if os.path.exists(p.replace('/', os.sep)):
+                return self._escape_path_for_filter(p)
 
         for p in candidates:
             if os.path.exists(p.replace('/', os.sep)):
@@ -5247,6 +5306,45 @@ class VideoComposer:
         reused by the combined compress+overlay finalization pass.
         """
         cs = getattr(self, 'composition_style', {}) or {}
+        preview_stage_scale = self._get_preview_stage_scale_factor()
+
+        def scale_preview_px(value, minimum=1):
+            try:
+                scaled = float(value or 0) * preview_stage_scale
+            except Exception:
+                scaled = float(minimum)
+            return max(float(minimum), scaled)
+
+        def wrap_overlay_text(text, font_size, max_width_ratio):
+            source = str(text or '').strip()
+            if not source:
+                return []
+
+            existing_lines = [line.strip() for line in source.splitlines() if line.strip()]
+            if len(existing_lines) > 1:
+                return existing_lines[:4]
+
+            words = source.split()
+            if len(words) <= 1:
+                return [source]
+
+            target_width, _ = self._get_target_resolution()
+            max_width_px = max(120.0, float(target_width) * float(max_width_ratio))
+            estimated_char_width = max(1.0, float(font_size) * 0.74)
+            max_chars = max(3, int(max_width_px / estimated_char_width))
+
+            lines = []
+            current_line = words[0]
+            for word in words[1:]:
+                candidate = f"{current_line} {word}"
+                if len(candidate) <= max_chars:
+                    current_line = candidate
+                else:
+                    lines.append(current_line)
+                    current_line = word
+            lines.append(current_line)
+            return lines[:4]
+
         title_text    = (cs.get('titleText') or '').strip()
         title_subtext = (cs.get('titleSubtitleText') or '').strip()
         intro_title_text = (cs.get('introCardText') or title_text or '').strip()
@@ -5255,12 +5353,12 @@ class VideoComposer:
         title_font    = cs.get('titleFont') or cs.get('introCardFont', 'default')
         title_color   = cs.get('titleColor') or cs.get('introCardTextColor', '#ffffff')
         title_subcolor = cs.get('titleSubtitleColor', '#d8d8e6')
-        title_subsize = int(cs.get('titleSubtitleFontSize', 24))
+        title_subsize = int(round(scale_preview_px(cs.get('titleSubtitleFontSize', 24), 10)))
         title_glow_enabled = bool(cs.get('titleGlowEnabled', False))
         title_glow_color = cs.get('titleGlowColor', '#ffffff')
-        title_glow_size = float(cs.get('titleGlowSize', 8) or 8)
+        title_glow_size = scale_preview_px(cs.get('titleGlowSize', 8), 0)
         title_shadow_enabled = bool(cs.get('titleShadowEnabled', True))
-        title_shadow_size = float(cs.get('titleShadowSize', 2) or 2)
+        title_shadow_size = scale_preview_px(cs.get('titleShadowSize', 2), 0)
         title_shadow_color = cs.get('titleShadowColor', '#000000')
         title_bg      = cs.get('titleBackgroundColor') or cs.get('introCardBg', '#000000')
         title_bg_opacity = float(cs.get('titleBackgroundOpacity', 0.82) or 0.82)
@@ -5486,12 +5584,13 @@ class VideoComposer:
 
         def add_drawtext(text, x_expr, y_expr, size, color_hex,
                          alpha_expr='1', enabled='1', font_key=None,
+                         bold=False,
                          shadow_size=0, shadow_color_hex=None,
                          border_size=0, border_color_hex=None):
             nonlocal current_label
             escaped = _esc(text)
             fc = self._hex_to_ffmpeg_color(color_hex)
-            fp = self._get_windows_font_path(font_key) if font_key and font_key != 'default' else None
+            fp = self._get_windows_font_path(font_key, bold=bold)
             fontfile_part = f':fontfile={fp}' if fp else ''
             shadow_part = ''
             shadow_size = float(shadow_size or 0)
@@ -5662,20 +5761,30 @@ class VideoComposer:
             ic_title = intro_title_text or 'AutoTune Composition'
             ic_sub   = intro_title_subtext
             if ic_title:
-                add_drawtext(ic_title, '(w-text_w)/2', '(h-text_h)/2', 72, txt_col,
-                             alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
-                             font_key=ic_font)
+                intro_size = int(round(scale_preview_px(72, 18)))
+                intro_lines = wrap_overlay_text(ic_title, intro_size, 0.72)
+                intro_step = max(14, int(round(intro_size * 0.96)))
+                intro_shift = ((len(intro_lines) - 1) * intro_step) / 2
+                for index, line in enumerate(intro_lines):
+                    line_y = '(h-text_h)/2'
+                    if intro_shift:
+                        line_y = f"({line_y})-{intro_shift:.1f}+{index * intro_step}"
+                    add_drawtext(line, '(w-text_w)/2', line_y,
+                                 intro_size, txt_col,
+                                 alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
+                                 font_key=ic_font, bold=True)
             if ic_sub:
-                add_drawtext(ic_sub, '(w-text_w)/2', 'h*0.62', 36, txt_col,
+                add_drawtext(ic_sub, '(w-text_w)/2', 'h*0.62',
+                             int(round(scale_preview_px(36, 12))), txt_col,
                              alpha_expr=alpha_expr, enabled=f'lt(t,{d})',
-                             font_key=ic_font)
+                             font_key=ic_font, bold=True)
             logging.info(f'🎬 Intro card overlay: {intro_dur}s, bg={bg_col}, '
                          f'title={bool(ic_title)}, subtitle={bool(ic_sub)}')
 
         # ── Title (fade-in at start, fade-out) ────────────────────────────────
         if has_title:
             pos  = cs.get('titlePosition', 'top-center')
-            size = int(cs.get('titleFontSize', 56))
+            size = int(round(scale_preview_px(cs.get('titleFontSize', 56), 12)))
             color = title_color
             animated = bool(cs.get('titleAnimated', True))
             # Prevent a second "fly-in" title by default when intro is enabled.
@@ -5694,8 +5803,8 @@ class VideoComposer:
             }
             intensity_factor = intensity_factor_map.get(title_anim_intensity, 1.0)
             direction_sign = 1 if title_anim_direction == 'right' else -1
-            motion_y = max(8.0, 38.0 * intensity_factor)
-            motion_x = max(10.0, 46.0 * intensity_factor) * direction_sign
+            motion_y = max(8.0 * preview_stage_scale, 38.0 * intensity_factor * preview_stage_scale)
+            motion_x = max(10.0 * preview_stage_scale, 46.0 * intensity_factor * preview_stage_scale) * direction_sign
             bounce_overshoot = max(4.0, motion_y * 0.22)
 
             title_duration = float(cs.get('titleDuration', 0) or 0)
@@ -5817,17 +5926,27 @@ class VideoComposer:
                     )
                     subtitle_x_expr = title_x_expr
 
-            add_drawtext(title_text, title_x_expr, title_y_expr, size, color,
-                         alpha_expr=title_render_alpha, enabled=enabled,
-                         font_key=title_font,
-                         shadow_size=title_shadow_size if title_shadow_enabled else 0,
-                         shadow_color_hex=title_shadow_color,
-                         border_size=(title_glow_size * 0.14) if title_glow_enabled else 0,
-                         border_color_hex=title_glow_color)
+            title_max_width_ratio = 1.0 if title_bg_mode == 'fullscreen' else (0.70 if title_has_bg else 0.85)
+            title_lines = wrap_overlay_text(title_text, size, title_max_width_ratio)
+            title_line_step = max(12, int(round(size * 0.94)))
+            title_anchor_shift = ((len(title_lines) - 1) * title_line_step) / 2
+            for index, line in enumerate(title_lines):
+                line_y_expr = title_y_expr
+                if title_anchor_shift:
+                    line_y_expr = f"({title_y_expr})-{title_anchor_shift:.1f}+{index * title_line_step}"
+                add_drawtext(line, title_x_expr, line_y_expr, size, color,
+                             alpha_expr=title_render_alpha, enabled=enabled,
+                             font_key=title_font, bold=True,
+                             shadow_size=title_shadow_size if title_shadow_enabled else 0,
+                             shadow_color_hex=title_shadow_color,
+                             border_size=(title_glow_size * 0.14) if title_glow_enabled else 0,
+                             border_color_hex=title_glow_color)
             if title_subtext:
-                subtitle_y = tag_y if title_has_bg else (
-                    'h*0.58' if pos == 'center' else f'{y}+{max(title_subsize + 10, size // 2)}'
+                title_block_extra = max(0, (len(title_lines) - 1) * title_line_step)
+                subtitle_base_y = tag_y if title_has_bg else (
+                    'h*0.58' if pos == 'center' else f'{y}+{max(title_subsize + int(round(scale_preview_px(10, 2))), size // 2)}'
                 )
+                subtitle_y = subtitle_base_y if title_block_extra == 0 else f'({subtitle_base_y})+{title_block_extra}'
                 subtitle_y_expr = subtitle_y
                 if animated and title_anim_preset in {'scroll-up', 'bounce', 'spin-soft', 'blur-focus'}:
                     entry_end = start_at + title_anim_duration
@@ -5860,7 +5979,7 @@ class VideoComposer:
                              int(max(16, title_subsize)),
                              title_subcolor,
                              alpha_expr=subtitle_alpha, enabled=enabled,
-                             font_key=title_font,
+                             font_key=title_font, bold=True,
                              shadow_size=(title_shadow_size * 0.9) if title_shadow_enabled else 0,
                              shadow_color_hex=title_shadow_color,
                              border_size=(title_glow_size * 0.1) if title_glow_enabled else 0,
@@ -5868,16 +5987,22 @@ class VideoComposer:
 
         # ── Tagline ───────────────────────────────────────────────────────────
         if has_tagline:
-            size  = int(cs.get('taglineFontSize', 24))
+            size  = int(round(scale_preview_px(cs.get('taglineFontSize', 24), 10)))
             color = cs.get('taglineColor', '#cccccc')
             tagline_position = cs.get('taglinePosition', 'bottom-center')
             tagline_alignment = cs.get('taglineAlignment', 'center')
             tagline_shape = cs.get('taglineShape', 'rounded')
             tagline_shadow_enabled = bool(cs.get('taglineShadowEnabled', True))
-            tagline_shadow_size = float(cs.get('taglineShadowSize', 2) or 2)
+            tagline_shadow_size = scale_preview_px(cs.get('taglineShadowSize', 2), 0)
             tagline_shadow_color = cs.get('taglineShadowColor', '#000000')
             tagline_width_pct = min(100.0, max(20.0, float(cs.get('taglineWidth', 72) or 72)))
-            tagline_vertical_offset = min(160.0, max(-160.0, float(cs.get('taglineVerticalOffset', 0) or 0.0)))
+            tagline_vertical_offset = min(
+                160.0 * preview_stage_scale,
+                max(
+                    -160.0 * preview_stage_scale,
+                    float(cs.get('taglineVerticalOffset', 0) or 0.0) * preview_stage_scale,
+                ),
+            )
             tagline_fade_in = max(0.0, float(cs.get('taglineFadeInDuration', 0.5) or 0.0))
             tagline_fade_out = max(0.0, float(cs.get('taglineFadeOutDuration', 0.5) or 0.0))
             tagline_bg_enabled = bool(cs.get('taglineBackgroundEnabled'))
@@ -5982,11 +6107,11 @@ class VideoComposer:
 
         # ── Watermark ─────────────────────────────────────────────────────────
         if has_watermark:
-            size    = int(cs.get('watermarkFontSize', 18))
+            size    = int(round(scale_preview_px(cs.get('watermarkFontSize', 18), 8)))
             color   = cs.get('watermarkColor', '#ffffff')
             opacity = float(cs.get('watermarkOpacity', 0.5))
             wpos    = cs.get('watermarkPosition', 'bottom-right')
-            pad     = 16
+            pad     = int(round(scale_preview_px(16, 6)))
             x, y = {
                 'bottom-right': (f'w-text_w-{pad}', f'h-text_h-{pad}'),
                 'bottom-left':  (str(pad),           f'h-text_h-{pad}'),
@@ -5994,7 +6119,8 @@ class VideoComposer:
             }.get(wpos, (str(pad), str(pad)))
             add_drawtext(cs['watermarkText'], x, y, size, color,
                          alpha_expr=str(round(opacity, 2)),
-                         font_key=cs.get('watermarkFont', 'default'))
+                         font_key=cs.get('watermarkFont', 'default'),
+                         bold=True)
 
         # ── Post-text transition pass (for section/phrase cadence) ─────────
         if transition_enabled and transition_preset != 'none' and transition_apply_post_text:

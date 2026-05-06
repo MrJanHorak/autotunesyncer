@@ -34,7 +34,9 @@ const BASE_EDITOR_GRID_UNITS = 12;
 const EDITOR_GRID_SNAP_FACTOR = 2;
 const EDITOR_GRID_UNITS = BASE_EDITOR_GRID_UNITS * EDITOR_GRID_SNAP_FACTOR;
 const DEFAULT_STAGE_WIDTH = 960;
+const LANDSCAPE_STAGE_MAX_WIDTH = 1400;
 const PORTRAIT_STAGE_MAX_WIDTH = 560;
+const STAGE_VIEWPORT_GUTTER = 24;
 const MIN_TILE_SPAN = 2 * EDITOR_GRID_SNAP_FACTOR;
 const MAX_TILE_SPAN = 6 * EDITOR_GRID_SNAP_FACTOR;
 const getArrangementId = (item) => item.id.replace(/^(track-|drum-)/, '');
@@ -415,6 +417,7 @@ const Grid = ({
   compositionStyle,
   backgroundAsset,
   renderPreset = DEFAULT_RENDER_PRESET,
+  onResetLayout,
 }) => {
   const resolvedRenderPreset = normalizeRenderPreset(renderPreset);
   const renderPresetConfig = getRenderPresetConfig(resolvedRenderPreset);
@@ -789,26 +792,90 @@ const Grid = ({
 
   useEffect(() => {
     const stageNode = stageRef.current;
-    if (!stageNode) return undefined;
+    const containerNode = stageNode?.parentElement;
+    const editorCenterNode = containerNode?.parentElement;
+    if (!stageNode || !containerNode || !editorCenterNode) return undefined;
 
-    const updateWidth = () => {
-      const nextWidth = Math.max(
-        stageNode.clientWidth || DEFAULT_STAGE_WIDTH,
-        320,
+    const updateStageWidth = () => {
+      const containerStyles = window.getComputedStyle(containerNode);
+      const editorStyles = window.getComputedStyle(editorCenterNode);
+      const horizontalPadding =
+        (Number.parseFloat(containerStyles.paddingLeft) || 0) +
+        (Number.parseFloat(containerStyles.paddingRight) || 0);
+      const measuredContainerWidth =
+        containerNode.clientWidth - horizontalPadding;
+      const maxWidthFromContainer =
+        measuredContainerWidth > 1
+          ? measuredContainerWidth
+          : DEFAULT_STAGE_WIDTH;
+      const stageRect = stageNode.getBoundingClientRect();
+      const editorRect = editorCenterNode.getBoundingClientRect();
+      const compositionNode = editorCenterNode.querySelector(
+        '.composition-section',
       );
+      const toolbarNode = compositionNode?.querySelector(
+        '.composition-toolbar',
+      );
+      const toolbarHeight = toolbarNode?.getBoundingClientRect().height || 0;
+      const compositionMarginTop = compositionNode
+        ? Number.parseFloat(
+            window.getComputedStyle(compositionNode).marginTop,
+          ) || 0
+        : 0;
+      const editorGap =
+        Number.parseFloat(editorStyles.rowGap || editorStyles.gap) || 0;
+      const reservedHeight =
+        toolbarHeight +
+        (toolbarHeight > 0 ? compositionMarginTop + editorGap : 0) +
+        STAGE_VIEWPORT_GUTTER;
+      const availableEditorHeight =
+        editorRect.bottom - stageRect.top - reservedHeight;
+      const maxWidthFromHeight =
+        availableEditorHeight > 0
+          ? (availableEditorHeight * renderPresetConfig.aspectRatio.width) /
+            renderPresetConfig.aspectRatio.height
+          : maxWidthFromContainer;
+      const presetWidthCap = isPortraitStage
+        ? PORTRAIT_STAGE_MAX_WIDTH
+        : LANDSCAPE_STAGE_MAX_WIDTH;
+      const nextWidth = Math.max(
+        1,
+        Math.round(
+          Math.min(maxWidthFromContainer, maxWidthFromHeight, presetWidthCap),
+        ),
+      );
+
       setStageWidth((currentWidth) =>
         Math.abs(currentWidth - nextWidth) < 1 ? currentWidth : nextWidth,
       );
     };
 
-    updateWidth();
+    updateStageWidth();
 
-    if (typeof ResizeObserver === 'undefined') return undefined;
+    window.addEventListener('resize', updateStageWidth);
 
-    const observer = new ResizeObserver(() => updateWidth());
-    observer.observe(stageNode);
-    return () => observer.disconnect();
-  }, []);
+    if (typeof ResizeObserver === 'undefined') {
+      return () => window.removeEventListener('resize', updateStageWidth);
+    }
+
+    const observer = new ResizeObserver(() => updateStageWidth());
+    observer.observe(containerNode);
+    observer.observe(editorCenterNode);
+    const compositionNode = editorCenterNode.querySelector(
+      '.composition-section',
+    );
+    const toolbarNode = compositionNode?.querySelector('.composition-toolbar');
+    if (compositionNode) observer.observe(compositionNode);
+    if (toolbarNode) observer.observe(toolbarNode);
+    return () => {
+      window.removeEventListener('resize', updateStageWidth);
+      observer.disconnect();
+    };
+  }, [
+    isPortraitStage,
+    renderPresetConfig.aspectRatio.height,
+    renderPresetConfig.aspectRatio.width,
+  ]);
 
   useEffect(() => {
     if (!processedData.length) return;
@@ -903,7 +970,9 @@ const Grid = ({
     const nextLayout = buildDefaultEditorLayout(processedData);
     setEditorLayout(nextLayout);
     committedLayoutRef.current = nextLayout;
-    onArrangementChange(buildArrangementFromEditorLayout(nextLayout));
+    const newArrangement = buildArrangementFromEditorLayout(nextLayout);
+    onArrangementChange(newArrangement);
+    onResetLayout?.();
   };
 
   // Heat map calculations with modern spectrum gradient - 10 tier system for maximum distinction
@@ -1277,23 +1346,9 @@ const Grid = ({
     <div
       className='grid-container'
       style={{
-        '--video-width': isPortraitStage
-          ? `min(90vw, ${PORTRAIT_STAGE_MAX_WIDTH}px)`
-          : 'min(90vw, 1400px)',
+        '--grid-stage-max-width': `${stageWidth}px`,
       }}
     >
-      {canEditLayout && (
-        <div className='grid-layout-toolbar'>
-          <span className='grid-layout-note'>
-            Drag from the grip to move clips. Resize from the lower-right corner
-            to spotlight instruments. Drop onto another clip to swap positions.
-          </span>
-          <button className='grid-layout-reset' onClick={handleResetLayout}>
-            Reset Layout
-          </button>
-        </div>
-      )}
-
       <div
         ref={stageRef}
         className={[
@@ -1630,6 +1685,7 @@ Grid.propTypes = {
     ),
   }).isRequired,
   onArrangementChange: PropTypes.func.isRequired,
+  onResetLayout: PropTypes.func,
   initialArrangement: PropTypes.object,
   clipStyles: PropTypes.object,
   onClipStyleChange: PropTypes.func,

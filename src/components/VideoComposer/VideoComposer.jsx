@@ -13,6 +13,27 @@ import {
 import { DEFAULT_RENDER_PRESET } from '../../../shared/renderPresets.js';
 import './VideoComposer.css';
 
+const getLivePreviewStageDimensions = () => {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const stageElement = document.querySelector('.grid-preview-stage');
+  if (!stageElement) {
+    return null;
+  }
+
+  const rect = stageElement.getBoundingClientRect();
+  const width = Math.round(rect.width || 0);
+  const height = Math.round(rect.height || 0);
+
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+
+  return { width, height };
+};
+
 const VideoComposer = ({
   videoFiles,
   midiData,
@@ -29,6 +50,7 @@ const VideoComposer = ({
   onError = null,
   onStart = null,
   onComplete = null,
+  onResetLayout = null,
 }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingMode, setProcessingMode] = useState(null);
@@ -217,6 +239,7 @@ const VideoComposer = ({
         compositionStyle: compositionStyle || {},
         clipStyles: clipStyles || {},
         renderPreset,
+        previewStageDimensions: getLivePreviewStageDimensions(),
       };
       console.log('Midi data being sent:', midiPayload);
       const midiBlob = new Blob([JSON.stringify(midiPayload)], {
@@ -319,155 +342,180 @@ const VideoComposer = ({
           onShared={() => setShowShareModal(false)}
         />
       )}
-      <div className='composition-actions'>
-        <button
-          onClick={() => startComposition(true)}
-          disabled={isProcessing || !canCompose}
-          className='composition-btn composition-btn--preview'
-          title='Generate fast preview at lower quality'
-        >
-          <span className='composition-btn__icon'>⚡</span>
-          <span className='composition-btn__text'>
-            {isProcessing && processingMode === 'preview'
-              ? 'Generating Preview…'
-              : 'Generate Preview (Fast)'}
-          </span>
-        </button>
-        <button
-          onClick={() => startComposition(false)}
-          disabled={isProcessing || !canCompose}
-          className='composition-btn composition-btn--full'
-          title='Render full high-quality composition'
-        >
-          <span className='composition-btn__icon'>✓</span>
-          <span className='composition-btn__text'>
-            {isProcessing && processingMode === 'full'
-              ? 'Processing Full Video…'
-              : 'Start Full Composition'}
-          </span>
-        </button>
-        {isProcessing && (
+      <div className='composition-toolbar'>
+        <div className='composition-actions'>
           <button
-            onClick={() => abortRef.current?.abort()}
-            className='composition-btn composition-btn--cancel'
-            aria-label='Cancel composition'
-            title='Cancel current operation'
+            onClick={() => startComposition(true)}
+            disabled={isProcessing || !canCompose}
+            className='composition-btn composition-btn--preview'
+            title='Generate fast preview at lower quality'
           >
-            <span className='composition-btn__icon'>✕</span>
-            <span className='composition-btn__text'>Cancel</span>
+            <span className='composition-btn__icon'>⚡</span>
+            <span className='composition-btn__text'>
+              {isProcessing && processingMode === 'preview'
+                ? 'Generating Preview…'
+                : 'Generate Preview (Fast)'}
+            </span>
           </button>
-        )}
-      </div>
-
-      {isProcessing && (
-        <div
-          className='mt-4'
-          aria-live='polite'
-          aria-label='Composition progress'
-        >
-          {/* Upload phase */}
-          {uploadProgress < 100 ? (
-            <>
-              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
-                <div
-                  className={`h-full rounded transition-all duration-300 ${
-                    processingMode === 'preview'
-                      ? 'bg-yellow-500'
-                      : 'bg-blue-500'
-                  }`}
-                  style={{ width: `${uploadProgress}%` }}
-                />
-              </div>
-              <p className='text-sm text-gray-600 mt-1'>
-                <span className='font-medium text-blue-600'>📤 Uploading</span>
-                {' — '}
-                {uploadProgress}%
-              </p>
-            </>
-          ) : renderProgress > 0 ? (
-            /* Render phase: real progress from Python */
-            <>
-              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
-                <div
-                  className={`h-full rounded transition-all duration-500 ${
-                    processingMode === 'preview'
-                      ? 'bg-yellow-400'
-                      : 'bg-blue-500'
-                  }`}
-                  style={{ width: `${renderProgress}%` }}
-                />
-              </div>
-              <p className='text-sm text-gray-600 mt-1'>
-                <span className='font-medium'>
-                  {renderProgress <= 25
-                    ? '🔬 Preprocessing'
-                    : renderProgress <= 85
-                      ? `${processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'} Rendering`
-                      : '✨ Finalizing'}
-                </span>
-                {' — '}
-                {renderProgress}%{' · '}
-                {elapsedSeconds}s elapsed
-                {elapsedSeconds > 2 &&
-                  (() => {
-                    const etaSec = Math.round(
-                      (elapsedSeconds * (100 - renderProgress)) /
-                        renderProgress,
-                    );
-                    return etaSec > 0 ? `, ~${etaSec}s remaining` : null;
-                  })()}
-              </p>
-            </>
-          ) : (
-            /* Queued / pre-processing phase: indeterminate */
-            <>
-              <div className='w-full h-2 bg-gray-200 rounded overflow-hidden'>
-                <div
-                  className={`h-full rounded ${
-                    processingMode === 'preview'
-                      ? 'bg-yellow-400'
-                      : 'bg-blue-500'
-                  }`}
-                  style={{
-                    width: '40%',
-                    animation:
-                      'indeterminate-progress 1.4s infinite ease-in-out',
-                  }}
-                />
-              </div>
-              <p className='text-sm text-gray-600 mt-1'>
-                <span className='font-medium text-gray-500'>⚙️ Queued</span>
-                {' — '}
-                {elapsedSeconds}s elapsed
-              </p>
-            </>
+          <button
+            onClick={() => startComposition(false)}
+            disabled={isProcessing || !canCompose}
+            className='composition-btn composition-btn--full'
+            title='Render full high-quality composition'
+          >
+            <span className='composition-btn__icon'>✓</span>
+            <span className='composition-btn__text'>
+              {isProcessing && processingMode === 'full'
+                ? 'Processing Full Video…'
+                : 'Start Full Composition'}
+            </span>
+          </button>
+          {isProcessing && (
+            <button
+              onClick={() => abortRef.current?.abort()}
+              className='composition-btn composition-btn--cancel'
+              aria-label='Cancel composition'
+              title='Cancel current operation'
+            >
+              <span className='composition-btn__icon'>✕</span>
+              <span className='composition-btn__text'>Cancel</span>
+            </button>
+          )}
+          {onResetLayout && !isProcessing && (
+            <button
+              onClick={onResetLayout}
+              className='composition-btn composition-btn--reset'
+              title='Reset all clips to default grid layout'
+            >
+              <svg
+                width='16'
+                height='16'
+                viewBox='0 0 24 24'
+                fill='none'
+                stroke='currentColor'
+                strokeWidth='2'
+                strokeLinecap='round'
+                strokeLinejoin='round'
+              >
+                <path d='M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8' />
+                <path d='M21 3v5h-5' />
+                <path d='M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16' />
+                <path d='M3 21v-5h5' />
+              </svg>
+              <span className='composition-btn__text'>Reset Layout</span>
+            </button>
           )}
         </div>
-      )}
 
-      {error && (
-        <div
-          className='mt-4 p-4 bg-red-100 text-red-700 rounded flex items-start gap-3'
-          role='alert'
-        >
-          <span className='flex-1'>{error}</span>
-          <button
-            onClick={() => {
-              setError(null);
-              startComposition(lastModeRef.current);
-            }}
-            className='shrink-0 px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700 font-medium'
+        {isProcessing && (
+          <div
+            className='progress-container'
+            aria-live='polite'
+            aria-label='Composition progress'
           >
-            ↺ Retry
-          </button>
-        </div>
-      )}
+            {uploadProgress < 100 ? (
+              <>
+                <div className='progress-bar-wrapper'>
+                  <div
+                    className='progress-bar-fill'
+                    style={{
+                      width: `${uploadProgress}%`,
+                      background:
+                        processingMode === 'preview'
+                          ? 'linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%)'
+                          : 'linear-gradient(90deg, #3b82f6 0%, #2563eb 100%)',
+                    }}
+                  />
+                </div>
+                <p className='progress-text'>
+                  <span style={{ fontWeight: 600, color: '#3b82f6' }}>
+                    📤 Uploading
+                  </span>
+                  {' — '}
+                  {uploadProgress}%
+                </p>
+              </>
+            ) : renderProgress > 0 ? (
+              <>
+                <div className='progress-bar-wrapper'>
+                  <div
+                    className='progress-bar-fill'
+                    style={{
+                      width: `${renderProgress}%`,
+                      background:
+                        processingMode === 'preview'
+                          ? 'linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%)'
+                          : 'linear-gradient(90deg, #3b82f6 0%, #2563eb 100%)',
+                    }}
+                  />
+                </div>
+                <p className='progress-text'>
+                  <span className='font-medium'>
+                    {renderProgress <= 25
+                      ? '🔬 Preprocessing'
+                      : renderProgress <= 85
+                        ? `${processingMode === 'preview' ? '⚡ Preview' : '🎬 Full'} Rendering`
+                        : '✨ Finalizing'}
+                  </span>
+                  {' — '}
+                  {renderProgress}%{' · '}
+                  {elapsedSeconds}s elapsed
+                  {elapsedSeconds > 2 &&
+                    (() => {
+                      const etaSec = Math.round(
+                        (elapsedSeconds * (100 - renderProgress)) /
+                          renderProgress,
+                      );
+                      return etaSec > 0 ? `, ~${etaSec}s remaining` : null;
+                    })()}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className='progress-bar-wrapper'>
+                  <div
+                    className='progress-bar-fill progress-bar-indeterminate'
+                    style={{
+                      background:
+                        processingMode === 'preview'
+                          ? 'linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%)'
+                          : 'linear-gradient(90deg, #3b82f6 0%, #2563eb 100%)',
+                    }}
+                  />
+                </div>
+                <p className='progress-text'>
+                  <span style={{ fontWeight: 600, color: '#6b7280' }}>
+                    ⚙️ Queued
+                  </span>
+                  {' — '}
+                  {elapsedSeconds}s elapsed
+                </p>
+              </>
+            )}
+          </div>
+        )}
 
-      {!canCompose && !error && (
-        <div className='mt-4 p-4 bg-amber-100 text-amber-800 rounded'>
-          {validationErrors.join(' ')}
-        </div>
-      )}
+        {error && (
+          <div className='composition-error' role='alert'>
+            <span className='composition-error__text'>{error}</span>
+            <button
+              onClick={() => {
+                setError(null);
+                startComposition(lastModeRef.current);
+              }}
+              className='composition-error__retry'
+            >
+              ↺ Retry
+            </button>
+          </div>
+        )}
+
+        {!canCompose && !error && (
+          <div className='composition-warning'>
+            {validationErrors.join(' ')}
+          </div>
+        )}
+      </div>
 
       {composedVideoUrl && (
         <div className='mt-4'>

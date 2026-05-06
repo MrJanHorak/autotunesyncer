@@ -1,7 +1,7 @@
 /* ─── Project Manager — Figma Dark Theme ───────────────────────────────── */
 
 .pm-page {
-  min-height: calc(100vh - 64px);   /* below sticky nav */
+  min-height: calc(100vh - 64px); /* below sticky nav */
   background: var(--color-bg-dark);
   padding: 2.5rem 1.5rem;
 }
@@ -49,12 +49,14 @@
   cursor: pointer;
   transition: background 0.15s;
 }
-.pm-btn-new:hover { background: #a855f7; }
+.pm-btn-new:hover {
+  background: #a855f7;
+}
 
 /* Create form */
 .pm-create-form {
   background: var(--color-bg-card);
-  border: 1px solid rgba(192,132,252,0.18);
+  border: 1px solid rgba(192, 132, 252, 0.18);
   border-radius: 0.75rem;
   padding: 1.5rem;
   margin-bottom: 2rem;
@@ -72,7 +74,7 @@
 
 .pm-input {
   background: #12132a;
-  border: 1px solid rgba(192,132,252,0.2);
+  border: 1px solid rgba(192, 132, 252, 0.2);
   border-radius: 0.5rem;
   padding: 0.65rem 1rem;
   color: #fff;
@@ -80,8 +82,20 @@
   outline: none;
   transition: border-color 0.15s;
 }
-.pm-input:focus { border-color: var(--color-accent); }
-.pm-input::placeholder { color: var(--color-text-muted); }
+.pm-input:focus {
+  border-color: var(--color-accent);
+}
+.pm-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.pm-label {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+  display: block;
+}
 
 .pm-create-form__actions {
   display: flex;
@@ -104,21 +118,31 @@
   transition: background 0.15s;
   white-space: nowrap;
 }
-.pm-btn-primary:hover:not(:disabled) { background: #a855f7; }
-.pm-btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+.pm-btn-primary:hover:not(:disabled) {
+  background: #a855f7;
+}
+.pm-btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .pm-btn-ghost {
   background: none;
-  border: 1px solid rgba(192,132,252,0.25);
+  border: 1px solid rgba(192, 132, 252, 0.25);
   color: var(--color-text-muted);
   padding: 0.55rem 1rem;
   border-radius: 0.5rem;
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
-.pm-btn-ghost:hover { background: rgba(255,255,255,0.05); color: #fff; }
+.pm-btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}
 
 .pm-error {
   color: #f87171;
@@ -171,27 +195,41 @@
   gap: 1.5rem;
 }
 
-@media (max-width: 1100px) { .pm-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 720px)  { .pm-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 480px)  { .pm-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) {
+  .pm-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 720px) {
+  .pm-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .pm-grid {
+    grid-template-columns: 1fr;
+  }
+}
 
 /* Card */
 .pm-card {
   background: var(--color-bg-card);
-  border: 1px solid rgba(192,132,252,0.14);
+  border: 1px solid rgba(192, 132, 252, 0.14);
   border-radius: 0.625rem;
   overflow: hidden;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
 }
 
 .pm-card:hover {
   border-color: var(--color-accent);
-  box-shadow: 0 4px 20px rgba(192,132,252,0.12);
+  box-shadow: 0 4px 20px rgba(192, 132, 252, 0.12);
 }
 
 .pm-card--selected {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 2px rgba(192,132,252,0.3);
+  box-shadow: 0 0 0 2px rgba(192, 132, 252, 0.3);
 }
 
 /* Thumbnail */
@@ -209,20 +247,25 @@
 .pm-card__thumb-gradient {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, #1e1b4b 0%, #2d1b69 60%, rgba(244,114,182,0.2) 100%);
+  background: linear-gradient(
+    135deg,
+    #1e1b4b 0%,
+    #2d1b69 60%,
+    rgba(244, 114, 182, 0.2) 100%
+  );
 }
 
 .pm-card__thumb-icon {
   position: relative;
   z-index: 1;
-  color: rgba(192,132,252,0.4);
+  color: rgba(192, 132, 252, 0.4);
 }
 
 .pm-card__thumb-badge {
   position: absolute;
   bottom: 0.5rem;
   right: 0.5rem;
-  background: rgba(0,0,0,0.75);
+  background: rgba(0, 0, 0, 0.75);
   color: #e5e7eb;
   font-size: 0.7rem;
   padding: 0.2rem 0.5rem;
@@ -267,7 +310,9 @@
   flex: 1;
   min-width: 0;
 }
-.pm-card__title:hover { color: var(--color-accent); }
+.pm-card__title:hover {
+  color: var(--color-accent);
+}
 
 /* Three-dot menu */
 .pm-card__menu-wrap {
@@ -284,9 +329,14 @@
   border-radius: 4px;
   display: flex;
   align-items: center;
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
-.pm-card__menu-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.pm-card__menu-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
 
 .pm-card__dropdown {
   position: absolute;
@@ -294,9 +344,9 @@
   top: calc(100% + 0.25rem);
   width: 168px;
   background: #23243a;
-  border: 1px solid rgba(192,132,252,0.2);
+  border: 1px solid rgba(192, 132, 252, 0.2);
   border-radius: 0.5rem;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   z-index: 20;
   overflow: hidden;
 }
@@ -313,13 +363,26 @@
   color: #d1d5db;
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
-.pm-card__dropdown-item:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.pm-card__dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
 
-.pm-card__dropdown-item--danger { color: #f87171; }
-.pm-card__dropdown-item--danger:hover { background: rgba(248,113,113,0.1); color: #f87171; }
-.pm-card__dropdown-item:disabled { opacity: 0.5; cursor: not-allowed; }
+.pm-card__dropdown-item--danger {
+  color: #f87171;
+}
+.pm-card__dropdown-item--danger:hover {
+  background: rgba(248, 113, 113, 0.1);
+  color: #f87171;
+}
+.pm-card__dropdown-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* Meta row (description/MIDI) */
 .pm-card__meta {
@@ -338,8 +401,12 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: linear-gradient(90deg, rgba(192,132,252,0.15) 0%, rgba(244,114,182,0.1) 100%);
-  border: 1px solid rgba(192,132,252,0.3);
+  background: linear-gradient(
+    90deg,
+    rgba(192, 132, 252, 0.15) 0%,
+    rgba(244, 114, 182, 0.1) 100%
+  );
+  border: 1px solid rgba(192, 132, 252, 0.3);
   border-radius: 0.75rem;
   padding: 1rem 1.5rem;
   margin-top: 2rem;
@@ -355,4 +422,6 @@
   font-size: 0.95rem;
 }
 
-.pm-continue-bar__info strong { color: #fff; }
+.pm-continue-bar__info strong {
+  color: #fff;
+}

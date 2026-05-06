@@ -2,14 +2,81 @@
    Composition Actions Button Group
    ──────────────────────────────────────────────────────────────────────── */
 
+.composition-section {
+  margin-top: 0.5rem;
+  flex-shrink: 0;
+}
+
+.composition-toolbar {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.composition-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: linear-gradient(
+    135deg,
+    rgba(239, 68, 68, 0.12) 0%,
+    rgba(220, 38, 38, 0.08) 100%
+  );
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 10px;
+  margin-bottom: 0;
+  color: #fca5a5;
+}
+
+.composition-error__text {
+  flex: 1;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.composition-error__retry {
+  flex-shrink: 0;
+  padding: 0.4rem 0.9rem;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.composition-error__retry:hover {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  transform: translateY(-1px);
+}
+
+.composition-warning {
+  padding: 0.75rem 1rem;
+  background: linear-gradient(
+    135deg,
+    rgba(251, 191, 36, 0.12) 0%,
+    rgba(245, 158, 11, 0.08) 100%
+  );
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 10px;
+  margin-bottom: 0;
+  color: #fcd34d;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
 .composition-actions {
   display: flex;
-  gap: 1rem;
-  margin-bottom: 1.5rem;
+  gap: 0.75rem;
+  margin-bottom: 0;
   justify-content: center;
   align-items: stretch;
   flex-wrap: wrap;
-  max-width: 800px;
+  max-width: 1000px;
   margin-left: auto;
   margin-right: auto;
 }
@@ -18,21 +85,19 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.6rem;
-  padding: 0.85rem 1.5rem;
-  font-size: 1rem;
+  gap: 0.5rem;
+  padding: 0.625rem 1.125rem;
+  font-size: 0.9375rem;
   font-weight: 600;
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.25s ease;
+  transition: all 0.2s ease;
   white-space: nowrap;
-  flex: 1;
-  min-width: 180px;
-  max-width: 280px;
+  flex: 0 1 auto;
   position: relative;
   overflow: hidden;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
@@ -96,9 +161,6 @@
 .composition-btn--cancel {
   background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
   color: white;
-  flex: 0 0 auto;
-  min-width: 140px;
-  max-width: 180px;
 }
 
 .composition-btn--cancel:hover:not(:disabled) {
@@ -112,8 +174,30 @@
   box-shadow: 0 2px 8px rgba(220, 38, 38, 0.25);
 }
 
+.composition-btn--reset {
+  background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);
+  color: white;
+}
+
+.composition-btn--reset:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4b5563 0%, #374151 100%);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(75, 85, 99, 0.35);
+}
+
+.composition-btn--reset:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(75, 85, 99, 0.25);
+}
+
+.composition-btn--reset svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 .composition-btn__icon {
-  font-size: 1.2em;
+  font-size: 1.1em;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -133,32 +217,51 @@
 }
 
 .progress-container {
-  margin-top: 1.5rem;
-  padding: 1rem;
-  background: rgba(0, 0, 0, 0.02);
+  margin-top: 0;
+  padding: 0.625rem 0.875rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(192, 132, 252, 0.12);
   border-radius: 10px;
 }
 
 .progress-bar-wrapper {
   width: 100%;
-  height: 8px;
-  background: rgba(0, 0, 0, 0.08);
-  border-radius: 4px;
+  height: 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 5px;
   overflow: hidden;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.625rem;
 }
 
 .progress-bar-fill {
   height: 100%;
-  border-radius: 4px;
-  transition: all 0.3s ease;
+  border-radius: 5px;
+  transition: width 0.4s ease;
+}
+
+.progress-bar-indeterminate {
+  width: 40%;
+  animation: indeterminate-progress 1.4s infinite ease-in-out;
+}
+
+@keyframes indeterminate-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  60% {
+    transform: translateX(250%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
 }
 
 .progress-text {
-  font-size: 0.9rem;
-  color: #666;
+  font-size: 0.875rem;
+  color: #d1d5db;
   text-align: center;
   font-weight: 500;
+  line-height: 1.4;
 }
 
 /* ────────────────────────────────────────────────────────────────────────

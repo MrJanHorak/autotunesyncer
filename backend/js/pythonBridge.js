@@ -88,6 +88,10 @@ export const runPythonProcessor = async (configPath, { onProgress } = {}) => {
         trackVolumes: config.trackVolumes || {},
         compositionStyle: config.compositionStyle || {},
         clipStyles: config.clipStyles || {},
+        renderPreset: config.renderPreset || null,
+        renderDimensions: config.renderDimensions || null,
+        previewStageDimensions: config.previewStageDimensions || null,
+        backgroundMedia: config.backgroundMedia || null,
       };
 
       // Add validation to ensure grid arrangement is not empty

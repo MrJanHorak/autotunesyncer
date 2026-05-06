@@ -639,6 +639,7 @@ async function runCompositionJob(
       clipStyles: midiData.clipStyles || {},
       renderPreset,
       renderDimensions: { width: totalWidth, height: totalHeight },
+      previewStageDimensions: midiData.previewStageDimensions || null,
       backgroundMedia,
     };
 

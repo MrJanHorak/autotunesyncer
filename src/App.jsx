@@ -48,11 +48,9 @@ import AuthPage from './components/Auth/AuthPage';
 import LandingPage from './components/LandingPage';
 import ProjectManager from './components/Projects/ProjectManager';
 import MidiUploader from './components/MidiUploader/';
-import MidiInfoDisplay from './components/MidiInfoDisplay/MidiInfoDisplay';
 import RecordingSection from './components/RecordingSection/RecordingSection';
 import CompositionSection from './components/CompositionSection/CompositionSection';
 import MidiParser from './components/MidiParser/MidiParser';
-import ProgressBar from './components/ProgressBar/ProgressBar';
 import Grid from './components/Grid/Grid';
 import Mixer from './components/Mixer/Mixer';
 import PreviewPlayer from './components/PreviewPlayer/PreviewPlayer';
@@ -1068,18 +1066,10 @@ function MainApp({ onChangeProject, onLogout }) {
         <div className='editor-center'>
           {parsedMidiData ? (
             <>
-              <MidiInfoDisplay midiData={parsedMidiData} />
-
-              {!isReadyToCompose && instruments.length > 0 && (
-                <ProgressBar
-                  current={recordedVideosCount}
-                  total={instruments.length}
-                />
-              )}
-
               <Grid
                 midiData={parsedMidiData}
                 onArrangementChange={setGridArrangement}
+                onResetLayout={() => setGridArrangement({})}
                 initialArrangement={gridArrangement}
                 renderPreset={renderPreset}
                 compositionStyle={compositionStyle}
@@ -1113,6 +1103,7 @@ function MainApp({ onChangeProject, onLogout }) {
                   clipStyles={clipStyles}
                   renderPreset={renderPreset}
                   projectName={currentProject?.name || ''}
+                  onResetLayout={() => setGridArrangement({})}
                 />
               )}
             </>

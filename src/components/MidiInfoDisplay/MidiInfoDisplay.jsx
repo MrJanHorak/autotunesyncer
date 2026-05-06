@@ -13,27 +13,20 @@ const MidiInfoDisplay = ({ midiData }) => {
         className='midi-info-header'
         onClick={() => setIsExpanded(!isExpanded)}
       >
-        <h3>MIDI File Information</h3>
+        <div className='midi-info-summary'>
+          <span className='midi-info-filename'>
+            {midiData.summary?.name || 'Unknown'}
+          </span>
+          <span className='midi-info-stats'>
+            {midiData.tracks?.length || 0} tracks ·{' '}
+            {Math.round(midiData.duration || 0)}s ·{' '}
+            {Math.round(midiData.header?.tempo || 120)} BPM
+          </span>
+        </div>
         <span className={`arrow ${isExpanded ? 'expanded' : ''}`}>▼</span>
       </div>
       <div className={`midi-info-content ${isExpanded ? 'expanded' : ''}`}>
         <div className='midi-info-grid'>
-          <div className='midi-info-item'>
-            <div className='info-label'>File</div>
-            <div className='info-value'>
-              {midiData.summary?.name || 'Unknown'}
-            </div>
-          </div>
-          <div className='midi-info-item'>
-            <div className='info-label'>Total Tracks</div>
-            <div className='info-value'>{midiData.tracks?.length || 0}</div>
-          </div>
-          <div className='midi-info-item'>
-            <div className='info-label'>Duration</div>
-            <div className='info-value'>
-              {Math.round(midiData.duration || 0)}s
-            </div>
-          </div>
           <div className='midi-info-item'>
             <div className='info-label'>Format</div>
             <div className='info-value'>
@@ -50,12 +43,6 @@ const MidiInfoDisplay = ({ midiData }) => {
             <div className='info-label'>Key</div>
             <div className='info-value'>
               {midiData.header?.key || 'Unknown'}
-            </div>
-          </div>
-          <div className='midi-info-item'>
-            <div className='info-label'>Tempo</div>
-            <div className='info-value'>
-              {Math.round(midiData.header?.tempo || 120)} BPM
             </div>
           </div>
         </div>
