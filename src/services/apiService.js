@@ -144,6 +144,46 @@ export async function uploadClip(projectId, instrumentKey, blob) {
   return res.json();
 }
 
+export async function fetchProjectRenderStatus(projectId) {
+  const token = _getToken();
+  const res = await fetch(`${API_BASE}/projects/${projectId}/render`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!res.ok) {
+    let msg = `Render status error ${res.status}`;
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+
+  return res.json();
+}
+
+export async function fetchProjectRenderFile(projectId) {
+  const token = _getToken();
+  const res = await fetch(`${API_BASE}/projects/${projectId}/render/file`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!res.ok) {
+    let msg = `Render download error ${res.status}`;
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+
+  return res.blob();
+}
+
 export async function uploadProjectBackground(projectId, file) {
   const token = _getToken();
   const formData = new FormData();

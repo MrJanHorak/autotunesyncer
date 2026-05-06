@@ -15,6 +15,11 @@ import { authenticateToken } from '../middleware/auth.js';
 import { requireProjectOwnership } from '../middleware/projectOwnership.js';
 import db from '../db/database.js';
 import {
+  createProjectRenderNotification,
+  getStoredProjectRender,
+  syncProjectRender,
+} from '../services/projectRenderService.js';
+import {
   getGridArrangementOverflow,
   hasGridArrangement,
   normalizeGridArrangement,
@@ -56,6 +61,9 @@ jobEmitter.setMaxListeners(50);
 function updateJob(jobId, patch) {
   const updated = { ...(jobs.get(jobId) || {}), ...patch };
   jobs.set(jobId, updated);
+  if (updated.persistRender) {
+    syncProjectRender(updated);
+  }
   jobEmitter.emit(`job:${jobId}`, updated);
 }
 // Never expire queued/processing jobs by age alone.
@@ -69,7 +77,7 @@ setInterval(
         job.completedAt &&
         now - job.completedAt > JOB_COMPLETED_TTL_MS
       ) {
-        if (job.outputPath) {
+        if (job.outputPath && !job.persistRender) {
           try {
             fs.unlinkSync(job.outputPath);
           } catch {
@@ -674,8 +682,30 @@ async function runCompositionJob(
       status: 'done',
       progress: 100,
       outputPath: permanentOutputPath,
+      error: null,
       completedAt: Date.now(),
     });
+    const completedJob = jobs.get(jobId);
+    if (
+      completedJob?.persistRender &&
+      completedJob.previousOutputPath &&
+      completedJob.previousOutputPath !== permanentOutputPath
+    ) {
+      try {
+        if (fs.existsSync(completedJob.previousOutputPath)) {
+          fs.unlinkSync(completedJob.previousOutputPath);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (completedJob?.persistRender) {
+      createProjectRenderNotification(
+        completedJob.userId,
+        completedJob.projectId,
+        'render_complete',
+      );
+    }
     console.log(`[Job ${jobId}] ✅ Done: ${permanentOutputPath}`);
   } catch (err) {
     console.error(`[Job ${jobId}] ❌ Failed:`, err.message);
@@ -693,6 +723,14 @@ async function runCompositionJob(
       error: err.message,
       completedAt: Date.now(),
     });
+    const failedJob = jobs.get(jobId);
+    if (failedJob?.persistRender) {
+      createProjectRenderNotification(
+        failedJob.userId,
+        failedJob.projectId,
+        'render_failed',
+      );
+    }
   } finally {
     // Clean up any remaining temp files
     for (const f of tempFiles) {
@@ -744,17 +782,30 @@ router.post(
     const jobId = uuidv4();
     const jobUploadsDir = req.project.uploadsDir;
     const backgroundMedia = getProjectBackgroundMedia(req.project.id);
+    const persistRender = !isPreview;
+    const existingRender = persistRender
+      ? getStoredProjectRender(req.project.id)
+      : null;
 
     jobs.set(jobId, {
+      jobId,
       status: 'queued',
       progress: 0,
-      outputPath: null,
+      outputPath: existingRender?.output_path || null,
+      previousOutputPath: existingRender?.output_path || null,
       error: null,
       createdAt: Date.now(),
+      startedAt: Date.now(),
       completedAt: null,
       userId: req.user.id,
       projectId: req.project.id,
+      mode: isPreview ? 'preview' : 'full',
+      persistRender,
     });
+
+    if (persistRender) {
+      syncProjectRender(jobs.get(jobId));
+    }
 
     res.status(202).json({ jobId });
 
@@ -874,12 +925,14 @@ router.get('/result/:jobId', authenticateToken, (req, res) => {
   });
   // Clean up only after the response is fully sent (res 'finish')
   res.on('finish', () => {
-    try {
-      fs.unlinkSync(job.outputPath);
-    } catch {
-      /* ignore */
+    if (!job.persistRender) {
+      try {
+        fs.unlinkSync(job.outputPath);
+      } catch {
+        /* ignore */
+      }
+      jobs.delete(req.params.jobId);
     }
-    jobs.delete(req.params.jobId);
   });
   readStream.pipe(res);
 });

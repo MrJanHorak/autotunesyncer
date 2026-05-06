@@ -5,7 +5,11 @@ import {
   trackCompositionJob,
 } from '../../../services/videoServices.js';
 import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
-import { shareComposition } from '../../services/apiService.js';
+import {
+  fetchProjectRenderFile,
+  fetchProjectRenderStatus,
+  shareComposition,
+} from '../../services/apiService.js';
 import {
   hasGridArrangement,
   toLegacyGridArrangement,
@@ -46,6 +50,7 @@ const VideoComposer = ({
   clipStyles = null,
   renderPreset = DEFAULT_RENDER_PRESET,
   projectName = '',
+  projectId = null,
   onProgress = null,
   onError = null,
   onStart = null,
@@ -75,6 +80,48 @@ const VideoComposer = ({
     () => toLegacyGridArrangement(gridArrangement),
     [gridArrangement],
   );
+
+  const clearComposedVideo = useCallback(() => {
+    if (composedVideoUrlRef.current) {
+      URL.revokeObjectURL(composedVideoUrlRef.current);
+      composedVideoUrlRef.current = null;
+    }
+    setComposedVideoUrl(null);
+    setComposedBlob(null);
+    setShareUrl(null);
+  }, []);
+
+  const applyComposedBlob = useCallback((blob) => {
+    if (!blob) return;
+    setComposedBlob(blob);
+    setShareUrl(null);
+    if (composedVideoUrlRef.current) {
+      URL.revokeObjectURL(composedVideoUrlRef.current);
+    }
+    const url = URL.createObjectURL(blob);
+    composedVideoUrlRef.current = url;
+    setComposedVideoUrl(url);
+  }, []);
+
+  const startElapsedTimer = useCallback(() => {
+    clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      setElapsedSeconds((seconds) => seconds + 1);
+    }, 1000);
+  }, []);
+
+  const resetTrackedRenderState = useCallback(() => {
+    clearInterval(timerRef.current);
+    timerRef.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setIsProcessing(false);
+    setProcessingMode(null);
+    setUploadProgress(0);
+    setRenderProgress(0);
+    setElapsedSeconds(0);
+    setError(null);
+  }, []);
 
   const getNormalizedNoteTime = useCallback((note) => {
     const candidates = [note?.time, note?.start, note?.startTime];
@@ -173,6 +220,127 @@ const VideoComposer = ({
 
   const canCompose = validationErrors.length === 0;
 
+  useEffect(() => {
+    let cancelled = false;
+    const reconnectController = new AbortController();
+    let reconnectingJob = false;
+
+    resetTrackedRenderState();
+    clearComposedVideo();
+
+    if (!projectId) {
+      return () => {
+        cancelled = true;
+        reconnectController.abort();
+      };
+    }
+
+    const hydrateProjectRender = async () => {
+      try {
+        const { render } = await fetchProjectRenderStatus(projectId);
+        if (cancelled || !render) return;
+
+        if (render.hasOutput) {
+          try {
+            const savedBlob = await fetchProjectRenderFile(projectId);
+            if (!cancelled) {
+              applyComposedBlob(savedBlob);
+            }
+          } catch (fileErr) {
+            console.warn(
+              '[VideoComposer] Failed to load saved render file:',
+              fileErr,
+            );
+          }
+        }
+
+        if (
+          !['queued', 'processing'].includes(render.status) ||
+          !render.jobId
+        ) {
+          if (render.status === 'failed' && render.error && !cancelled) {
+            setError(render.error);
+          }
+          return;
+        }
+
+        reconnectingJob = true;
+        lastModeRef.current = false;
+        onStart?.();
+        setIsProcessing(true);
+        setProcessingMode('full');
+        setUploadProgress(100);
+        setRenderProgress(Number(render.progress) || 0);
+        setError(null);
+
+        if (render.startedAt) {
+          const startedAtMs = new Date(render.startedAt).getTime();
+          if (Number.isFinite(startedAtMs)) {
+            setElapsedSeconds(
+              Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)),
+            );
+          }
+        }
+
+        abortRef.current = reconnectController;
+        startElapsedTimer();
+
+        const trackedBlob = await trackCompositionJob(
+          render.jobId,
+          (pct) => {
+            if (cancelled) return;
+            setUploadProgress(100);
+            setRenderProgress(pct);
+            onProgress?.(pct);
+          },
+          reconnectController.signal,
+        );
+
+        if (cancelled) return;
+        applyComposedBlob(trackedBlob);
+        setUploadProgress(100);
+        setRenderProgress(100);
+        setError(null);
+        onComplete?.();
+      } catch (err) {
+        if (cancelled || err?.name === 'AbortError') return;
+        console.warn('[VideoComposer] Failed to hydrate render state:', err);
+        setError(err.message || 'Failed to load saved render state');
+      } finally {
+        if (!cancelled && reconnectingJob) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+          if (abortRef.current === reconnectController) {
+            abortRef.current = null;
+          }
+          setIsProcessing(false);
+          setProcessingMode(null);
+        }
+      }
+    };
+
+    hydrateProjectRender();
+
+    return () => {
+      cancelled = true;
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      if (abortRef.current === reconnectController) {
+        abortRef.current = null;
+      }
+      reconnectController.abort();
+    };
+  }, [
+    applyComposedBlob,
+    clearComposedVideo,
+    onComplete,
+    onProgress,
+    onStart,
+    projectId,
+    resetTrackedRenderState,
+    startElapsedTimer,
+  ]);
+
   // Compute effective volumes applying mute/solo logic
   const effectiveVolumes = useMemo(() => {
     const result = { ...trackVolumes };
@@ -207,16 +375,10 @@ const VideoComposer = ({
     setRenderProgress(0);
     setElapsedSeconds(0);
     setError(null);
-    if (composedVideoUrlRef.current) {
-      URL.revokeObjectURL(composedVideoUrlRef.current);
-      composedVideoUrlRef.current = null;
-      setComposedVideoUrl(null);
-    }
+    setShareUrl(null);
 
     // Start elapsed-time counter
-    timerRef.current = setInterval(() => {
-      setElapsedSeconds((s) => s + 1);
-    }, 1000);
+    startElapsedTimer();
 
     try {
       const formData = new FormData();
@@ -296,12 +458,7 @@ const VideoComposer = ({
         abort.signal,
       );
 
-      setComposedBlob(blob);
-      if (composedVideoUrlRef.current)
-        URL.revokeObjectURL(composedVideoUrlRef.current);
-      const url = URL.createObjectURL(blob);
-      composedVideoUrlRef.current = url;
-      setComposedVideoUrl(url);
+      applyComposedBlob(blob);
       onComplete?.();
     } catch (err) {
       // AbortError = user hit Cancel; don't surface as an error

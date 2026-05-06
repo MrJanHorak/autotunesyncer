@@ -172,9 +172,39 @@ function App() {
 
   useEffect(() => {
     fetchUnreadCount();
-    const interval = setInterval(fetchUnreadCount, 60000);
-    return () => clearInterval(interval);
+    const interval = setInterval(fetchUnreadCount, 15000);
+    const handleFocus = () => fetchUnreadCount();
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [fetchUnreadCount]);
+
+  const handleSelectProjectFromNotification = useCallback(
+    async (projectId) => {
+      if (!projectId) return;
+      if (currentProject?.id === projectId) {
+        setAppView('compose');
+        setNotifOpen(false);
+        return;
+      }
+
+      try {
+        const res = await apiFetch(`/projects/${projectId}`);
+        const data = await res.json();
+        if (data?.project) {
+          selectProject(data.project);
+          setAppView('compose');
+        }
+      } catch (err) {
+        console.warn('[notifications] Failed to open project:', err);
+      } finally {
+        setNotifOpen(false);
+      }
+    },
+    [currentProject?.id, selectProject],
+  );
 
   // Settings modal
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -422,6 +452,7 @@ function App() {
               setNotifOpen(false);
               setUnreadCount(0);
             }}
+            onSelectProject={handleSelectProjectFromNotification}
             onSelectComposition={(id) => {
               setAppView('feed');
               setSocialNav({ page: 'detail', id });
@@ -1103,6 +1134,7 @@ function MainApp({ onChangeProject, onLogout }) {
                   clipStyles={clipStyles}
                   renderPreset={renderPreset}
                   projectName={currentProject?.name || ''}
+                  projectId={currentProject?.id || null}
                   onResetLayout={() => setGridArrangement({})}
                 />
               )}

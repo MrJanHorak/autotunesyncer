@@ -9,6 +9,8 @@ import {
   deleteProject,
   saveProjectState,
   loadProjectState,
+  getProjectRenderStatus,
+  getProjectRenderFile,
   exportProject,
   importProject,
 } from '../controllers/projectController.js';
@@ -69,6 +71,8 @@ router.put('/:id', updateProject);
 router.delete('/:id', deleteProject);
 router.post('/:id/state', saveProjectState);
 router.get('/:id/state', loadProjectState);
+router.get('/:id/render', getProjectRenderStatus);
+router.get('/:id/render/file', getProjectRenderFile);
 router.get('/:id/export', exportProject);
 
 // Clip persistence routes

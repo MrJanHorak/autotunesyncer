@@ -93,8 +93,22 @@ db.exec(`
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS project_renders (
+    project_id     TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    job_id         TEXT,
+    status         TEXT NOT NULL DEFAULT 'idle',
+    progress       INTEGER NOT NULL DEFAULT 0,
+    mode           TEXT NOT NULL DEFAULT 'full',
+    output_path    TEXT,
+    error          TEXT,
+    started_at     TEXT,
+    completed_at   TEXT,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_project_clips_project_id ON project_clips(project_id);
   CREATE INDEX IF NOT EXISTS idx_project_backgrounds_project_id ON project_backgrounds(project_id);
+  CREATE INDEX IF NOT EXISTS idx_project_renders_status ON project_renders(status, updated_at DESC);
 `);
 
 // Additive migrations for columns added after initial schema
@@ -121,6 +135,7 @@ db.exec(`
     actor_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     type           TEXT NOT NULL,
     composition_id TEXT REFERENCES compositions(id) ON DELETE CASCADE,
+    project_id     TEXT REFERENCES projects(id) ON DELETE CASCADE,
     comment_id     TEXT REFERENCES comments(id) ON DELETE CASCADE,
     read           INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
@@ -136,5 +151,16 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_follow_dedup
     ON notifications(user_id, actor_id) WHERE type = 'follow';
 `);
+
+const notifCols = db.pragma('table_info(notifications)').map((c) => c.name);
+if (!notifCols.includes('project_id')) {
+  db.exec(
+    `ALTER TABLE notifications ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE`,
+  );
+}
+
+db.exec(
+  `CREATE INDEX IF NOT EXISTS idx_notif_project_id ON notifications(project_id, created_at DESC)`,
+);
 
 export default db;

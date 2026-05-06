@@ -6,6 +6,7 @@ import {
   writeFileSync,
   createReadStream,
   readdirSync,
+  statSync,
 } from 'fs';
 import { join, resolve, sep, basename, extname } from 'path';
 import { dirname } from 'path';
@@ -18,6 +19,7 @@ import {
   DEFAULT_RENDER_PRESET,
   normalizeRenderPreset,
 } from '../../shared/renderPresets.js';
+import { getProjectRender } from '../services/projectRenderService.js';
 
 const PROJECT_STATE_SCHEMA_VERSION = 2;
 
@@ -154,6 +156,37 @@ export const loadProjectState = (req, res) => {
   } catch {
     res.json({ state: null });
   }
+};
+
+export const getProjectRenderStatus = (req, res) => {
+  const render = getProjectRender(req.params.id, req.user.id);
+  if (!render) return res.status(404).json({ error: 'Project not found' });
+  res.json({ render });
+};
+
+export const getProjectRenderFile = (req, res) => {
+  const render = getProjectRender(req.params.id, req.user.id);
+  if (!render) return res.status(404).json({ error: 'Project not found' });
+  if (!render.outputPath || !existsSync(render.outputPath)) {
+    return res.status(404).json({ error: 'Rendered composition not found' });
+  }
+
+  const stats = statSync(render.outputPath);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Length', stats.size);
+  res.setHeader(
+    'Content-Disposition',
+    'inline; filename="project-composition.mp4"',
+  );
+
+  const stream = createReadStream(render.outputPath);
+  stream.on('error', (err) => {
+    console.error('[project render] stream error:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to stream rendered composition' });
+    }
+  });
+  stream.pipe(res);
 };
 
 const SAFE_KEY_RE = /^[a-z0-9_()\-]{1,80}$/i;

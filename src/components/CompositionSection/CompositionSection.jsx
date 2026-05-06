@@ -14,6 +14,7 @@ const CompositionSection = ({
   clipStyles,
   renderPreset,
   projectName,
+  projectId,
   onResetLayout,
 }) => {
   const [composing, setComposing] = useState(false);
@@ -45,6 +46,7 @@ const CompositionSection = ({
         clipStyles={clipStyles}
         renderPreset={renderPreset}
         projectName={projectName}
+        projectId={projectId}
         onProgress={handleCompositionProgress}
         onError={handleCompositionError}
         onStart={() => setComposing(true)}
@@ -67,6 +69,7 @@ CompositionSection.propTypes = {
   clipStyles: PropTypes.object,
   renderPreset: PropTypes.string,
   projectName: PropTypes.string,
+  projectId: PropTypes.string,
   onResetLayout: PropTypes.func,
 };
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
-import { X, Heart, MessageCircle, UserPlus, Bell } from 'lucide-react';
+import { X, Heart, MessageCircle, UserPlus, Bell, Film } from 'lucide-react';
 import './Social.css';
 
 const API_BASE = 'http://localhost:3000/api';
@@ -21,7 +21,12 @@ async function apiFetch(path, options = {}) {
   });
   if (!res.ok) {
     let msg = `API error ${res.status}`;
-    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    try {
+      const d = await res.json();
+      msg = d.error || msg;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -39,16 +44,41 @@ const TYPE_ICON = {
   like: <Heart size={14} style={{ color: '#f472b6' }} />,
   comment: <MessageCircle size={14} style={{ color: '#c084fc' }} />,
   follow: <UserPlus size={14} style={{ color: '#34d399' }} />,
+  render_complete: <Film size={14} style={{ color: '#60a5fa' }} />,
+  render_failed: <Film size={14} style={{ color: '#f87171' }} />,
 };
 
 function notifMessage(n) {
-  if (n.type === 'like') return <>liked your <strong>{n.composition_title || 'composition'}</strong></>;
-  if (n.type === 'comment') return <>commented on <strong>{n.composition_title || 'your composition'}</strong></>;
+  if (n.type === 'like')
+    return (
+      <>
+        liked your <strong>{n.composition_title || 'composition'}</strong>
+      </>
+    );
+  if (n.type === 'comment')
+    return (
+      <>
+        commented on{' '}
+        <strong>{n.composition_title || 'your composition'}</strong>
+      </>
+    );
   if (n.type === 'follow') return <>started following you</>;
+  if (n.type === 'render_complete')
+    return (
+      <>
+        finished rendering <strong>{n.project_name || 'your project'}</strong>
+      </>
+    );
+  if (n.type === 'render_failed')
+    return (
+      <>
+        render failed for <strong>{n.project_name || 'your project'}</strong>
+      </>
+    );
   return n.type;
 }
 
-const Notifications = ({ onClose, onSelectComposition }) => {
+const Notifications = ({ onClose, onSelectComposition, onSelectProject }) => {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -57,7 +87,9 @@ const Notifications = ({ onClose, onSelectComposition }) => {
     try {
       const data = await apiFetch('/social/notifications');
       setNotifications(data.notifications);
-    } catch { /* ignore */ } finally {
+    } catch {
+      /* ignore */
+    } finally {
       setLoading(false);
     }
   }, []);
@@ -67,14 +99,27 @@ const Notifications = ({ onClose, onSelectComposition }) => {
   }, [fetchNotifications]);
 
   const handleMarkAllRead = async () => {
-    await apiFetch('/social/notifications/read-all', { method: 'PATCH', headers: {} });
+    await apiFetch('/social/notifications/read-all', {
+      method: 'PATCH',
+      headers: {},
+    });
     setNotifications((prev) => prev.map((n) => ({ ...n, read: 1 })));
   };
 
   const handleClickNotif = async (notif) => {
     if (!notif.read) {
-      apiFetch(`/social/notifications/${notif.id}/read`, { method: 'PATCH', headers: {} });
-      setNotifications((prev) => prev.map((n) => n.id === notif.id ? { ...n, read: 1 } : n));
+      apiFetch(`/social/notifications/${notif.id}/read`, {
+        method: 'PATCH',
+        headers: {},
+      });
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === notif.id ? { ...n, read: 1 } : n)),
+      );
+    }
+    if (notif.project_id && onSelectProject) {
+      onClose();
+      onSelectProject(notif.project_id);
+      return;
     }
     if (notif.composition_id && onSelectComposition) {
       onClose();
@@ -88,13 +133,23 @@ const Notifications = ({ onClose, onSelectComposition }) => {
     <div className='notif-panel'>
       <div className='notif-panel__header'>
         <span className='notif-panel__title'>
-          <Bell size={16} /> Notifications {unread > 0 && <span className='notif-unread-badge'>{unread}</span>}
+          <Bell size={16} /> Notifications{' '}
+          {unread > 0 && <span className='notif-unread-badge'>{unread}</span>}
         </span>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
           {unread > 0 && (
-            <button className='notif-panel__mark-all' onClick={handleMarkAllRead}>Mark all read</button>
+            <button
+              className='notif-panel__mark-all'
+              onClick={handleMarkAllRead}
+            >
+              Mark all read
+            </button>
           )}
-          <button className='notif-panel__close' onClick={onClose} aria-label='Close notifications'>
+          <button
+            className='notif-panel__close'
+            onClick={onClose}
+            aria-label='Close notifications'
+          >
             <X size={16} />
           </button>
         </div>
@@ -108,19 +163,20 @@ const Notifications = ({ onClose, onSelectComposition }) => {
             <p>No notifications yet</p>
           </div>
         )}
-        {!loading && notifications.map((n) => (
-          <button
-            key={n.id}
-            className={`notif-item ${!n.read ? 'notif-item--unread' : ''}`}
-            onClick={() => handleClickNotif(n)}
-          >
-            <span className='notif-item__icon'>{TYPE_ICON[n.type]}</span>
-            <span className='notif-item__body'>
-              <strong>@{n.actor_username}</strong> {notifMessage(n)}
-            </span>
-            <span className='notif-item__time'>{timeAgo(n.created_at)}</span>
-          </button>
-        ))}
+        {!loading &&
+          notifications.map((n) => (
+            <button
+              key={n.id}
+              className={`notif-item ${!n.read ? 'notif-item--unread' : ''}`}
+              onClick={() => handleClickNotif(n)}
+            >
+              <span className='notif-item__icon'>{TYPE_ICON[n.type]}</span>
+              <span className='notif-item__body'>
+                <strong>@{n.actor_username}</strong> {notifMessage(n)}
+              </span>
+              <span className='notif-item__time'>{timeAgo(n.created_at)}</span>
+            </button>
+          ))}
       </div>
     </div>
   );
@@ -129,6 +185,7 @@ const Notifications = ({ onClose, onSelectComposition }) => {
 Notifications.propTypes = {
   onClose: PropTypes.func.isRequired,
   onSelectComposition: PropTypes.func.isRequired,
+  onSelectProject: PropTypes.func,
 };
 
 export default Notifications;
