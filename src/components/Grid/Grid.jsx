@@ -407,11 +407,17 @@ const Grid = ({
   isPreviewPlaying,
   activeLevels,
   compositionStyle,
+  backgroundAsset,
 }) => {
   const previewStyle = {
     ...DEFAULT_COMPOSITION_STYLE,
     ...(compositionStyle || {}),
   };
+  const backgroundMode = previewStyle.backgroundMode || 'color';
+  const showBackgroundMedia =
+    backgroundMode !== 'color' &&
+    backgroundAsset?.url &&
+    backgroundAsset?.kind === backgroundMode;
   const titleText = previewStyle.titleText?.trim() || '';
   const titleSubtitleText = previewStyle.titleSubtitleText?.trim() || '';
   const introTitleText = previewStyle.introCardText?.trim() || titleText;
@@ -1276,6 +1282,26 @@ const Grid = ({
           ...stageOutroStyle.style,
         }}
       >
+        {showBackgroundMedia && backgroundAsset.kind === 'image' && (
+          <img
+            src={backgroundAsset.url}
+            alt=''
+            aria-hidden='true'
+            className='grid-preview-stage__background-media'
+          />
+        )}
+        {showBackgroundMedia && backgroundAsset.kind === 'video' && (
+          <video
+            src={backgroundAsset.url}
+            muted
+            loop
+            autoPlay
+            playsInline
+            preload='auto'
+            aria-hidden='true'
+            className='grid-preview-stage__background-media'
+          />
+        )}
         <GridLayout
           className='grid'
           layout={editorLayout}
@@ -1323,6 +1349,7 @@ const Grid = ({
                   }
                   videoUrl={videoUrl}
                   isPreviewPlaying={isPreviewPlaying}
+                  hasStageBackgroundMedia={showBackgroundMedia}
                   activeLevel={activeLevels?.[videoKey]}
                   beatPulseClass={trackCellsBeatPulseClass}
                   isEditable={canEditLayout}
@@ -1581,6 +1608,7 @@ Grid.propTypes = {
   isPreviewPlaying: PropTypes.bool,
   activeLevels: PropTypes.object,
   compositionStyle: PropTypes.object,
+  backgroundAsset: PropTypes.object,
 };
 
 export default Grid;

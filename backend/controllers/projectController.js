@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { rmSync, existsSync, mkdirSync, writeFileSync, createReadStream, readdirSync } from 'fs';
-import { join, resolve, sep, basename } from 'path';
+import { join, resolve, sep, basename, extname } from 'path';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -123,6 +123,23 @@ const SAFE_KEY_RE = /^[a-z0-9_()\-]{1,80}$/i;
 const MAX_ZIP_SIZE = 500 * 1024 * 1024; // 500 MB
 const MAX_ZIP_ENTRIES = 500;
 
+const inferMimeTypeFromExt = (extension = '') => {
+  const ext = String(extension || '').toLowerCase();
+  const byExt = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp',
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+  };
+  return byExt[ext] || 'application/octet-stream';
+};
+
 export const exportProject = (req, res) => {
   const project = db
     .prepare('SELECT id, name, state FROM projects WHERE id = ? AND user_id = ?')
@@ -132,6 +149,11 @@ export const exportProject = (req, res) => {
   const clips = db
     .prepare('SELECT instrument_key, file_path FROM project_clips WHERE project_id = ?')
     .all(req.params.id);
+  const background = db
+    .prepare(
+      'SELECT file_path, mime_type, media_kind, original_name FROM project_backgrounds WHERE project_id = ?',
+    )
+    .get(req.params.id);
 
   const safeName = (project.name || 'project').replace(/[^a-z0-9_-]/gi, '_').slice(0, 60);
   res.setHeader('Content-Type', 'application/zip');
@@ -156,6 +178,31 @@ export const exportProject = (req, res) => {
     if (!safePath.startsWith(BASE_UPLOADS_DIR + sep)) continue;
     if (!existsSync(safePath)) continue;
     zip.file(safePath, { name: `clips/${key}.mp4` });
+  }
+
+  if (background?.file_path) {
+    const safeBackgroundPath = resolve(background.file_path);
+    if (
+      safeBackgroundPath.startsWith(BASE_UPLOADS_DIR + sep) &&
+      existsSync(safeBackgroundPath)
+    ) {
+      const backgroundExt = extname(background.original_name || safeBackgroundPath) || '.bin';
+      zip.append(
+        JSON.stringify(
+          {
+            mimeType: background.mime_type,
+            mediaKind: background.media_kind,
+            originalName: background.original_name,
+          },
+          null,
+          2,
+        ),
+        { name: 'background/meta.json' },
+      );
+      zip.file(safeBackgroundPath, {
+        name: `background/asset${backgroundExt.toLowerCase()}`,
+      });
+    }
   }
 
   zip.finalize();
@@ -190,6 +237,18 @@ export const importProject = (req, res) => {
 
     // Collect clip entries and validate keys
     const clipEntries = entries.filter((e) => e.entryName.startsWith('clips/') && e.entryName.endsWith('.mp4') && !e.isDirectory);
+    const backgroundMetaEntry = entries.find((e) => e.entryName === 'background/meta.json');
+    const backgroundAssetEntry = entries.find(
+      (e) => e.entryName.startsWith('background/asset') && !e.isDirectory,
+    );
+    let backgroundMeta = null;
+    if (backgroundMetaEntry) {
+      try {
+        backgroundMeta = JSON.parse(backgroundMetaEntry.getData().toString('utf8'));
+      } catch {
+        return res.status(400).json({ error: 'Corrupt background/meta.json' });
+      }
+    }
     for (const e of clipEntries) {
       const key = basename(e.entryName, '.mp4');
       if (!SAFE_KEY_RE.test(key)) {
@@ -218,6 +277,37 @@ export const importProject = (req, res) => {
           ON CONFLICT(project_id, instrument_key) DO UPDATE
             SET file_path = excluded.file_path, created_at = datetime('now')
         `).run(newId, key, filePath);
+      }
+
+      if (backgroundAssetEntry) {
+        const backgroundExt =
+          extname(backgroundMeta?.originalName || backgroundAssetEntry.entryName) ||
+          extname(backgroundAssetEntry.entryName) ||
+          '.bin';
+        const backgroundPath = join(
+          uploadsDir,
+          `background_${uuidv4()}${backgroundExt.toLowerCase()}`,
+        );
+        writeFileSync(backgroundPath, backgroundAssetEntry.getData());
+        db.prepare(`
+          INSERT INTO project_backgrounds (project_id, file_path, mime_type, media_kind, original_name)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(project_id) DO UPDATE
+            SET file_path = excluded.file_path,
+                mime_type = excluded.mime_type,
+                media_kind = excluded.media_kind,
+                original_name = excluded.original_name,
+                created_at = datetime('now')
+        `).run(
+          newId,
+          backgroundPath,
+          backgroundMeta?.mimeType || inferMimeTypeFromExt(backgroundExt),
+          backgroundMeta?.mediaKind ||
+            (inferMimeTypeFromExt(backgroundExt).startsWith('video/')
+              ? 'video'
+              : 'image'),
+          backgroundMeta?.originalName || basename(backgroundAssetEntry.entryName),
+        );
       }
     });
 

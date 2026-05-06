@@ -61,7 +61,6 @@ export async function uploadProjectVideo(blob, filename = 'clip.mp4') {
   const formData = new FormData();
   formData.append('video', blob, filename);
 
-  const projectId = _getProjectId();
   const token = _getToken();
 
   const url = withProjectId(`${API_BASE}/upload`);
@@ -84,7 +83,6 @@ export async function uploadProjectVideo(blob, filename = 'clip.mp4') {
  * Equivalent to POST /api/process-videos?projectId=...
  */
 export async function submitComposeJob(formData) {
-  const projectId = _getProjectId();
   const token = _getToken();
 
   const url = withProjectId(`${API_BASE}/process-videos`);
@@ -123,6 +121,56 @@ export async function uploadClip(projectId, instrumentKey, blob) {
     try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
     throw new Error(msg);
   }
+  return res.json();
+}
+
+export async function uploadProjectBackground(projectId, file) {
+  const token = _getToken();
+  const formData = new FormData();
+  formData.append('background', file, file.name || 'background');
+
+  const res = await fetch(`${API_BASE}/projects/${projectId}/background`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  });
+
+  if (!res.ok) {
+    let msg = `Background upload error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+export async function fetchProjectBackgroundFile(projectId) {
+  const token = _getToken();
+  const res = await fetch(`${API_BASE}/projects/${projectId}/background/file`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!res.ok) {
+    let msg = `Background fetch error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+
+  return res.blob();
+}
+
+export async function deleteProjectBackground(projectId) {
+  const token = _getToken();
+  const res = await fetch(`${API_BASE}/projects/${projectId}/background`, {
+    method: 'DELETE',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  if (!res.ok) {
+    let msg = `Background delete error ${res.status}`;
+    try { const d = await res.json(); msg = d.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+
   return res.json();
 }
 

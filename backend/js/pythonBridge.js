@@ -189,6 +189,7 @@ export const runPythonProcessorDirect = (
           trackVolumes: midiData.trackVolumes || {},
           compositionStyle: midiData.compositionStyle || {},
           clipStyles: midiData.clipStyles || {},
+          backgroundMedia: midiData.backgroundMedia || null,
         }),
       );
       fs.writeFileSync(videoJsonPath, JSON.stringify(videos || {}));

@@ -1,4 +1,4 @@
-import { useState, useId, cloneElement, isValidElement } from 'react';
+import { useState, useId, useRef, cloneElement, isValidElement } from 'react';
 import PropTypes from 'prop-types';
 import {
   COLOR_THEMES,
@@ -101,12 +101,20 @@ FontSelect.propTypes = {
 const CompositionStylePanel = ({
   style,
   onChange,
+  backgroundAsset,
+  onBackgroundUpload,
+  onBackgroundRemove,
   autoTransitionIntervalSeconds,
   autoTransitionReason,
 }) => {
   const set = (key, val) => onChange({ ...style, [key]: val });
   const { presets, savePreset, applyPreset, deletePreset } = useStylePresets();
   const [selectedPreset, setSelectedPreset] = useState('');
+  const [backgroundBusy, setBackgroundBusy] = useState(false);
+  const [backgroundError, setBackgroundError] = useState('');
+  const backgroundInputRef = useRef(null);
+  const backgroundMode = style.backgroundMode || 'color';
+  const hasBackgroundMedia = Boolean(backgroundAsset?.kind);
 
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const rand = (min, max, step = 1) => {
@@ -129,12 +137,20 @@ const CompositionStylePanel = ({
     });
   };
 
-  const resetToDefaults = () => onChange({ ...DEFAULT_COMPOSITION_STYLE });
+  const resetToDefaults = () =>
+    onChange({
+      ...DEFAULT_COMPOSITION_STYLE,
+      backgroundMedia: style.backgroundMedia,
+    });
 
   const handleSavePreset = () => {
     const name = window.prompt('Preset name:')?.trim();
     if (!name) return;
-    savePreset(name, style);
+    savePreset(name, {
+      ...style,
+      backgroundMode: 'color',
+      backgroundMedia: null,
+    });
     setSelectedPreset(name);
   };
 
@@ -232,6 +248,34 @@ const CompositionStylePanel = ({
       taglineFadeInDuration: rand(0.2, 1.1, 0.1),
       taglineFadeOutDuration: rand(0.2, 1.2, 0.1),
     });
+  };
+
+  const handleBackgroundFileChange = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setBackgroundBusy(true);
+    setBackgroundError('');
+    try {
+      await onBackgroundUpload?.(file);
+    } catch (error) {
+      setBackgroundError(error?.message || 'Failed to upload background media');
+    } finally {
+      setBackgroundBusy(false);
+    }
+  };
+
+  const handleBackgroundRemove = async () => {
+    setBackgroundBusy(true);
+    setBackgroundError('');
+    try {
+      await onBackgroundRemove?.();
+    } catch (error) {
+      setBackgroundError(error?.message || 'Failed to remove background media');
+    } finally {
+      setBackgroundBusy(false);
+    }
   };
 
   const titleIntensityLabelMap = {
@@ -343,7 +387,76 @@ const CompositionStylePanel = ({
             </button>
           ))}
         </div>
-        <Field label='Canvas Background'>
+        <Field label='Background Source'>
+          <select
+            className='csp-select'
+            value={backgroundMode}
+            onChange={(e) => set('backgroundMode', e.target.value)}
+          >
+            <option value='color'>Color</option>
+            <option
+              value='image'
+              disabled={!hasBackgroundMedia || backgroundAsset?.kind !== 'image'}
+            >
+              Uploaded Image
+            </option>
+            <option
+              value='video'
+              disabled={!hasBackgroundMedia || backgroundAsset?.kind !== 'video'}
+            >
+              Uploaded Video
+            </option>
+          </select>
+        </Field>
+        <Field label='Background Media'>
+          <div className='csp-background-media'>
+            <div className='csp-background-media__meta'>
+              <span className='csp-background-media__name'>
+                {backgroundAsset?.originalName || 'No media uploaded'}
+              </span>
+              <span className='csp-background-media__status'>
+                {hasBackgroundMedia
+                  ? `Saved ${backgroundAsset.kind} background`
+                  : 'Upload an image or looping video'}
+              </span>
+            </div>
+            <div className='csp-background-media__actions'>
+              <button
+                type='button'
+                className='csp-btn'
+                onClick={() => backgroundInputRef.current?.click()}
+                disabled={backgroundBusy}
+              >
+                {backgroundBusy
+                  ? 'Uploading…'
+                  : hasBackgroundMedia
+                    ? 'Replace Media'
+                    : 'Upload Media'}
+              </button>
+              {hasBackgroundMedia && (
+                <button
+                  type='button'
+                  className='csp-btn csp-btn--danger'
+                  onClick={handleBackgroundRemove}
+                  disabled={backgroundBusy}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+            <input
+              ref={backgroundInputRef}
+              type='file'
+              accept='image/*,video/*'
+              className='csp-background-media__input'
+              onChange={handleBackgroundFileChange}
+            />
+            {backgroundError && (
+              <p className='csp-background-media__error'>{backgroundError}</p>
+            )}
+          </div>
+        </Field>
+        <Field label='Canvas Color'>
           <input
             type='color'
             value={style.backgroundColor}
@@ -1354,6 +1467,9 @@ const CompositionStylePanel = ({
 CompositionStylePanel.propTypes = {
   style: PropTypes.object.isRequired,
   onChange: PropTypes.func.isRequired,
+  backgroundAsset: PropTypes.object,
+  onBackgroundUpload: PropTypes.func,
+  onBackgroundRemove: PropTypes.func,
   autoTransitionIntervalSeconds: PropTypes.number,
   autoTransitionReason: PropTypes.string,
 };

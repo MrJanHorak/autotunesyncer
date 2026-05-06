@@ -36,6 +36,8 @@ import {
   configureApiService,
   apiFetch,
   uploadClip,
+  uploadProjectBackground,
+  deleteProjectBackground,
   downloadProjectExport,
   importProjectFromZip,
 } from './services/apiService';
@@ -545,6 +547,7 @@ function MainApp({ onChangeProject, onLogout }) {
   const [compositionStyle, setCompositionStyle] = useState(() => ({
     ...DEFAULT_COMPOSITION_STYLE,
   }));
+  const [backgroundAsset, setBackgroundAsset] = useState(null);
   const [clipStyles, setClipStyles] = useState({}); // keyed by item.id (e.g. 'drum-drum_snare_drum')
   const [soloTrack, setSoloTrack] = useState(null);
   const [activeLevels, setActiveLevels] = useState({});
@@ -581,7 +584,21 @@ function MainApp({ onChangeProject, onLogout }) {
     setClipStyles,
     setVideoFiles,
     setInstrumentVideos,
+    setBackgroundAsset,
   });
+
+  useEffect(
+    () => () => {
+      if (backgroundAsset?.url?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(backgroundAsset.url);
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+    [backgroundAsset?.url],
+  );
 
   // Export/import state
   const [exportLoading, setExportLoading] = useState(false);
@@ -845,6 +862,46 @@ function MainApp({ onChangeProject, onLogout }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleBackgroundUpload = useCallback(
+    async (file) => {
+      if (!currentProject?.id) {
+        throw new Error('Select a project before uploading a background');
+      }
+
+      const { background } = await uploadProjectBackground(currentProject.id, file);
+      setBackgroundAsset({
+        blob: file,
+        url: URL.createObjectURL(file),
+        kind: background.kind,
+        mimeType: background.mimeType,
+        originalName: background.originalName,
+      });
+      setCompositionStyle((prev) => ({
+        ...prev,
+        backgroundMode: background.kind,
+        backgroundMedia: {
+          ...background,
+          saved: true,
+        },
+      }));
+    },
+    [currentProject?.id],
+  );
+
+  const handleBackgroundRemove = useCallback(async () => {
+    if (!currentProject?.id) {
+      throw new Error('Select a project before removing a background');
+    }
+
+    await deleteProjectBackground(currentProject.id);
+    setBackgroundAsset(null);
+    setCompositionStyle((prev) => ({
+      ...prev,
+      backgroundMode: 'color',
+      backgroundMedia: null,
+    }));
+  }, [currentProject?.id]);
+
   // Add click handler to initialize audio context
   useEffect(() => {
     const handleClick = () => {
@@ -1018,6 +1075,7 @@ function MainApp({ onChangeProject, onLogout }) {
                 onArrangementChange={setGridArrangement}
                 initialArrangement={gridArrangement}
                 compositionStyle={compositionStyle}
+                backgroundAsset={backgroundAsset}
                 clipStyles={clipStyles}
                 instrumentVideos={instrumentVideos}
                 isPreviewPlaying={isPreviewPlaying}
@@ -1053,7 +1111,7 @@ function MainApp({ onChangeProject, onLogout }) {
             <div className='editor-empty'>
               <span className='editor-empty__title'>🎵 AutoTune Syncer</span>
               <span className='editor-empty__sub'>
-                Drop a MIDI file above or click "Load MIDI" to get started
+                Drop a MIDI file above or click &quot;Load MIDI&quot; to get started
               </span>
             </div>
           )}
@@ -1065,6 +1123,9 @@ function MainApp({ onChangeProject, onLogout }) {
           onToggle={() => setRightPanelOpen((v) => !v)}
           compositionStyle={compositionStyle}
           onStyleChange={setCompositionStyle}
+          backgroundAsset={backgroundAsset}
+          onBackgroundUpload={handleBackgroundUpload}
+          onBackgroundRemove={handleBackgroundRemove}
           instruments={instruments}
           volumes={trackVolumes}
           muteStates={muteStates}

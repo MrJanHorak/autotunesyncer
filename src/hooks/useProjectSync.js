@@ -3,7 +3,7 @@ import {
   DEFAULT_COMPOSITION_STYLE,
   DEFAULT_CLIP_STYLE,
 } from '../js/styleDefaults';
-import { apiFetch } from '../services/apiService';
+import { apiFetch, fetchProjectBackgroundFile } from '../services/apiService';
 import {
   hasGridArrangement,
   normalizeGridArrangement,
@@ -38,6 +38,7 @@ export function useProjectSync({
   setClipStyles,
   setVideoFiles,
   setInstrumentVideos,
+  setBackgroundAsset,
 }) {
   const [savedClipKeys, setSavedClipKeys] = useState(new Set());
   const clipBlobCache = useRef({});
@@ -61,6 +62,7 @@ export function useProjectSync({
       return {};
     });
     setVideoFiles({});
+    setBackgroundAsset(null);
     if (precachedKeysRef) precachedKeysRef.current = new Set();
     shadowStateRef.current = null; // reset shadow on project switch
 
@@ -104,6 +106,27 @@ export function useProjectSync({
             ...prev,
             ...state.compositionStyle,
           }));
+        const savedBackground = state?.compositionStyle?.backgroundMedia;
+        const backgroundMode = state?.compositionStyle?.backgroundMode;
+        if (savedBackground?.saved && backgroundMode && backgroundMode !== 'color') {
+          fetchProjectBackgroundFile(currentProject.id)
+            .then((blob) => {
+              if (!blob || clipsLoadingVersion.current !== version) return;
+              setBackgroundAsset({
+                blob,
+                url: URL.createObjectURL(blob),
+                kind:
+                  savedBackground.kind ||
+                  (blob.type.startsWith('video/') ? 'video' : 'image'),
+                mimeType: savedBackground.mimeType || blob.type,
+                originalName:
+                  savedBackground.originalName || 'project background',
+              });
+            })
+            .catch((err) =>
+              console.warn('[background] Failed to load project background:', err),
+            );
+        }
         if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {
           setClipStyles(
             Object.fromEntries(
@@ -171,7 +194,6 @@ export function useProjectSync({
   // ── 3. Persist MIDI file to project state when it changes ─────────────────
   useEffect(() => {
     if (!midiFile || !currentProject) return;
-    const projectId = currentProject.id;
     const reader = new FileReader();
     reader.onload = async () => {
       try {

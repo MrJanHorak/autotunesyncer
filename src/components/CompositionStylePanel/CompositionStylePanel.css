@@ -205,6 +205,49 @@
   font-family: monospace;
 }
 
+.csp-background-media {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  width: 100%;
+}
+
+.csp-background-media__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.csp-background-media__name {
+  color: var(--color-text-main);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.csp-background-media__status {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+
+.csp-background-media__actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.csp-background-media__input {
+  display: none;
+}
+
+.csp-background-media__error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 0.72rem;
+}
+
 input[type='color'] {
   width: 32px;
   height: 24px;

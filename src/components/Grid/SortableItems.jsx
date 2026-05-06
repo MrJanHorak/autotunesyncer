@@ -435,7 +435,6 @@ export const SortableItem = memo(function SortableItem({
 });
 
 export const GridClipItem = memo(function GridClipItem({
-  id,
   item,
   getHeatColor,
   accentColor,
@@ -444,6 +443,7 @@ export const GridClipItem = memo(function GridClipItem({
   onClipStyleChange,
   videoUrl,
   isPreviewPlaying,
+  hasStageBackgroundMedia = false,
   activeLevel,
   beatPulseClass,
   isEditable = true,
@@ -466,11 +466,6 @@ export const GridClipItem = memo(function GridClipItem({
   const isInstrumentActive = isPreviewPlaying
     ? activeLevel !== undefined && activeLevel > ACTIVE_THRESHOLD_DB
     : false;
-
-  // Not playing → dim idle loop (0.35)
-  // Preview + active → full brightness (1)
-  // Preview + silent → hidden (0)
-  const videoOpacity = !isPreviewPlaying ? 0.35 : isInstrumentActive ? 1 : 0;
 
   // Start idle loop on initial mount (once video is ready)
   useEffect(() => {
@@ -518,7 +513,7 @@ export const GridClipItem = memo(function GridClipItem({
     }
 
     wasActiveRef.current = isActive;
-  }, [activeLevel, isPreviewPlaying, videoUrl]);
+  }, [ACTIVE_THRESHOLD_DB, activeLevel, isPreviewPlaying, videoUrl]);
 
   const cs = clipStyle || DEFAULT_CLIP_STYLE;
   const gradeFilterIds = {
@@ -534,6 +529,8 @@ export const GridClipItem = memo(function GridClipItem({
     !cs.transparentBg && cs.bgColorEnabled && cs.bgColor
       ? cs.bgColor
       : 'transparent';
+  const previewCellBackground =
+    isPreviewPlaying && hasStageBackgroundMedia ? 'transparent' : clipBackground;
   const fadeDuration = Math.max(cs.fadeDuration ?? 0.15, 0.05);
   const videoVisible =
     !isPreviewPlaying || isInstrumentActive || cs.fadeEnabled;
@@ -557,7 +554,7 @@ export const GridClipItem = memo(function GridClipItem({
     background: isPreviewPlaying
       ? isEmpty
         ? 'transparent'
-        : clipBackground
+        : previewCellBackground
       : isEmpty
         ? '#f3f4f6'
         : getHeatColor,

@@ -84,7 +84,17 @@ db.exec(`
     PRIMARY KEY (project_id, instrument_key)
   );
 
+  CREATE TABLE IF NOT EXISTS project_backgrounds (
+    project_id     TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    file_path      TEXT NOT NULL,
+    mime_type      TEXT NOT NULL,
+    media_kind     TEXT NOT NULL,
+    original_name  TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_project_clips_project_id ON project_clips(project_id);
+  CREATE INDEX IF NOT EXISTS idx_project_backgrounds_project_id ON project_backgrounds(project_id);
 `);
 
 // Additive migrations for columns added after initial schema

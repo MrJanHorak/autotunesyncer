@@ -16,6 +16,9 @@ export default function RightPanel({
   // Style tab
   compositionStyle,
   onStyleChange,
+  backgroundAsset,
+  onBackgroundUpload,
+  onBackgroundRemove,
   // Mix tab
   instruments,
   volumes,
@@ -175,6 +178,9 @@ export default function RightPanel({
               <CompositionStylePanel
                 style={compositionStyle}
                 onChange={onStyleChange}
+                backgroundAsset={backgroundAsset}
+                onBackgroundUpload={onBackgroundUpload}
+                onBackgroundRemove={onBackgroundRemove}
                 autoTransitionIntervalSeconds={autoTransitionIntervalSeconds}
                 autoTransitionReason={autoTransitionReason}
               />
@@ -233,6 +239,9 @@ RightPanel.propTypes = {
   onToggle: PropTypes.func.isRequired,
   compositionStyle: PropTypes.object,
   onStyleChange: PropTypes.func.isRequired,
+  backgroundAsset: PropTypes.object,
+  onBackgroundUpload: PropTypes.func,
+  onBackgroundRemove: PropTypes.func,
   instruments: PropTypes.array.isRequired,
   volumes: PropTypes.object,
   muteStates: PropTypes.object,

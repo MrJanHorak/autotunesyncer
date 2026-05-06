@@ -13,6 +13,11 @@ import {
   importProject,
 } from '../controllers/projectController.js';
 import { saveClip, listClips, getClipFile, deleteClip } from '../controllers/clipController.js';
+import {
+  saveBackground,
+  getBackgroundFile,
+  deleteBackground,
+} from '../controllers/backgroundController.js';
 
 const router = express.Router();
 
@@ -20,6 +25,18 @@ const clipUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 1000 * 1024 * 1024 },
 }).single('video');
+
+const backgroundUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1000 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype?.startsWith('image/') || file.mimetype?.startsWith('video/')) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error('Background must be an image or video file'));
+  },
+}).single('background');
 
 const zipUpload = multer({
   storage: multer.memoryStorage(),
@@ -49,5 +66,13 @@ router.post('/:id/clips', (req, res, next) => clipUpload(req, res, (err) => {
 }), saveClip);
 router.get('/:id/clips/:instrumentKey/file', getClipFile);
 router.delete('/:id/clips/:instrumentKey', deleteClip);
+
+// Background persistence routes
+router.post('/:id/background', (req, res, next) => backgroundUpload(req, res, (err) => {
+  if (err) return res.status(400).json({ error: err.message });
+  next();
+}), saveBackground);
+router.get('/:id/background/file', getBackgroundFile);
+router.delete('/:id/background', deleteBackground);
 
 export default router;

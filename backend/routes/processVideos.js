@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { authenticateToken } from '../middleware/auth.js';
 import { requireProjectOwnership } from '../middleware/projectOwnership.js';
+import db from '../db/database.js';
 import {
   getGridArrangementOverflow,
   hasGridArrangement,
@@ -99,6 +100,27 @@ const normalizeInstrumentName = (name) =>
   String(name || '')
     .toLowerCase()
     .replace(/\s+/g, '_');
+
+const getProjectBackgroundMedia = (projectId) => {
+  if (!projectId) return null;
+
+  const background = db
+    .prepare(
+      'SELECT file_path, mime_type, media_kind, original_name FROM project_backgrounds WHERE project_id = ?',
+    )
+    .get(projectId);
+
+  if (!background?.file_path || !fs.existsSync(background.file_path)) {
+    return null;
+  }
+
+  return {
+    path: path.resolve(background.file_path),
+    mimeType: background.mime_type,
+    kind: background.media_kind,
+    originalName: background.original_name,
+  };
+};
 
 const buildGridLayoutLookup = (gridArrangement, tracks = []) => {
   const lookup = new Map();
@@ -299,7 +321,13 @@ const upload = multer({
 });
 
 // ── Background composition job ─────────────────────────────────────────────
-async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
+async function runCompositionJob(
+  jobId,
+  files,
+  isPreview,
+  jobUploadsDir,
+  backgroundMedia = null,
+) {
   const tempFiles = []; // paths to clean up on failure
   // Hoisted so the catch block can unlink it if the job fails after creation
   let permanentOutputPath = null;
@@ -602,6 +630,7 @@ async function runCompositionJob(jobId, files, isPreview, jobUploadsDir) {
       trackVolumes: midiData.trackVolumes || {},
       compositionStyle: midiData.compositionStyle || {},
       clipStyles: midiData.clipStyles || {},
+      backgroundMedia,
     };
 
     const result = await runPythonProcessorDirect(config, videos, {
@@ -704,6 +733,7 @@ router.post(
     const isPreview = req.body.preview === 'true' || req.body.preview === true;
     const jobId = uuidv4();
     const jobUploadsDir = req.project.uploadsDir;
+    const backgroundMedia = getProjectBackgroundMedia(req.project.id);
 
     jobs.set(jobId, {
       status: 'queued',
@@ -718,7 +748,13 @@ router.post(
 
     res.status(202).json({ jobId });
 
-    void runCompositionJob(jobId, req.files, isPreview, jobUploadsDir).catch(
+    void runCompositionJob(
+      jobId,
+      req.files,
+      isPreview,
+      jobUploadsDir,
+      backgroundMedia,
+    ).catch(
       (err) => {
         console.error(`[Job ${jobId}] Unhandled error:`, err);
         const job = jobs.get(jobId);

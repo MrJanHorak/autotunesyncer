@@ -20,6 +20,8 @@ export const FONT_OPTIONS = [
 export const DEFAULT_COMPOSITION_STYLE = {
   colorTheme: 'dark', // 'dark' | 'neon' | 'vintage' | 'cyberpunk' | 'minimal' | 'custom'
   backgroundColor: '#0a0a0f',
+  backgroundMode: 'color', // 'color' | 'image' | 'video'
+  backgroundMedia: null,
 
   // Title overlay
   titleEnabled: false,

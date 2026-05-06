@@ -167,6 +167,7 @@ class VideoComposer:
             # ── Composition & clip style settings ────────────────────────────
             self.composition_style = midi_data.get('compositionStyle', {})
             self.clip_styles = midi_data.get('clipStyles', {})  # keyed by grid item id
+            self.background_media = midi_data.get('backgroundMedia', {}) or {}
             if self.composition_style:
                 logging.info(f"Composition style loaded: {list(self.composition_style.keys())}")
             else:
@@ -175,6 +176,11 @@ class VideoComposer:
                 logging.info(f"Clip styles loaded for: {list(self.clip_styles.keys())}")
             else:
                 logging.info("Clip styles: empty (no per-clip effects)")
+            if self.background_media:
+                logging.info(
+                    f"Background media loaded: {self.background_media.get('kind')} "
+                    f"{self.background_media.get('path')}"
+                )
 
             # Explicit session-specific video paths (prevents stale uploads from past sessions)
             self.explicit_video_files = midi_data.get('videoFiles', {})
@@ -1391,9 +1397,15 @@ class VideoComposer:
 
             cs = getattr(self, 'composition_style', {}) or {}
             bg_hex = cs.get('backgroundColor', '#0a0a0f')
+            background_media = self._get_active_background_media()
             style_lookup_id = style_track_id if style_track_id is not None else track_name
             clip_style, _, matched_key = self._resolve_clip_style(style_lookup_id)
-            if (
+            if background_media:
+                logging.info(
+                    f"[style] note-trigger base for {track_name!r}: "
+                    f"{background_media['kind']} {Path(background_media['path']).name}"
+                )
+            elif (
                 clip_style.get('bgColorEnabled')
                 and clip_style.get('bgColor')
                 and not clip_style.get('transparentBg')
@@ -1477,8 +1489,29 @@ class VideoComposer:
             cmd = [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
-                "-f", "lavfi", "-i", f"color={bg_ffmpeg}:size=640x360:rate=30:duration={total_duration}",
-                "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}",
+            ]
+            if background_media:
+                if background_media['kind'] == 'image':
+                    cmd += [
+                        "-loop", "1",
+                        "-t", f"{total_duration:.3f}",
+                        "-i", str(background_media['path']),
+                    ]
+                else:
+                    cmd += ["-stream_loop", "-1", "-i", str(background_media['path'])]
+                filter_parts[0] = (
+                    f"[1:v]fps=30,format=yuv420p,setsar=1,"
+                    f"scale=640:360:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop=640:360,trim=0:{total_duration},setpts=PTS-STARTPTS[base_v]"
+                )
+            else:
+                cmd += [
+                    "-f", "lavfi", "-i",
+                    f"color={bg_ffmpeg}:size=640x360:rate=30:duration={total_duration}",
+                ]
+            cmd += [
+                "-f", "lavfi", "-i",
+                f"anullsrc=channel_layout=stereo:sample_rate=44100:duration={total_duration}",
             ]
             # Add pre-tuned audio sources (one per unique cached midi_note)
             for tuned_path in extra_audio_inputs:
@@ -1906,29 +1939,12 @@ class VideoComposer:
     def _create_placeholder_chunk(self, chunk_idx):
         """Create a placeholder chunk with silence"""
         chunk_path = self.temp_dir / f"chunk_{chunk_idx}.mp4"
-        bg_hex = (getattr(self, 'composition_style', {}) or {}).get(
-            'backgroundColor',
-            '#0a0a0f',
+        return self._render_background_only_chunk(
+            chunk_path,
+            self.CHUNK_DURATION,
+            1920,
+            1080,
         )
-        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
-        
-        # Create a video with the composition background and silent audio
-        cmd = [
-            'ffmpeg', '-y',
-            '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s=1920x1080:r=30',
-            '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-            '-t', str(self.CHUNK_DURATION),
-            '-c:v', 'h264_nvenc', '-preset', 'p4',
-            '-c:a', 'aac', '-b:a', '128k',
-            str(chunk_path)
-        ]
-        
-        try:
-            gpu_subprocess_run(cmd, check=True, capture_output=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error creating placeholder chunk: {e}")
-            return False
         
     def has_valid_notes(self, track):
         """Check if a track has valid notes"""
@@ -3667,24 +3683,13 @@ class VideoComposer:
         """Create a silent chunk for gaps in composition"""
         try:
             chunk_path = self.chunks_dir / f"silent_chunk_{chunk_idx}.mp4"
-            bg_hex = (getattr(self, 'composition_style', {}) or {}).get(
-                'backgroundColor',
-                '#0a0a0f',
+            success = self._render_background_only_chunk(
+                chunk_path,
+                duration,
+                1920,
+                1080,
             )
-            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
-            
-            cmd = [
-                'ffmpeg', '-y',
-                '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s=1920x1080:r=30',
-                '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-                '-t', str(duration),
-                '-c:v', 'h264_nvenc', '-preset', 'p4',
-                '-c:a', 'aac', '-b:a', '128k',
-                str(chunk_path)
-            ]
-            
-            result = gpu_subprocess_run(cmd, check=True, capture_output=True)
-            return str(chunk_path) if chunk_path.exists() else None
+            return str(chunk_path) if success and chunk_path.exists() else None
             
         except Exception as e:
             logging.error(f"Error creating silent chunk: {e}")
@@ -4356,6 +4361,121 @@ class VideoComposer:
         if len(h) == 6:
             return f'0x{h.upper()}'
         return '0x000000'
+
+    def _get_active_background_media(self):
+        cs = getattr(self, 'composition_style', {}) or {}
+        background_mode = cs.get('backgroundMode', 'color')
+        if background_mode not in ('image', 'video'):
+            return None
+
+        background_media = getattr(self, 'background_media', {}) or {}
+        media_path = str(background_media.get('path') or '').strip()
+        if not media_path or not os.path.exists(media_path):
+            if media_path:
+                logging.warning(
+                    f"Background media missing on disk, falling back to color: {media_path}"
+                )
+            return None
+
+        media_kind = background_media.get('kind') or background_mode
+        if media_kind not in ('image', 'video'):
+            mime_type = str(background_media.get('mimeType') or '')
+            media_kind = 'video' if mime_type.startswith('video/') else 'image'
+
+        return {
+            'path': media_path,
+            'kind': media_kind,
+            'mime_type': background_media.get('mimeType'),
+            'original_name': background_media.get('originalName'),
+        }
+
+    def _append_canvas_background_inputs(
+        self,
+        cmd,
+        filter_parts,
+        input_idx,
+        width,
+        height,
+        duration,
+        output_label='grid_base',
+    ):
+        cs = getattr(self, 'composition_style', {}) or {}
+        bg_hex = cs.get('backgroundColor', '#0a0a0f')
+        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
+        background_media = self._get_active_background_media()
+
+        if background_media:
+            if background_media['kind'] == 'image':
+                cmd.extend(['-loop', '1', '-t', str(duration), '-i', background_media['path']])
+            else:
+                cmd.extend(['-stream_loop', '-1', '-i', background_media['path']])
+
+            canvas_video_input_idx = input_idx
+            input_idx += 1
+            filter_parts.append(
+                f"[{canvas_video_input_idx}:v]fps=30,format=yuv420p,setsar=1,"
+                f"scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},trim=duration={duration:.3f},setpts=PTS-STARTPTS[{output_label}]"
+            )
+            background_description = (
+                f"{background_media['kind']} {Path(background_media['path']).name}"
+            )
+        else:
+            cmd.extend(['-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s={width}x{height}:r=30:d={duration}'])
+            canvas_video_input_idx = input_idx
+            input_idx += 1
+            filter_parts.append(f"[{canvas_video_input_idx}:v]null[{output_label}]")
+            background_description = f"color {bg_hex}"
+
+        cmd.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}'])
+        silent_audio_input_idx = input_idx
+        input_idx += 1
+
+        return input_idx, canvas_video_input_idx, silent_audio_input_idx, background_description
+
+    def _render_background_only_chunk(self, output_path, duration, width=1920, height=1080):
+        background_media = self._get_active_background_media()
+        cs = getattr(self, 'composition_style', {}) or {}
+        bg_hex = cs.get('backgroundColor', '#0a0a0f')
+        bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
+
+        if background_media:
+            cmd = ['ffmpeg', '-y']
+            if background_media['kind'] == 'image':
+                cmd.extend(['-loop', '1', '-t', str(duration), '-i', background_media['path']])
+            else:
+                cmd.extend(['-stream_loop', '-1', '-i', background_media['path']])
+            cmd.extend([
+                '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                '-map', '0:v', '-map', '1:a',
+                '-vf',
+                (
+                    f'fps=30,format=yuv420p,setsar=1,'
+                    f'scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase,'
+                    f'crop={width}:{height}'
+                ),
+                '-t', str(duration),
+                '-c:v', 'h264_nvenc', '-preset', 'p4',
+                '-c:a', 'aac', '-b:a', '128k',
+                str(output_path),
+            ])
+        else:
+            cmd = [
+                'ffmpeg', '-y',
+                '-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s={width}x{height}:r=30',
+                '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                '-t', str(duration),
+                '-c:v', 'h264_nvenc', '-preset', 'p4',
+                '-c:a', 'aac', '-b:a', '128k',
+                str(output_path),
+            ]
+
+        try:
+            gpu_subprocess_run(cmd, check=True, capture_output=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error creating background chunk: {e}")
+            return False
 
     def _get_video_info(self, path):
         """Use ffprobe to get (width, height, duration). Returns None on failure."""
@@ -6050,22 +6170,28 @@ class VideoComposer:
                 'modulated_windows': 0,
             }
 
-            # Determine canvas background color from composition style
+            # Add a full-canvas background input so tiles can be overlaid at arbitrary spans.
+            (
+                input_idx,
+                canvas_video_input_idx,
+                silent_audio_input_idx,
+                background_description,
+            ) = self._append_canvas_background_inputs(
+                cmd,
+                filter_parts,
+                input_idx,
+                target_width,
+                target_height,
+                duration,
+            )
             cs = getattr(self, 'composition_style', {}) or {}
             bg_hex = cs.get('backgroundColor', '#0a0a0f')
-            bg_ffmpeg = self._hex_to_ffmpeg_color(bg_hex)
-
-            # Add a full-canvas background input so tiles can be overlaid at arbitrary spans.
-            cmd.extend(['-f', 'lavfi', '-i', f'color={bg_ffmpeg}:s={target_width}x{target_height}:r=30:d={duration}'])
-            canvas_video_input_idx = input_idx
-            input_idx += 1
-            cmd.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={duration}'])
-            silent_audio_input_idx = input_idx
-            input_idx += 1
-            filter_parts.append(f"[{canvas_video_input_idx}:v]null[grid_base]")
             
             logging.info(f"🎛️ Building FFmpeg filter complex...")
-            logging.info(f"   Added canvas background ({bg_hex}, input {canvas_video_input_idx}) and silent audio (input {silent_audio_input_idx})")
+            logging.info(
+                f"   Added canvas background ({background_description}, input {canvas_video_input_idx}) "
+                f"and silent audio (input {silent_audio_input_idx})"
+            )
 
             # ── Pre-process: extend short clips to chunk_duration ────────────
             # Even with overlay composition, pre-extending clips preserves clip-specific
