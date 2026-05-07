@@ -1,6 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import PropTypes from 'prop-types';
-import { X, Heart, MessageCircle, UserPlus, Bell, Film } from 'lucide-react';
+import {
+  X,
+  Heart,
+  MessageCircle,
+  UserPlus,
+  Bell,
+  Film,
+  Users,
+} from 'lucide-react';
 import './Social.css';
 
 const API_BASE = 'http://localhost:3000/api';
@@ -46,6 +54,8 @@ const TYPE_ICON = {
   follow: <UserPlus size={14} style={{ color: '#34d399' }} />,
   render_complete: <Film size={14} style={{ color: '#60a5fa' }} />,
   render_failed: <Film size={14} style={{ color: '#f87171' }} />,
+  project_invite: <Users size={14} style={{ color: '#fbbf24' }} />,
+  project_invite_accepted: <Users size={14} style={{ color: '#34d399' }} />,
 };
 
 function notifMessage(n) {
@@ -75,10 +85,29 @@ function notifMessage(n) {
         render failed for <strong>{n.project_name || 'your project'}</strong>
       </>
     );
+  if (n.type === 'project_invite')
+    return (
+      <>
+        invited you to collaborate on{' '}
+        <strong>{n.project_name || 'a project'}</strong>
+      </>
+    );
+  if (n.type === 'project_invite_accepted')
+    return (
+      <>
+        accepted your invite for{' '}
+        <strong>{n.project_name || 'your project'}</strong>
+      </>
+    );
   return n.type;
 }
 
-const Notifications = ({ onClose, onSelectComposition, onSelectProject }) => {
+const Notifications = ({
+  onClose,
+  onSelectComposition,
+  onSelectProject,
+  onOpenProjects,
+}) => {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -115,6 +144,11 @@ const Notifications = ({ onClose, onSelectComposition, onSelectProject }) => {
       setNotifications((prev) =>
         prev.map((n) => (n.id === notif.id ? { ...n, read: 1 } : n)),
       );
+    }
+    if (notif.type === 'project_invite' && onOpenProjects) {
+      onClose();
+      onOpenProjects();
+      return;
     }
     if (notif.project_id && onSelectProject) {
       onClose();
@@ -186,6 +220,7 @@ Notifications.propTypes = {
   onClose: PropTypes.func.isRequired,
   onSelectComposition: PropTypes.func.isRequired,
   onSelectProject: PropTypes.func,
+  onOpenProjects: PropTypes.func,
 };
 
 export default Notifications;

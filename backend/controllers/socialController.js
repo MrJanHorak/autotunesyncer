@@ -5,6 +5,7 @@ import { mkdirSync, existsSync, unlinkSync, copyFileSync } from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import db from '../db/database.js';
+import { getProjectAccess } from '../services/projectAccessService.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -55,9 +56,7 @@ export const shareComposition = async (req, res) => {
   const userId = req.user.id;
   const normalizedProjectId = String(projectId || '').trim() || null;
   if (normalizedProjectId) {
-    const project = db
-      .prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?')
-      .get(normalizedProjectId, userId);
+    const project = getProjectAccess(normalizedProjectId, userId);
     if (!project) {
       return res.status(400).json({ error: 'Invalid projectId' });
     }

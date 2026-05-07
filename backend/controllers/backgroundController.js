@@ -8,18 +8,16 @@ import {
 import { extname, join, resolve } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db/database.js';
-import { BASE_UPLOADS_DIR } from '../middleware/projectOwnership.js';
+import {
+  BASE_UPLOADS_DIR,
+  canWriteProject,
+  getProjectAccess,
+} from '../services/projectAccessService.js';
 
 const DEFAULT_EXTENSION_BY_KIND = {
   image: '.png',
   video: '.mp4',
 };
-
-function verifyOwnership(projectId, userId) {
-  return db
-    .prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?')
-    .get(projectId, userId);
-}
 
 function getExistingBackground(projectId) {
   return db
@@ -48,12 +46,16 @@ function getMediaKind(mimeType = '') {
 
 export const saveBackground = (req, res) => {
   const { id: projectId } = req.params;
+  const projectAccess = getProjectAccess(projectId, req.user.id);
 
   if (!req.file) {
     return res.status(400).json({ error: 'background file is required' });
   }
-  if (!verifyOwnership(projectId, req.user.id)) {
+  if (!projectAccess) {
     return res.status(404).json({ error: 'Project not found' });
+  }
+  if (!canWriteProject(projectAccess)) {
+    return res.status(403).json({ error: 'Project write access required' });
   }
 
   const mediaKind = getMediaKind(req.file.mimetype || '');
@@ -65,7 +67,7 @@ export const saveBackground = (req, res) => {
 
   deleteExistingBackgroundFile(projectId);
 
-  const uploadsDir = join(BASE_UPLOADS_DIR, req.user.id, projectId);
+  const uploadsDir = join(BASE_UPLOADS_DIR, projectAccess.ownerId, projectId);
   mkdirSync(uploadsDir, { recursive: true });
 
   const fileExtension =
@@ -113,7 +115,7 @@ export const saveBackground = (req, res) => {
 
 export const getBackgroundFile = (req, res) => {
   const { id: projectId } = req.params;
-  if (!verifyOwnership(projectId, req.user.id)) {
+  if (!getProjectAccess(projectId, req.user.id)) {
     return res.status(404).json({ error: 'Project not found' });
   }
 
@@ -138,8 +140,12 @@ export const getBackgroundFile = (req, res) => {
 
 export const deleteBackground = (req, res) => {
   const { id: projectId } = req.params;
-  if (!verifyOwnership(projectId, req.user.id)) {
+  const projectAccess = getProjectAccess(projectId, req.user.id);
+  if (!projectAccess) {
     return res.status(404).json({ error: 'Project not found' });
+  }
+  if (!canWriteProject(projectAccess)) {
+    return res.status(403).json({ error: 'Project write access required' });
   }
 
   deleteExistingBackgroundFile(projectId);

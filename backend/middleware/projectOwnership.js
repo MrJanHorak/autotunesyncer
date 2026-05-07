@@ -1,13 +1,10 @@
-import { join, resolve, sep } from 'path';
-import { dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { mkdirSync } from 'fs';
-import db from '../db/database.js';
+import {
+  canWriteProject,
+  getProjectAccess,
+} from '../services/projectAccessService.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-export const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Middleware: verify the requesting user owns the project indicated by
@@ -27,22 +24,16 @@ export const requireProjectOwnership = (req, res, next) => {
     return res.status(400).json({ error: 'Invalid projectId format' });
   }
 
-  const project = db
-    .prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?')
-    .get(projectId, req.user.id);
+  const project = getProjectAccess(projectId, req.user.id);
 
   if (!project) {
     return res.status(404).json({ error: 'Project not found' });
   }
 
-  // Compute and validate project-scoped uploads dir
-  const uploadsDir = resolve(join(BASE_UPLOADS_DIR, req.user.id, projectId));
-  if (!uploadsDir.startsWith(BASE_UPLOADS_DIR + sep) &&
-      uploadsDir !== BASE_UPLOADS_DIR) {
-    return res.status(400).json({ error: 'Invalid project path' });
+  if (!canWriteProject(project)) {
+    return res.status(403).json({ error: 'Project write access required' });
   }
 
-  mkdirSync(uploadsDir, { recursive: true });
-  req.project = { ...project, uploadsDir };
+  req.project = project;
   next();
 };

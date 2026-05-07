@@ -15,6 +15,13 @@ import {
   importProject,
 } from '../controllers/projectController.js';
 import {
+  acceptProjectInvite,
+  declineProjectInvite,
+  inviteProjectCollaborator,
+  listPendingProjectInvites,
+  listProjectCollaborators,
+} from '../controllers/projectCollaborationController.js';
+import {
   saveClip,
   listClips,
   getClipFile,
@@ -57,6 +64,9 @@ router.use(authenticateToken);
 
 router.get('/', listProjects);
 router.post('/', createProject);
+router.get('/invites', listPendingProjectInvites);
+router.post('/invites/:inviteId/accept', acceptProjectInvite);
+router.post('/invites/:inviteId/decline', declineProjectInvite);
 router.post(
   '/import',
   (req, res, next) =>
@@ -66,6 +76,8 @@ router.post(
     }),
   importProject,
 );
+router.get('/:id/collaborators', listProjectCollaborators);
+router.post('/:id/invites', inviteProjectCollaborator);
 router.get('/:id', getProject);
 router.put('/:id', updateProject);
 router.delete('/:id', deleteProject);

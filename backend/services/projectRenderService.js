@@ -1,24 +1,7 @@
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db/database.js';
-
-const GET_PROJECT_RENDER_SQL = `
-  SELECT
-    p.id AS project_id,
-    p.name AS project_name,
-    pr.job_id,
-    pr.status,
-    pr.progress,
-    pr.mode,
-    pr.output_path,
-    pr.error,
-    pr.started_at,
-    pr.completed_at,
-    pr.updated_at
-  FROM projects p
-  LEFT JOIN project_renders pr ON pr.project_id = p.id
-  WHERE p.id = ? AND p.user_id = ?
-`;
+import { getProjectAccess } from './projectAccessService.js';
 
 const UPSERT_PROJECT_RENDER_SQL = `
   INSERT INTO project_renders (
@@ -72,8 +55,29 @@ export function getStoredProjectRender(projectId) {
 }
 
 export function getProjectRender(projectId, userId) {
-  const row = db.prepare(GET_PROJECT_RENDER_SQL).get(projectId, userId);
-  if (!row) return null;
+  const access = getProjectAccess(projectId, userId);
+  if (!access) return null;
+  const row = db
+    .prepare(
+      `
+        SELECT
+          p.id AS project_id,
+          p.name AS project_name,
+          pr.job_id,
+          pr.status,
+          pr.progress,
+          pr.mode,
+          pr.output_path,
+          pr.error,
+          pr.started_at,
+          pr.completed_at,
+          pr.updated_at
+        FROM projects p
+        LEFT JOIN project_renders pr ON pr.project_id = p.id
+        WHERE p.id = ?
+      `,
+    )
+    .get(projectId);
 
   const outputAvailable = hasOutputFile(row.output_path);
   return {

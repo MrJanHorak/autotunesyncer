@@ -452,6 +452,10 @@ function App() {
               setNotifOpen(false);
               setUnreadCount(0);
             }}
+            onOpenProjects={() => {
+              setAppView('projects');
+              setNotifOpen(false);
+            }}
             onSelectProject={handleSelectProjectFromNotification}
             onSelectComposition={(id) => {
               setAppView('feed');

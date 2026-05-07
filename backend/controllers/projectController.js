@@ -21,6 +21,11 @@ import {
 } from '../../shared/renderPresets.js';
 import { normalizeGridArrangement } from '../../shared/gridLayout.js';
 import { getProjectRender } from '../services/projectRenderService.js';
+import {
+  canManageProject,
+  canWriteProject,
+  getProjectAccess,
+} from '../services/projectAccessService.js';
 
 const PROJECT_STATE_SCHEMA_VERSION = 2;
 const PROJECT_CARD_PREVIEW_ITEM_LIMIT = 12;
@@ -29,9 +34,25 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
 
 const PROJECT_SELECT = `
-  WITH clip_counts AS (
+  WITH accessible_projects AS (
+    SELECT id AS project_id, 'owner' AS access_role
+    FROM projects
+    WHERE user_id = ?
+
+    UNION
+
+    SELECT project_id, role AS access_role
+    FROM project_collaborators
+    WHERE user_id = ?
+  ),
+  clip_counts AS (
     SELECT project_id, COUNT(*) AS clip_count
     FROM project_clips
+    GROUP BY project_id
+  ),
+  collaborator_counts AS (
+    SELECT project_id, COUNT(*) AS collaborator_count
+    FROM project_collaborators
     GROUP BY project_id
   ),
   shared_counts AS (
@@ -42,12 +63,16 @@ const PROJECT_SELECT = `
   )
   SELECT
     p.id,
+    p.user_id AS owner_id,
+    owner.username AS owner_username,
+    ap.access_role,
     p.name,
     p.description,
     p.state,
     p.created_at,
     p.updated_at,
     COALESCE(cc.clip_count, 0) AS clip_count,
+    COALESCE(colc.collaborator_count, 0) AS collaborator_count,
     pb.media_kind AS background_kind,
     pr.status AS render_status,
     pr.progress AS render_progress,
@@ -56,8 +81,11 @@ const PROJECT_SELECT = `
     pr.completed_at AS render_completed_at,
     COALESCE(sc.shared_count, 0) AS shared_count,
     sc.last_shared_at
-  FROM projects p
+  FROM accessible_projects ap
+  JOIN projects p ON p.id = ap.project_id
+  JOIN users owner ON owner.id = p.user_id
   LEFT JOIN clip_counts cc ON cc.project_id = p.id
+  LEFT JOIN collaborator_counts colc ON colc.project_id = p.id
   LEFT JOIN project_backgrounds pb ON pb.project_id = p.id
   LEFT JOIN project_renders pr ON pr.project_id = p.id
   LEFT JOIN shared_counts sc ON sc.project_id = p.id
@@ -169,6 +197,9 @@ const buildProjectSummary = (row) => {
 
   return {
     id: row.id,
+    ownerId: row.owner_id,
+    ownerUsername: row.owner_username,
+    accessRole: row.access_role,
     name: row.name,
     description: row.description,
     created_at: row.created_at,
@@ -176,6 +207,7 @@ const buildProjectSummary = (row) => {
     layoutPreview: preview,
     summary: {
       clipCount,
+      collaboratorCount: Number(row.collaborator_count) || 0,
       hasBackground,
       backgroundKind: row.background_kind || null,
       hasMidi,
@@ -199,10 +231,9 @@ export const listProjects = (req, res) => {
   const projects = db
     .prepare(
       `${PROJECT_SELECT}
-       WHERE p.user_id = ?
        ORDER BY p.updated_at DESC`,
     )
-    .all(req.user.id)
+    .all(req.user.id, req.user.id)
     .map(buildProjectSummary);
   res.json({ projects });
 };
@@ -230,9 +261,9 @@ export const createProject = (req, res) => {
   const project = db
     .prepare(
       `${PROJECT_SELECT}
-       WHERE p.id = ? AND p.user_id = ?`,
+       WHERE p.id = ?`,
     )
-    .get(id, req.user.id);
+    .get(req.user.id, req.user.id, id);
   res.status(201).json({
     project: buildProjectSummary(project),
   });
@@ -242,19 +273,22 @@ export const getProject = (req, res) => {
   const project = db
     .prepare(
       `${PROJECT_SELECT}
-       WHERE p.id = ? AND p.user_id = ?`,
+       WHERE p.id = ?`,
     )
-    .get(req.params.id, req.user.id);
+    .get(req.user.id, req.user.id, req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
   res.json({ project: buildProjectSummary(project) });
 };
 
 export const updateProject = (req, res) => {
   const { name, description } = req.body;
-  const project = db
-    .prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.user.id);
+  const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!canManageProject(project)) {
+    return res
+      .status(403)
+      .json({ error: 'Only the project owner can edit project details' });
+  }
 
   if (name !== undefined && name.trim()) {
     db.prepare(
@@ -270,21 +304,24 @@ export const updateProject = (req, res) => {
   const updated = db
     .prepare(
       `${PROJECT_SELECT}
-       WHERE p.id = ? AND p.user_id = ?`,
+       WHERE p.id = ?`,
     )
-    .get(req.params.id, req.user.id);
+    .get(req.user.id, req.user.id, req.params.id);
   res.json({ project: buildProjectSummary(updated) });
 };
 
 export const deleteProject = (req, res) => {
-  const project = db
-    .prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.user.id);
+  const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!canManageProject(project)) {
+    return res
+      .status(403)
+      .json({ error: 'Only the project owner can delete a project' });
+  }
 
   // Delete project-scoped uploads folder safely
   const uploadsDir = resolve(
-    join(BASE_UPLOADS_DIR, req.user.id, req.params.id),
+    join(BASE_UPLOADS_DIR, project.ownerId, req.params.id),
   );
   if (uploadsDir.startsWith(BASE_UPLOADS_DIR + sep) && existsSync(uploadsDir)) {
     try {
@@ -299,10 +336,11 @@ export const deleteProject = (req, res) => {
 };
 
 export const saveProjectState = (req, res) => {
-  const project = db
-    .prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.user.id);
+  const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (!canWriteProject(project)) {
+    return res.status(403).json({ error: 'Project write access required' });
+  }
 
   const state = JSON.stringify({
     ...req.body,
@@ -316,9 +354,7 @@ export const saveProjectState = (req, res) => {
 };
 
 export const loadProjectState = (req, res) => {
-  const project = db
-    .prepare('SELECT state FROM projects WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.user.id);
+  const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   if (!project.state) return res.json({ state: null });
@@ -383,11 +419,7 @@ const inferMimeTypeFromExt = (extension = '') => {
 };
 
 export const exportProject = (req, res) => {
-  const project = db
-    .prepare(
-      'SELECT id, name, state FROM projects WHERE id = ? AND user_id = ?',
-    )
-    .get(req.params.id, req.user.id);
+  const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const clips = db

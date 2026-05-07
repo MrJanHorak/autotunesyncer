@@ -107,9 +107,34 @@ db.exec(`
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS project_collaborators (
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role           TEXT NOT NULL DEFAULT 'editor',
+    invited_by     TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, user_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS project_invites (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    inviter_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    invitee_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role           TEXT NOT NULL DEFAULT 'editor',
+    status         TEXT NOT NULL DEFAULT 'pending',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    responded_at   TEXT
+  );
+
   CREATE INDEX IF NOT EXISTS idx_project_clips_project_id ON project_clips(project_id);
   CREATE INDEX IF NOT EXISTS idx_project_backgrounds_project_id ON project_backgrounds(project_id);
   CREATE INDEX IF NOT EXISTS idx_project_renders_status ON project_renders(status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_project_collaborators_project_id ON project_collaborators(project_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_project_collaborators_user_id ON project_collaborators(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_project_invites_project_id ON project_invites(project_id, status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_project_invites_invitee_id ON project_invites(invitee_id, status, created_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_invites_pending_unique ON project_invites(project_id, invitee_id) WHERE status = 'pending';
 `);
 
 // Additive migrations for columns added after initial schema
