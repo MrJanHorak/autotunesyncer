@@ -495,6 +495,7 @@ const VideoComposer = ({
           suggestedTitle={
             compositionStyle?.titleText?.trim() || projectName || ''
           }
+          projectId={projectId || null}
           onClose={() => setShowShareModal(false)}
           onShared={() => setShowShareModal(false)}
         />

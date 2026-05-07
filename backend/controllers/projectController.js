@@ -19,19 +19,191 @@ import {
   DEFAULT_RENDER_PRESET,
   normalizeRenderPreset,
 } from '../../shared/renderPresets.js';
+import { normalizeGridArrangement } from '../../shared/gridLayout.js';
 import { getProjectRender } from '../services/projectRenderService.js';
 
 const PROJECT_STATE_SCHEMA_VERSION = 2;
+const PROJECT_CARD_PREVIEW_ITEM_LIMIT = 12;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
 
+const PROJECT_SELECT = `
+  WITH clip_counts AS (
+    SELECT project_id, COUNT(*) AS clip_count
+    FROM project_clips
+    GROUP BY project_id
+  ),
+  shared_counts AS (
+    SELECT project_id, COUNT(*) AS shared_count, MAX(created_at) AS last_shared_at
+    FROM compositions
+    WHERE project_id IS NOT NULL
+    GROUP BY project_id
+  )
+  SELECT
+    p.id,
+    p.name,
+    p.description,
+    p.state,
+    p.created_at,
+    p.updated_at,
+    COALESCE(cc.clip_count, 0) AS clip_count,
+    pb.media_kind AS background_kind,
+    pr.status AS render_status,
+    pr.progress AS render_progress,
+    pr.output_path AS render_output_path,
+    pr.error AS render_error,
+    pr.completed_at AS render_completed_at,
+    COALESCE(sc.shared_count, 0) AS shared_count,
+    sc.last_shared_at
+  FROM projects p
+  LEFT JOIN clip_counts cc ON cc.project_id = p.id
+  LEFT JOIN project_backgrounds pb ON pb.project_id = p.id
+  LEFT JOIN project_renders pr ON pr.project_id = p.id
+  LEFT JOIN shared_counts sc ON sc.project_id = p.id
+`;
+
+const parseProjectState = (stateText) => {
+  if (!stateText) return null;
+  try {
+    return JSON.parse(stateText);
+  } catch {
+    return null;
+  }
+};
+
+const getLayoutPreview = (arrangement) => {
+  const normalized = normalizeGridArrangement(arrangement);
+  const entries = Object.entries(normalized.items);
+
+  if (entries.length === 0) {
+    return {
+      itemCount: 0,
+      preview: null,
+    };
+  }
+
+  return {
+    itemCount: entries.length,
+    preview: {
+      columns: normalized.columns,
+      rows: normalized.rows,
+      items: entries
+        .slice(0, PROJECT_CARD_PREVIEW_ITEM_LIMIT)
+        .map(([id, item]) => ({
+          id,
+          x: item.x,
+          y: item.y,
+          w: item.w,
+          h: item.h,
+          type: item.type || 'track',
+        })),
+    },
+  };
+};
+
+const getWorkflowState = ({
+  clipCount,
+  hasMidi,
+  layoutItemCount,
+  hasBackground,
+  sharedCount,
+  renderStatus,
+  hasRenderOutput,
+}) => {
+  if (sharedCount > 0) {
+    return { stage: 'shared', progress: 100 };
+  }
+
+  if (renderStatus === 'processing' || renderStatus === 'queued') {
+    return { stage: 'rendering', progress: 86 };
+  }
+
+  if (renderStatus === 'failed') {
+    return { stage: 'render_failed', progress: 72 };
+  }
+
+  if (hasRenderOutput || renderStatus === 'done') {
+    return { stage: 'rendered', progress: 94 };
+  }
+
+  if (clipCount > 0 && hasMidi && layoutItemCount > 0) {
+    return { stage: 'ready', progress: 72 };
+  }
+
+  if (clipCount > 0 || hasMidi || layoutItemCount > 0 || hasBackground) {
+    return { stage: 'building', progress: 42 };
+  }
+
+  return { stage: 'draft', progress: 12 };
+};
+
+const buildProjectSummary = (row) => {
+  const state = parseProjectState(row.state);
+  const renderPreset = normalizeRenderPreset(
+    state?.renderPreset,
+    DEFAULT_RENDER_PRESET,
+  );
+  const { itemCount, preview } = getLayoutPreview(state?.gridArrangement);
+  const clipCount = Number(row.clip_count) || 0;
+  const sharedCount = Number(row.shared_count) || 0;
+  const renderStatus = row.render_status || 'idle';
+  const renderProgress =
+    renderStatus === 'done'
+      ? 100
+      : Math.max(0, Math.min(100, Number(row.render_progress) || 0));
+  const hasRenderOutput = Boolean(
+    row.render_output_path && existsSync(row.render_output_path),
+  );
+  const hasBackground = Boolean(row.background_kind);
+  const hasMidi = Boolean(state?.midiFileBase64);
+  const workflow = getWorkflowState({
+    clipCount,
+    hasMidi,
+    layoutItemCount: itemCount,
+    hasBackground,
+    sharedCount,
+    renderStatus,
+    hasRenderOutput,
+  });
+
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    layoutPreview: preview,
+    summary: {
+      clipCount,
+      hasBackground,
+      backgroundKind: row.background_kind || null,
+      hasMidi,
+      layoutItemCount: itemCount,
+      renderPreset,
+      renderStatus,
+      renderProgress,
+      hasRenderOutput,
+      renderError: row.render_error || null,
+      renderCompletedAt: row.render_completed_at || null,
+      sharedCount,
+      hasSharedComposition: sharedCount > 0,
+      lastSharedAt: row.last_shared_at || null,
+      workflowStage: workflow.stage,
+      workflowProgress: workflow.progress,
+    },
+  };
+};
+
 export const listProjects = (req, res) => {
   const projects = db
     .prepare(
-      'SELECT id, name, description, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC',
+      `${PROJECT_SELECT}
+       WHERE p.user_id = ?
+       ORDER BY p.updated_at DESC`,
     )
-    .all(req.user.id);
+    .all(req.user.id)
+    .map(buildProjectSummary);
   res.json({ projects });
 };
 
@@ -57,25 +229,24 @@ export const createProject = (req, res) => {
 
   const project = db
     .prepare(
-      'SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?',
+      `${PROJECT_SELECT}
+       WHERE p.id = ? AND p.user_id = ?`,
     )
-    .get(id);
+    .get(id, req.user.id);
   res.status(201).json({
-    project: {
-      ...project,
-      renderPreset: normalizedRenderPreset,
-    },
+    project: buildProjectSummary(project),
   });
 };
 
 export const getProject = (req, res) => {
   const project = db
     .prepare(
-      'SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ? AND user_id = ?',
+      `${PROJECT_SELECT}
+       WHERE p.id = ? AND p.user_id = ?`,
     )
     .get(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
-  res.json({ project });
+  res.json({ project: buildProjectSummary(project) });
 };
 
 export const updateProject = (req, res) => {
@@ -98,10 +269,11 @@ export const updateProject = (req, res) => {
 
   const updated = db
     .prepare(
-      'SELECT id, name, description, created_at, updated_at FROM projects WHERE id = ?',
+      `${PROJECT_SELECT}
+       WHERE p.id = ? AND p.user_id = ?`,
     )
-    .get(req.params.id);
-  res.json({ project: updated });
+    .get(req.params.id, req.user.id);
+  res.json({ project: buildProjectSummary(updated) });
 };
 
 export const deleteProject = (req, res) => {

@@ -1,6 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
+import PropTypes from 'prop-types';
 import {
+  AlertTriangle,
+  CheckCircle2,
   Film,
+  ImageIcon,
+  LayoutGrid,
+  LoaderCircle,
   Music,
   Calendar,
   MoreVertical,
@@ -8,6 +14,7 @@ import {
   Edit,
   Plus,
   FolderOpen,
+  Share2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useProject } from '../../context/ProjectContext';
@@ -31,9 +38,172 @@ function formatRelative(dateStr) {
   });
 }
 
+const WORKFLOW_META = {
+  draft: {
+    label: 'Draft',
+    description: 'Start by adding MIDI and clips.',
+    tone: 'draft',
+  },
+  building: {
+    label: 'In Progress',
+    description: 'The arrangement and assets are taking shape.',
+    tone: 'building',
+  },
+  ready: {
+    label: 'Ready to Render',
+    description: 'This project has the core pieces for a full render.',
+    tone: 'ready',
+  },
+  rendering: {
+    label: 'Rendering',
+    description: 'A final composition is currently processing.',
+    tone: 'rendering',
+  },
+  render_failed: {
+    label: 'Render Failed',
+    description: 'The last render failed and needs another pass.',
+    tone: 'danger',
+  },
+  rendered: {
+    label: 'Rendered',
+    description: 'A final composition is available for this project.',
+    tone: 'success',
+  },
+  shared: {
+    label: 'Shared',
+    description: 'A version of this project has been published to the feed.',
+    tone: 'shared',
+  },
+};
+
+const layoutPreviewShape = PropTypes.shape({
+  columns: PropTypes.number,
+  rows: PropTypes.number,
+  items: PropTypes.arrayOf(
+    PropTypes.shape({
+      id: PropTypes.string.isRequired,
+      x: PropTypes.number.isRequired,
+      y: PropTypes.number.isRequired,
+      w: PropTypes.number.isRequired,
+      h: PropTypes.number.isRequired,
+      type: PropTypes.string,
+    }),
+  ),
+});
+
+const projectSummaryShape = PropTypes.shape({
+  clipCount: PropTypes.number,
+  hasBackground: PropTypes.bool,
+  hasMidi: PropTypes.bool,
+  layoutItemCount: PropTypes.number,
+  renderPreset: PropTypes.string,
+  renderStatus: PropTypes.string,
+  renderProgress: PropTypes.number,
+  hasRenderOutput: PropTypes.bool,
+  sharedCount: PropTypes.number,
+  hasSharedComposition: PropTypes.bool,
+  workflowStage: PropTypes.string,
+  workflowProgress: PropTypes.number,
+});
+
+const projectShape = PropTypes.shape({
+  id: PropTypes.string.isRequired,
+  name: PropTypes.string.isRequired,
+  description: PropTypes.string,
+  updated_at: PropTypes.string,
+  layoutPreview: layoutPreviewShape,
+  summary: projectSummaryShape,
+});
+
+function getProjectSummary(project) {
+  return project.summary || {};
+}
+
+function getProjectFormat(project) {
+  const summary = getProjectSummary(project);
+  return (
+    RENDER_PRESETS[summary.renderPreset] ||
+    RENDER_PRESETS[DEFAULT_RENDER_PRESET]
+  );
+}
+
+function getProjectProgress(summary) {
+  const renderProgress = Number(summary.renderProgress) || 0;
+  if (
+    summary.renderStatus === 'processing' ||
+    summary.renderStatus === 'queued'
+  ) {
+    return Math.max(8, Math.min(100, renderProgress));
+  }
+
+  return Math.max(0, Math.min(100, Number(summary.workflowProgress) || 0));
+}
+
+function getProjectStageMeta(project) {
+  const summary = getProjectSummary(project);
+  const meta = WORKFLOW_META[summary.workflowStage] || WORKFLOW_META.draft;
+
+  if (
+    summary.renderStatus === 'processing' ||
+    summary.renderStatus === 'queued'
+  ) {
+    return {
+      ...meta,
+      label: `Rendering ${Math.max(0, Number(summary.renderProgress) || 0)}%`,
+    };
+  }
+
+  return meta;
+}
+
+function ProjectThumbnailPreview({ project }) {
+  const summary = getProjectSummary(project);
+  const preview = project.layoutPreview;
+  const renderPreset = summary.renderPreset || DEFAULT_RENDER_PRESET;
+
+  return (
+    <div
+      className={`pm-card__mini-stage pm-card__mini-stage--${renderPreset}${summary.hasBackground ? ' pm-card__mini-stage--background' : ''}`}
+    >
+      {preview?.items?.length ? (
+        <div
+          className='pm-card__mini-grid'
+          style={{
+            gridTemplateColumns: `repeat(${preview.columns || 12}, minmax(0, 1fr))`,
+            gridTemplateRows: `repeat(${preview.rows || 12}, minmax(0, 1fr))`,
+          }}
+        >
+          {preview.items.map((item) => (
+            <div
+              key={item.id}
+              className={`pm-card__mini-cell pm-card__mini-cell--${item.type || 'track'}`}
+              style={{
+                gridColumn: `${item.x + 1} / span ${item.w}`,
+                gridRow: `${item.y + 1} / span ${item.h}`,
+              }}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className='pm-card__thumb-icon pm-card__thumb-icon--empty'>
+          <Film size={32} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+ProjectThumbnailPreview.propTypes = {
+  project: projectShape.isRequired,
+};
+
 function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
+  const summary = getProjectSummary(project);
+  const stageMeta = getProjectStageMeta(project);
+  const progress = getProjectProgress(summary);
+  const format = getProjectFormat(project);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -49,16 +219,20 @@ function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
       {/* Thumbnail */}
       <div className='pm-card__thumb' onClick={() => onSelect(project)}>
         <div className='pm-card__thumb-gradient' />
-        <div className='pm-card__thumb-icon'>
-          <Film size={32} />
-        </div>
+        <ProjectThumbnailPreview project={project} />
         {isSelected && (
           <div className='pm-card__thumb-badge pm-card__thumb-badge--selected'>
             ✓ Active
           </div>
         )}
+        <div
+          className={`pm-card__thumb-status pm-card__thumb-status--${stageMeta.tone}`}
+        >
+          {stageMeta.label}
+        </div>
+        <div className='pm-card__thumb-format'>{format.shortLabel}</div>
         {project.updated_at && (
-          <div className='pm-card__thumb-badge'>
+          <div className='pm-card__thumb-badge pm-card__thumb-badge--time'>
             <Calendar size={10} />
             {formatRelative(project.updated_at)}
           </div>
@@ -112,10 +286,75 @@ function ProjectCard({ project, isSelected, onSelect, onDelete, deleting }) {
             <span>{project.description}</span>
           </div>
         )}
+
+        <div className='pm-card__status-copy'>{stageMeta.description}</div>
+
+        <div className='pm-card__progress-row'>
+          <span>Project stage</span>
+          <span>{progress}%</span>
+        </div>
+        <div className='pm-card__progress'>
+          <span style={{ width: `${progress}%` }} />
+        </div>
+
+        <div className='pm-card__stats'>
+          <div className='pm-card__stat'>
+            <Film size={13} />
+            <span>{summary.clipCount || 0} clips</span>
+          </div>
+          <div className='pm-card__stat'>
+            <LayoutGrid size={13} />
+            <span>{summary.layoutItemCount || 0} tiles</span>
+          </div>
+          <div className='pm-card__stat'>
+            <Music size={13} />
+            <span>{summary.hasMidi ? 'MIDI loaded' : 'No MIDI'}</span>
+          </div>
+          <div className='pm-card__stat'>
+            <Share2 size={13} />
+            <span>
+              {summary.hasSharedComposition
+                ? `${summary.sharedCount} shared`
+                : 'Not shared'}
+            </span>
+          </div>
+        </div>
+
+        <div className='pm-card__footer'>
+          {summary.hasBackground && (
+            <span className='pm-card__pill'>
+              <ImageIcon size={12} /> Background
+            </span>
+          )}
+          {summary.hasRenderOutput && (
+            <span className='pm-card__pill pm-card__pill--success'>
+              <CheckCircle2 size={12} /> Final render
+            </span>
+          )}
+          {(summary.renderStatus === 'processing' ||
+            summary.renderStatus === 'queued') && (
+            <span className='pm-card__pill pm-card__pill--info'>
+              <LoaderCircle size={12} /> In queue
+            </span>
+          )}
+          {summary.renderStatus === 'failed' && (
+            <span className='pm-card__pill pm-card__pill--danger'>
+              <AlertTriangle size={12} /> Retry render
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
 }
+
+ProjectCard.propTypes = {
+  project: projectShape.isRequired,
+  isSelected: PropTypes.bool,
+  onSelect: PropTypes.func.isRequired,
+  onDelete: PropTypes.func.isRequired,
+  deleting: PropTypes.string,
+};
 
 export default function ProjectManager({ onContinue }) {
   const { user } = useAuth();
@@ -303,3 +542,7 @@ export default function ProjectManager({ onContinue }) {
     </div>
   );
 }
+
+ProjectManager.propTypes = {
+  onContinue: PropTypes.func,
+};

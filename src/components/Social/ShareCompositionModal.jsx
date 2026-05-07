@@ -11,6 +11,7 @@ function getToken() {
 const ShareCompositionModal = ({
   blob,
   suggestedTitle = '',
+  projectId = null,
   onClose,
   onShared,
 }) => {
@@ -102,6 +103,9 @@ const ShareCompositionModal = ({
     formData.append('video', blob, 'composition.mp4');
     formData.append('title', title.trim());
     formData.append('description', description.trim());
+    if (projectId) {
+      formData.append('projectId', projectId);
+    }
     if (thumbnailBlob) {
       const ext = thumbnailBlob.type === 'image/png' ? 'png' : 'jpg';
       formData.append('thumbnail', thumbnailBlob, `thumbnail.${ext}`);
@@ -334,6 +338,7 @@ const ShareCompositionModal = ({
 ShareCompositionModal.propTypes = {
   blob: PropTypes.instanceOf(Blob).isRequired,
   suggestedTitle: PropTypes.string,
+  projectId: PropTypes.string,
   onClose: PropTypes.func.isRequired,
   onShared: PropTypes.func,
 };

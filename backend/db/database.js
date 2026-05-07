@@ -36,6 +36,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS compositions (
     id             TEXT PRIMARY KEY,
     user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id     TEXT REFERENCES projects(id) ON DELETE SET NULL,
     title          TEXT NOT NULL,
     description    TEXT NOT NULL DEFAULT '',
     video_path     TEXT NOT NULL,
@@ -126,6 +127,14 @@ if (!compCols.includes('visibility')) {
     `CREATE INDEX IF NOT EXISTS idx_compositions_visibility ON compositions(visibility)`,
   );
 }
+if (!compCols.includes('project_id')) {
+  db.exec(
+    `ALTER TABLE compositions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL`,
+  );
+}
+db.exec(
+  `CREATE INDEX IF NOT EXISTS idx_compositions_project_id ON compositions(project_id, created_at DESC)`,
+);
 
 // Notifications table
 db.exec(`
