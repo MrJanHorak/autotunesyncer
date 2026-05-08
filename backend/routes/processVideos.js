@@ -29,11 +29,34 @@ import {
   getRenderDimensions,
   normalizeRenderPreset,
 } from '../../shared/renderPresets.js';
+import { getBillingAccess } from '../services/billingAccessService.js';
 
 // Bump when preprocessing algorithm or encoding settings change.
 const PREPROCESS_VERSION = 'v3'; // v3: stage-aware layout matching + sharper scaling/quality defaults
 
 const router = express.Router();
+const EXPORT_REQUIRED_PLAN = 'creator';
+
+const buildExportBillingState = (billingAccess) => ({
+  requiredPlan: EXPORT_REQUIRED_PLAN,
+  planKey: billingAccess.planKey,
+  isActive: billingAccess.isActive,
+  canExportProject: billingAccess.canExportProject,
+  canManageCollaboration: billingAccess.canManageCollaboration,
+});
+
+function requireCreatorPlan(ownerId, res, message) {
+  const billingAccess = getBillingAccess(ownerId);
+  if (billingAccess.canExportProject) {
+    return true;
+  }
+
+  res.status(403).json({
+    error: message,
+    billing: buildExportBillingState(billingAccess),
+  });
+  return false;
+}
 
 // Dynamic multer storage: uses project-scoped dir when auth + project middleware run first
 const storage = multer.diskStorage({
@@ -748,6 +771,18 @@ router.post(
   authenticateToken,
   requireProjectOwnership,
   (req, res, next) => {
+    if (
+      !requireCreatorPlan(
+        req.project.ownerId,
+        res,
+        'Video rendering requires the Creator plan or higher.',
+      )
+    ) {
+      return;
+    }
+    next();
+  },
+  (req, res, next) => {
     console.log('Video processing request received');
     upload.any()(req, res, (err) => {
       if (err instanceof multer.MulterError) {
@@ -791,13 +826,14 @@ router.post(
       jobId,
       status: 'queued',
       progress: 0,
-      outputPath: existingRender?.output_path || null,
+      outputPath: null,
       previousOutputPath: existingRender?.output_path || null,
       error: null,
       createdAt: Date.now(),
       startedAt: Date.now(),
       completedAt: null,
       userId: req.user.id,
+      ownerId: req.project.ownerId,
       projectId: req.project.id,
       mode: isPreview ? 'preview' : 'full',
       persistRender,
@@ -896,6 +932,15 @@ router.get('/result/:jobId', authenticateToken, (req, res) => {
   if (!job) return res.status(404).json({ error: 'Job not found' });
   if (job.userId && job.userId !== req.user.id) {
     return res.status(403).json({ error: 'Access denied' });
+  }
+  if (
+    !requireCreatorPlan(
+      job.ownerId || job.userId,
+      res,
+      'Downloading rendered videos requires the Creator plan or higher.',
+    )
+  ) {
+    return;
   }
   if (job.status === 'failed')
     return res.status(422).json({ error: job.error || 'Composition failed' });

@@ -16,6 +16,7 @@ const CompositionSection = ({
   projectName,
   projectId,
   onResetLayout,
+  onOpenBillingSettings,
 }) => {
   const [composing, setComposing] = useState(false);
   const [error, setError] = useState(null);
@@ -52,6 +53,7 @@ const CompositionSection = ({
         onStart={() => setComposing(true)}
         onComplete={() => setComposing(false)}
         onResetLayout={onResetLayout}
+        onOpenBillingSettings={onOpenBillingSettings}
       />
     </div>
   );
@@ -71,6 +73,7 @@ CompositionSection.propTypes = {
   projectName: PropTypes.string,
   projectId: PropTypes.string,
   onResetLayout: PropTypes.func,
+  onOpenBillingSettings: PropTypes.func,
 };
 
 export default CompositionSection;

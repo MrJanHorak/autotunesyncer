@@ -11,11 +11,22 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function readTimeoutMs(value, fallbackMs) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+}
+
 // Hard timeouts — long enough for real compositions, short enough to prevent infinite hangs.
-// CRITICAL: If GPU is not being used, CPU encoding is ~40-50x slower. Allow up to 60 minutes
-// for compositions with GPU issues. Monitor backend logs for "GPU NOT AVAILABLE" warnings.
-const COMPOSITION_TIMEOUT_MS = 60 * 60 * 1000; // 60 min (up from 15 min due to GPU detection issues)
-const PREPROCESS_TIMEOUT_MS = 5 * 60 * 1000; // 5 min
+// CRITICAL: If GPU is not being used, CPU encoding is ~40-50x slower. Default to 4 hours
+// and allow overriding via env so long renders are not killed at 60 minutes.
+const COMPOSITION_TIMEOUT_MS = readTimeoutMs(
+  process.env.COMPOSITION_TIMEOUT_MS,
+  4 * 60 * 60 * 1000,
+);
+const PREPROCESS_TIMEOUT_MS = readTimeoutMs(
+  process.env.PREPROCESS_TIMEOUT_MS,
+  5 * 60 * 1000,
+);
 
 /**
  * A fixed-size ring buffer for stderr.  Keeps the most recent `maxChars`

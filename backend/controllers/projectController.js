@@ -27,12 +27,35 @@ import {
   getProjectAccess,
 } from '../services/projectAccessService.js';
 import { emitProjectStateSaved } from '../services/realtimeService.js';
+import { getBillingAccess } from '../services/billingAccessService.js';
 
 const PROJECT_STATE_SCHEMA_VERSION = 2;
 const PROJECT_CARD_PREVIEW_ITEM_LIMIT = 12;
+const EXPORT_REQUIRED_PLAN = 'creator';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BASE_UPLOADS_DIR = resolve(join(__dirname, '../uploads'));
+
+const buildExportBillingState = (billingAccess) => ({
+  requiredPlan: EXPORT_REQUIRED_PLAN,
+  planKey: billingAccess.planKey,
+  isActive: billingAccess.isActive,
+  canExportProject: billingAccess.canExportProject,
+  canManageCollaboration: billingAccess.canManageCollaboration,
+});
+
+function requireCreatorPlan(ownerId, res, message) {
+  const billingAccess = getBillingAccess(ownerId);
+  if (billingAccess.canExportProject) {
+    return true;
+  }
+
+  res.status(403).json({
+    error: message,
+    billing: buildExportBillingState(billingAccess),
+  });
+  return false;
+}
 
 const PROJECT_SELECT = `
   WITH accessible_projects AS (
@@ -425,33 +448,51 @@ export const loadProjectState = (req, res) => {
   if (!project.state) {
     return res.json({
       state: null,
-      stateVersion: Number(project.stateVersion) || 1,
-      updatedAt: project.updatedAt || null,
+      stateVersion: Number(project.state_version) || 1,
+      updatedAt: project.updated_at || null,
     });
   }
 
   try {
     res.json({
       state: JSON.parse(project.state),
-      stateVersion: Number(project.stateVersion) || 1,
-      updatedAt: project.updatedAt || null,
+      stateVersion: Number(project.state_version) || 1,
+      updatedAt: project.updated_at || null,
     });
   } catch {
     res.json({
       state: null,
-      stateVersion: Number(project.stateVersion) || 1,
-      updatedAt: project.updatedAt || null,
+      stateVersion: Number(project.state_version) || 1,
+      updatedAt: project.updated_at || null,
     });
   }
 };
 
 export const getProjectRenderStatus = (req, res) => {
+  const project = getProjectAccess(req.params.id, req.user.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
   const render = getProjectRender(req.params.id, req.user.id);
   if (!render) return res.status(404).json({ error: 'Project not found' });
-  res.json({ render });
+
+  res.json({
+    render,
+    billing: buildExportBillingState(getBillingAccess(project.ownerId)),
+  });
 };
 
 export const getProjectRenderFile = (req, res) => {
+  const project = getProjectAccess(req.params.id, req.user.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (
+    !requireCreatorPlan(
+      project.ownerId,
+      res,
+      'Downloading rendered videos requires the Creator plan or higher.',
+    )
+  ) {
+    return;
+  }
+
   const render = getProjectRender(req.params.id, req.user.id);
   if (!render) return res.status(404).json({ error: 'Project not found' });
   if (!render.outputPath || !existsSync(render.outputPath)) {
@@ -500,6 +541,15 @@ const inferMimeTypeFromExt = (extension = '') => {
 export const exportProject = (req, res) => {
   const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (
+    !requireCreatorPlan(
+      project.ownerId,
+      res,
+      'Project export requires the Creator plan or higher.',
+    )
+  ) {
+    return;
+  }
 
   const clips = db
     .prepare(

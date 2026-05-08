@@ -36,6 +36,18 @@ const getLivePreviewStageDimensions = () => {
   return { width, height };
 };
 
+const DEFAULT_EXPORT_BILLING = {
+  checked: false,
+  requiredPlan: 'creator',
+  canExportProject: true,
+};
+
+const normalizeExportBilling = (billing) => ({
+  checked: true,
+  requiredPlan: billing?.requiredPlan || 'creator',
+  canExportProject: billing?.canExportProject !== false,
+});
+
 const VideoComposer = ({
   videoFiles,
   midiData,
@@ -53,6 +65,7 @@ const VideoComposer = ({
   onStart = null,
   onComplete = null,
   onResetLayout = null,
+  onOpenBillingSettings = null,
 }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingMode, setProcessingMode] = useState(null);
@@ -61,8 +74,13 @@ const VideoComposer = ({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
   const [error, setError] = useState(null);
+  const [exportBilling, setExportBilling] = useState(DEFAULT_EXPORT_BILLING);
   const timerRef = useRef(null);
   const abortRef = useRef(null);
+  const onProgressRef = useRef(onProgress);
+  const onErrorRef = useRef(onError);
+  const onStartRef = useRef(onStart);
+  const onCompleteRef = useRef(onComplete);
   // Track the current blob URL in a ref so cleanup is always unmount-only (not
   // triggered by every state change) and the old URL is revoked before replacement.
   const composedVideoUrlRef = useRef(null);
@@ -208,6 +226,16 @@ const VideoComposer = ({
   ]);
 
   const canCompose = validationErrors.length === 0;
+  const exportLocked =
+    exportBilling.checked && exportBilling.canExportProject === false;
+  const canStartComposition = canCompose && !exportLocked;
+
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+    onErrorRef.current = onError;
+    onStartRef.current = onStart;
+    onCompleteRef.current = onComplete;
+  }, [onComplete, onError, onProgress, onStart]);
 
   useEffect(() => {
     let cancelled = false;
@@ -216,6 +244,7 @@ const VideoComposer = ({
 
     resetTrackedRenderState();
     clearComposedVideo();
+    setExportBilling(DEFAULT_EXPORT_BILLING);
 
     if (!projectId) {
       return () => {
@@ -226,10 +255,17 @@ const VideoComposer = ({
 
     const hydrateProjectRender = async () => {
       try {
-        const { render } = await fetchProjectRenderStatus(projectId);
-        if (cancelled || !render) return;
+        const { render, billing } = await fetchProjectRenderStatus(projectId);
+        if (cancelled) return;
 
-        if (render.hasOutput) {
+        setExportBilling(normalizeExportBilling(billing));
+
+        if (!render) return;
+
+        const hasActiveRender =
+          ['queued', 'processing'].includes(render.status) && !!render.jobId;
+
+        if (render.hasOutput && !hasActiveRender) {
           try {
             const savedBlob = await fetchProjectRenderFile(projectId);
             if (!cancelled) {
@@ -243,10 +279,7 @@ const VideoComposer = ({
           }
         }
 
-        if (
-          !['queued', 'processing'].includes(render.status) ||
-          !render.jobId
-        ) {
+        if (!hasActiveRender) {
           if (render.status === 'failed' && render.error && !cancelled) {
             setError(render.error);
           }
@@ -255,7 +288,7 @@ const VideoComposer = ({
 
         reconnectingJob = true;
         lastModeRef.current = false;
-        onStart?.();
+  onStartRef.current?.();
         setIsProcessing(true);
         setProcessingMode('full');
         setUploadProgress(100);
@@ -280,7 +313,7 @@ const VideoComposer = ({
             if (cancelled) return;
             setUploadProgress(100);
             setRenderProgress(pct);
-            onProgress?.(pct);
+            onProgressRef.current?.(pct);
           },
           reconnectController.signal,
         );
@@ -290,7 +323,7 @@ const VideoComposer = ({
         setUploadProgress(100);
         setRenderProgress(100);
         setError(null);
-        onComplete?.();
+        onCompleteRef.current?.();
       } catch (err) {
         if (cancelled || err?.name === 'AbortError') return;
         console.warn('[VideoComposer] Failed to hydrate render state:', err);
@@ -322,9 +355,6 @@ const VideoComposer = ({
   }, [
     applyComposedBlob,
     clearComposedVideo,
-    onComplete,
-    onProgress,
-    onStart,
     projectId,
     resetTrackedRenderState,
     startElapsedTimer,
@@ -346,6 +376,10 @@ const VideoComposer = ({
 
   const startComposition = async (isPreview = false) => {
     if (isProcessing) return;
+    if (exportLocked) {
+      setError('Video rendering requires the Creator plan or higher.');
+      return;
+    }
     if (!canCompose) {
       setError(validationErrors.join(' '));
       return;
@@ -355,9 +389,10 @@ const VideoComposer = ({
     const abort = new AbortController();
     abortRef.current = abort;
     lastModeRef.current = isPreview;
+    clearComposedVideo();
 
     console.log('Grid arrangement:', normalizedGridArrangement);
-    onStart?.();
+    onStartRef.current?.();
     setIsProcessing(true);
     setProcessingMode(isPreview ? 'preview' : 'full');
     setUploadProgress(0);
@@ -441,20 +476,27 @@ const VideoComposer = ({
         jobId,
         (pct) => {
           setRenderProgress(pct);
-          onProgress?.(pct);
+          onProgressRef.current?.(pct);
         },
         abort.signal,
       );
 
       applyComposedBlob(blob);
-      onComplete?.();
+      onCompleteRef.current?.();
     } catch (err) {
       // AbortError = user hit Cancel; don't surface as an error
       if (err?.name === 'AbortError') return;
       console.error('Composition failed:', err);
       const normalizedErr = err instanceof Error ? err : new Error(String(err));
+      if (/Creator plan or higher/i.test(normalizedErr.message)) {
+        setExportBilling({
+          checked: true,
+          requiredPlan: 'creator',
+          canExportProject: false,
+        });
+      }
       setError(normalizedErr.message);
-      onError?.(normalizedErr);
+      onErrorRef.current?.(normalizedErr);
     } finally {
       clearInterval(timerRef.current);
       timerRef.current = null;
@@ -481,9 +523,13 @@ const VideoComposer = ({
         <div className='composition-actions'>
           <button
             onClick={() => startComposition(true)}
-            disabled={isProcessing || !canCompose}
+            disabled={isProcessing || !canStartComposition}
             className='composition-btn composition-btn--preview'
-            title='Generate fast preview at lower quality'
+            title={
+              exportLocked
+                ? 'Creator plan required to render previews'
+                : 'Generate fast preview at lower quality'
+            }
           >
             <span className='composition-btn__icon'>⚡</span>
             <span className='composition-btn__text'>
@@ -494,9 +540,13 @@ const VideoComposer = ({
           </button>
           <button
             onClick={() => startComposition(false)}
-            disabled={isProcessing || !canCompose}
+            disabled={isProcessing || !canStartComposition}
             className='composition-btn composition-btn--full'
-            title='Render full high-quality composition'
+            title={
+              exportLocked
+                ? 'Creator plan required to render full compositions'
+                : 'Render full high-quality composition'
+            }
           >
             <span className='composition-btn__icon'>✓</span>
             <span className='composition-btn__text'>
@@ -645,7 +695,24 @@ const VideoComposer = ({
           </div>
         )}
 
-        {!canCompose && !error && (
+        {exportLocked && !error && (
+          <div className='composition-warning composition-warning--billing'>
+            <span>
+              Video rendering and downloads require the Creator plan or higher.
+            </span>
+            {onOpenBillingSettings && (
+              <button
+                type='button'
+                onClick={onOpenBillingSettings}
+                className='composition-warning__action'
+              >
+                Open Billing
+              </button>
+            )}
+          </div>
+        )}
+
+        {!canCompose && !error && !exportLocked && (
           <div className='composition-warning'>
             {validationErrors.join(' ')}
           </div>
@@ -656,6 +723,7 @@ const VideoComposer = ({
         <div className='mt-4'>
           <div style={{ maxWidth: '800px', margin: '0 auto' }}>
             <video
+              key={composedVideoUrl}
               src={composedVideoUrl}
               controls
               style={{

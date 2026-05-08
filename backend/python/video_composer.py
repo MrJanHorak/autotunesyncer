@@ -1081,14 +1081,14 @@ class VideoComposer:
 
     def debug_midi_track_timing(self, midi_data):
         """Debug function to print detailed note timing for all tracks"""
-        logging.info("\n=== DETAILED MIDI NOTE TIMING ===")
+        logging.debug("\n=== DETAILED MIDI NOTE TIMING ===")
         
         for track_idx, track in enumerate(midi_data['tracks']):
             instrument = track.get('instrument', {}).get('name', f'Unknown-{track_idx}')
             notes = track.get('notes', [])
             
             if not notes:
-                logging.info(f"Track {track_idx} ({instrument}): NO NOTES")
+                logging.debug(f"Track {track_idx} ({instrument}): NO NOTES")
                 continue
                 
             # Sort notes by time
@@ -1096,15 +1096,15 @@ class VideoComposer:
             first_time = float(sorted_notes[0].get('time', 0))
             last_time = float(sorted_notes[-1].get('time', 0))
             
-            logging.info(f"Track {track_idx} ({instrument}): {len(notes)} notes")
-            logging.info(f"  Time range: {first_time:.2f}s to {last_time:.2f}s")
+            logging.debug(f"Track {track_idx} ({instrument}): {len(notes)} notes")
+            logging.debug(f"  Time range: {first_time:.2f}s to {last_time:.2f}s")
             # FIX: Use double quotes for inner dictionary keys
             note_times = [f"{float(n.get('time', 0)):.2f}s" for n in sorted_notes[:5]]
-            logging.info(f"  First 5 notes: {', '.join(note_times)}")
+            logging.debug(f"  First 5 notes: {', '.join(note_times)}")
 
     def _analyze_midi_timing(self):
         """Analyze and log detailed timing information for all tracks"""
-        logging.info("\n=== DETAILED MIDI TIMING ANALYSIS ===")
+        logging.debug("\n=== DETAILED MIDI TIMING ANALYSIS ===")
         
         # Analyze each track
         for track_id, track in self.tracks.items():
@@ -1141,20 +1141,20 @@ class VideoComposer:
                 notes_by_chunk[chunk_idx] = len(chunk_notes)
             
             # Log detailed timing info for this track
-            logging.info(f"\nTrack {track_id}: {instrument_name}")
-            logging.info(f"  Total notes: {note_count}")
-            logging.info(f"  Time range: {first_note_time:.2f}s to {last_note_time:.2f}s (duration: {total_duration:.2f}s)")
-            logging.info(f"  Chunks: {first_chunk} to {last_chunk} (spans {chunk_count} chunks)")
+            logging.debug(f"\nTrack {track_id}: {instrument_name}")
+            logging.debug(f"  Total notes: {note_count}")
+            logging.debug(f"  Time range: {first_note_time:.2f}s to {last_note_time:.2f}s (duration: {total_duration:.2f}s)")
+            logging.debug(f"  Chunks: {first_chunk} to {last_chunk} (spans {chunk_count} chunks)")
             
             # Log distribution of notes per chunk
             chunk_log = "  Notes per chunk: "
             for chunk_idx, count in sorted(notes_by_chunk.items()):
                 chunk_log += f"[{chunk_idx}:{count}] "
-            logging.info(chunk_log)
+            logging.debug(chunk_log)
             
             # Log first 5 note times for verification
             note_times = [float(note.get('time', 0)) for note in sorted_notes[:5]]
-            logging.info(f"  First 5 note times: {', '.join([f'{t:.2f}s' for t in note_times])}")
+            logging.debug(f"  First 5 note times: {', '.join([f'{t:.2f}s' for t in note_times])}")
             
             # # For piano track specifically, log more details
             # if 'piano' in instrument_name.lower():
@@ -1547,7 +1547,7 @@ class VideoComposer:
                     safe_onset = min(onset_base, max_start)
                 if safe_onset < 0.0:
                     safe_onset = 0.0
-                logging.info(
+                logging.debug(
                     f"[NoteTrigger] {track_name} note {i}: onset_base={onset_base:.3f}s, "
                     f"safe_onset={safe_onset:.3f}s, audio_dur={audio_dur:.3f}s, "
                     f"video_dur={video_dur:.3f}s"
@@ -2223,7 +2223,7 @@ class VideoComposer:
         if (normalized_name in self._tuned_videos_cache and 
             midi_note in self._tuned_videos_cache[normalized_name]):
             tuned_path = self._tuned_videos_cache[normalized_name][midi_note]
-            logging.info(f"✅ INSTANT retrieval: {instrument_name} → MIDI {midi_note}")
+            logging.debug(f"✅ INSTANT retrieval: {instrument_name} → MIDI {midi_note}")
             return tuned_path
         
         # Fallback: create on-demand if not preprocessed (shouldn't happen with proper preprocessing)
@@ -5853,15 +5853,15 @@ class VideoComposer:
             elif title_has_bg:
                 box_color = self._hex_to_ffmpeg_color(title_bg)
                 if pos == 'bottom-center':
-                    box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.72', 'w*0.68', 'h*0.18'
+                    box_x, box_y, box_w, box_h = 'iw*0.16', 'ih*0.72', 'iw*0.68', 'ih*0.18'
                     title_y = 'h*0.765'
                     tag_y = 'h*0.835'
                 elif pos == 'center':
-                    box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.39', 'w*0.68', 'h*0.22'
+                    box_x, box_y, box_w, box_h = 'iw*0.16', 'ih*0.39', 'iw*0.68', 'ih*0.22'
                     title_y = 'h*0.455'
                     tag_y = 'h*0.53'
                 else:
-                    box_x, box_y, box_w, box_h = 'w*0.16', 'h*0.04', 'w*0.68', 'h*0.18'
+                    box_x, box_y, box_w, box_h = 'iw*0.16', 'ih*0.04', 'iw*0.68', 'ih*0.18'
                     title_y = 'h*0.095'
                     tag_y = 'h*0.16'
                 nxt = f'v_to_{len(filter_parts)}'
@@ -6024,13 +6024,17 @@ class VideoComposer:
                     f"max(0,1-(t-{tagline_fade_out_start:.3f})/{max(tagline_fade_out, 0.001):.3f}))"
                 )
             tagline_alpha = f"({alpha_in})*({alpha_out})"
-            container_w = f'w*{tagline_width_pct / 100.0:.4f}'
+            container_w_text = f'w*{tagline_width_pct / 100.0:.4f}'
+            container_w_box = f'iw*{tagline_width_pct / 100.0:.4f}'
             if tagline_position == 'bottom-left':
-                container_x = '14'
+                container_x_text = '14'
+                container_x_box = '14'
             elif tagline_position == 'bottom-right':
-                container_x = f'w-{container_w}-14'
+                container_x_text = f'w-{container_w_text}-14'
+                container_x_box = f'iw-{container_w_box}-14'
             else:
-                container_x = f'(w-{container_w})/2'
+                container_x_text = f'(w-{container_w_text})/2'
+                container_x_box = f'(iw-{container_w_box})/2'
             top_padding = max(8, size // 3)
             text_inset = 18
             if tagline_bg_enabled:
@@ -6047,19 +6051,20 @@ class VideoComposer:
                 elif tagline_shape == 'accent-left':
                     text_inset = 22
 
-                box_y = f'h-{size * 2 + 28 + tagline_vertical_offset:.3f}'
+                box_y_text = f'h-{size * 2 + 28 + tagline_vertical_offset:.3f}'
+                box_y_box = f'ih-{size * 2 + 28 + tagline_vertical_offset:.3f}'
                 box_h = f'{box_height_px:.3f}'
-                text_y = f'{box_y}+{top_padding}'
+                text_y = f'{box_y_text}+{top_padding}'
             else:
-                box_y = None
+                box_y_box = None
                 box_h = None
                 text_y = f'h-{size + 18 + tagline_vertical_offset:.3f}'
             if tagline_alignment == 'left':
-                text_x = f'{container_x}+{text_inset}'
+                text_x = f'{container_x_text}+{text_inset}'
             elif tagline_alignment == 'right':
-                text_x = f'{container_x}+{container_w}-text_w-{text_inset}'
+                text_x = f'{container_x_text}+{container_w_text}-text_w-{text_inset}'
             else:
-                text_x = f'{container_x}+({container_w}-text_w)/2'
+                text_x = f'{container_x_text}+({container_w_text}-text_w)/2'
 
             tagline_draw_alpha = tagline_alpha
             if beat_sync_enabled and 'tagline' in beat_sync_targets:
@@ -6072,29 +6077,29 @@ class VideoComposer:
             if tagline_bg_enabled:
                 nxt = f'v_to_{len(filter_parts)}'
                 filter_parts.append(
-                    f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h={box_h}"
+                    f"[{current_label}]drawbox=x={container_x_box}:y={box_y_box}:w={container_w_box}:h={box_h}"
                     f":color={tagline_bg}@{tagline_bg_opacity:.3f}:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                 )
                 current_label = nxt
                 nxt = f'v_to_{len(filter_parts)}'
                 if tagline_shape == 'accent-left':
                     filter_parts.append(
-                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w=4:h={box_h}"
+                        f"[{current_label}]drawbox=x={container_x_box}:y={box_y_box}:w=4:h={box_h}"
                         f":color={tagline_accent}@1.0:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                     )
                 elif tagline_shape == 'outline':
                     filter_parts.append(
-                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h={box_h}"
+                        f"[{current_label}]drawbox=x={container_x_box}:y={box_y_box}:w={container_w_box}:h={box_h}"
                         f":color={tagline_accent}@0.9:t=2:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                     )
                 elif tagline_shape != 'pill':
                     filter_parts.append(
-                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h=4"
+                        f"[{current_label}]drawbox=x={container_x_box}:y={box_y_box}:w={container_w_box}:h=4"
                         f":color={tagline_accent}@1.0:t=fill:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                     )
                 else:
                     filter_parts.append(
-                        f"[{current_label}]drawbox=x={container_x}:y={box_y}:w={container_w}:h={box_h}"
+                        f"[{current_label}]drawbox=x={container_x_box}:y={box_y_box}:w={container_w_box}:h={box_h}"
                         f":color={tagline_accent}@0.55:t=1:enable='gte(t,{tagline_start:.3f})'[{nxt}]"
                     )
                 current_label = nxt

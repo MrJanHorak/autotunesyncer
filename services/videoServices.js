@@ -275,7 +275,13 @@ export const startCompositionJob = (formData, progressCallbacks = {}) => {
 };
 
 const POLL_INTERVAL_MS = 3000;
-const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_POLL_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const POLL_TIMEOUT_MS = (() => {
+  const configured = Number(import.meta.env.VITE_COMPOSITION_POLL_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_POLL_TIMEOUT_MS;
+})();
 
 /**
  * Poll a composition job until it completes, then download the result blob.
@@ -289,7 +295,11 @@ export const pollCompositionJob = (jobId, onProgress) => {
 
     const poll = () => {
       if (Date.now() - startTime > POLL_TIMEOUT_MS) {
-        reject(new Error('Composition timed out after 30 minutes'));
+        reject(
+          new Error(
+            `Composition timed out after ${Math.round(POLL_TIMEOUT_MS / 60000)} minutes`,
+          ),
+        );
         return;
       }
 

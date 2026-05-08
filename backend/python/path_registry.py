@@ -81,7 +81,7 @@ class PathRegistry:
             self._cache.set(f"drum:{norm_name}", file_path)
             self._stats['registrations'] += 1
             
-            logging.info(f"Registered drum path: {norm_name} -> {file_path}")
+            logging.debug(f"Registered drum path: {norm_name} -> {file_path}")
             return True
         
     def register_instrument(self, instrument_name: str, note: str, file_path: str, validate: bool = True) -> bool:
@@ -100,7 +100,7 @@ class PathRegistry:
             self._cache.set(f"instrument:{norm_name}:{note}", file_path)
             self._stats['registrations'] += 1
             
-            logging.info(f"Registered instrument path: {norm_name}:{note} -> {file_path}")
+            logging.debug(f"Registered instrument path: {norm_name}:{note} -> {file_path}")
             return True
     
     def register_track_directory(self, track_id: str, directory_path: str) -> bool:
@@ -423,20 +423,20 @@ class PathRegistry:
     
     def debug_dump(self):
         """Debug method to dump all registered paths"""
-        logging.info("=== PATH REGISTRY DEBUG DUMP ===")
-        logging.info(f"Drum paths ({len(self.drum_paths)}):")
+        logging.debug("=== PATH REGISTRY DEBUG DUMP ===")
+        logging.debug(f"Drum paths ({len(self.drum_paths)}):")
         for name, path in self.drum_paths.items():
-            logging.info(f"  {name} -> {path}")
+            logging.debug(f"  {name} -> {path}")
         
-        logging.info(f"Instrument paths ({sum(len(notes) for notes in self.instrument_paths.values())} total):")
+        logging.debug(f"Instrument paths ({sum(len(notes) for notes in self.instrument_paths.values())} total):")
         for instrument, notes in self.instrument_paths.items():
-            logging.info(f"  {instrument}:")
+            logging.debug(f"  {instrument}:")
             for note, path in notes.items():
-                logging.info(f"    note_{note} -> {path}")
+                logging.debug(f"    note_{note} -> {path}")
         
-        logging.info(f"Track paths ({len(self.track_paths)}):")
+        logging.debug(f"Track paths ({len(self.track_paths)}):")
         for track_id, path in self.track_paths.items():
-            logging.info(f"  {track_id} -> {path}")
+            logging.debug(f"  {track_id} -> {path}")
         
         stats = self.get_stats()
         logging.info(f"Registry stats: {stats}")

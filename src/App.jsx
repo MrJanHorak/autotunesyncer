@@ -602,6 +602,7 @@ function App() {
         {overlays}
         <MainApp
           onChangeProject={() => selectProject(null)}
+          onOpenSettings={handleOpenSettings}
           onLogout={logout}
         />
       </div>
@@ -609,7 +610,7 @@ function App() {
   }
 }
 
-function MainApp({ onChangeProject, onLogout }) {
+function MainApp({ onChangeProject, onOpenSettings, onLogout }) {
   const { user, token } = useAuth();
   const {
     currentProject,
@@ -1139,11 +1140,14 @@ function MainApp({ onChangeProject, onLogout }) {
     try {
       await downloadProjectExport(currentProject.id, currentProject.name);
     } catch (err) {
+      if (/Creator plan or higher/i.test(err.message)) {
+        onOpenSettings('billing');
+      }
       alert(`Export failed: ${err.message}`);
     } finally {
       setExportLoading(false);
     }
-  }, [currentProject]);
+  }, [currentProject, onOpenSettings]);
 
   const handleImport = useCallback(
     async (e) => {
@@ -1369,6 +1373,7 @@ function MainApp({ onChangeProject, onLogout }) {
                   projectName={currentProject?.name || ''}
                   projectId={currentProject?.id || null}
                   onResetLayout={() => setGridArrangement({})}
+                  onOpenBillingSettings={() => onOpenSettings('billing')}
                 />
               )}
             </>
@@ -1427,6 +1432,7 @@ function MainApp({ onChangeProject, onLogout }) {
 
 MainApp.propTypes = {
   onChangeProject: PropTypes.func.isRequired,
+  onOpenSettings: PropTypes.func.isRequired,
   onLogout: PropTypes.func.isRequired,
 };
 

@@ -436,6 +436,12 @@ export const getBillingStatus = async (req, res) => {
           canExportProject: billingAccess.canExportProject,
           canManageCollaboration: billingAccess.canManageCollaboration,
         },
+        bypass: billingAccess.hasBypass
+          ? {
+              active: true,
+              reason: billingAccess.bypassReason,
+            }
+          : null,
         plans: getPlanCatalog(),
       },
     });
