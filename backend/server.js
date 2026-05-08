@@ -15,11 +15,15 @@ import authRoutes from './routes/authRoutes.js';
 import projectRoutes from './routes/projectRoutes.js';
 import socialRoutes from './routes/socialRoutes.js';
 import shareRoutes from './routes/shareRoutes.js';
+import { initRealtime } from './services/realtimeService.js';
 
 const app = express();
 
 // Attach a unique ID to every request for log correlation
-app.use((req, _, next) => { req.id = crypto.randomUUID(); next(); });
+app.use((req, _, next) => {
+  req.id = crypto.randomUUID();
+  next();
+});
 
 // Body parser: keep a modest global limit (all large payloads use multipart/FormData, not JSON).
 // 10 MB is plenty for MIDI metadata and API calls.
@@ -37,9 +41,15 @@ app.use((req, res, next) => {
 
 // Enable CORS — origins are loaded from ALLOWED_ORIGINS env var (comma-separated).
 // Falls back to the standard local dev ports if the var is not set.
-const defaultOrigins = ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:4173'];
+const defaultOrigins = [
+  'http://localhost:5173',
+  'http://localhost:8080',
+  'http://localhost:4173',
+];
 const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+  ? process.env.ALLOWED_ORIGINS.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
   : defaultOrigins;
 app.use(
   cors({
@@ -55,7 +65,7 @@ app.use(
     allowedHeaders: ['Content-Type', 'Content-Disposition', 'Authorization'],
     maxAge: 600,
     exposedHeaders: ['Content-Length', 'Content-Type', 'Content-Disposition'],
-  })
+  }),
 );
 
 // Serve published compositions as static files (public, intentionally shareable)
@@ -108,6 +118,8 @@ const server = app.listen(3000, () => {
   console.log('Server running on port 3000');
 });
 
+initRealtime(server, { allowedOrigins });
+
 // Recursively clean up processed_* files in uploads/ (including user/project subdirs) older than 7 days
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const uploadsDir = join(__dirname, 'uploads');
@@ -139,7 +151,10 @@ function cleanUploadsDir(dir) {
 
 function cleanUploads() {
   const removed = cleanUploadsDir(uploadsDir);
-  if (removed > 0) console.log(`[TTL cleanup] Removed ${removed} stale processed_ file(s) from uploads/`);
+  if (removed > 0)
+    console.log(
+      `[TTL cleanup] Removed ${removed} stale processed_ file(s) from uploads/`,
+    );
 }
 
 cleanUploads();
@@ -168,4 +183,4 @@ async function gracefulShutdown(signal) {
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

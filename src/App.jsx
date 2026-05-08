@@ -2,6 +2,7 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
 import PropTypes from 'prop-types';
 import {
+  AlertTriangle,
   Film,
   Music,
   Grid3x3,
@@ -14,6 +15,8 @@ import {
   Upload,
   Undo2,
   Redo2,
+  RefreshCw,
+  Users,
 } from 'lucide-react';
 
 import { isDrumTrack, DRUM_NOTES, getNoteGroup } from './js/drumUtils';
@@ -22,6 +25,7 @@ import {
   DEFAULT_CLIP_STYLE,
 } from './js/styleDefaults';
 import { DEFAULT_RENDER_PRESET } from '../shared/renderPresets.js';
+import { normalizeGridArrangement } from '../shared/gridLayout.js';
 import InstrumentList from './components/InstrumentList/InstrumentList';
 import InstrumentSidebar from './components/InstrumentSidebar/InstrumentSidebar';
 import RecordingModal from './components/RecordingModal/RecordingModal';
@@ -33,6 +37,7 @@ import { useAuth } from './context/AuthContext';
 import { useProject } from './context/ProjectContext';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import { useProjectSync } from './hooks/useProjectSync';
+import { useProjectRealtime } from './hooks/useProjectRealtime';
 import {
   configureApiService,
   apiFetch,
@@ -549,7 +554,14 @@ function App() {
 }
 
 function MainApp({ onChangeProject, onLogout }) {
-  const { currentProject, saveProjectState, loadProjectState } = useProject();
+  const { user, token } = useAuth();
+  const {
+    currentProject,
+    currentProjectStateVersion,
+    realtimeClientId,
+    saveProjectState,
+    loadProjectState,
+  } = useProject();
   const {
     // parsedMidiData,
     instruments,
@@ -594,35 +606,101 @@ function MainApp({ onChangeProject, onLogout }) {
   const [recordingTarget, setRecordingTarget] = useState(null);
   // Preview playback state — synced to grid video overlays
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [remoteProjectUpdate, setRemoteProjectUpdate] = useState(null);
+  const [reloadingRemoteState, setReloadingRemoteState] = useState(false);
 
   // Track which instrument keys have already been queued for pre-caching
   // so we don't send duplicate requests on every re-render.
   const precachedKeysRef = useRef(new Set());
 
   // Project-scoped persistence: clip list, blob cache, state restore & save
-  const { savedClipKeys, setSavedClipKeys, clipBlobCache } = useProjectSync({
-    currentProject,
-    instruments,
-    midiFile,
-    gridArrangement,
-    trackVolumes,
-    renderPreset,
-    compositionStyle,
-    clipStyles,
-    loadProjectState,
-    saveProjectState,
-    toInstrumentKey,
-    precachedKeysRef,
-    setMidiFile,
-    setGridArrangement,
-    setTrackVolumes,
-    setRenderPreset,
-    setCompositionStyle,
-    setClipStyles,
-    setVideoFiles,
-    setInstrumentVideos,
-    setBackgroundAsset,
+  const handleProjectConflict = useCallback((conflictError) => {
+    setRemoteProjectUpdate((prev) => {
+      const nextVersion = Number(conflictError?.currentStateVersion) || 0;
+      if ((prev?.stateVersion || 0) >= nextVersion) {
+        return prev;
+      }
+
+      return {
+        type: 'conflict',
+        message:
+          conflictError?.message ||
+          'A newer collaborator save is available for this project.',
+        actorUsername: null,
+        stateVersion: nextVersion,
+      };
+    });
+  }, []);
+
+  const { savedClipKeys, setSavedClipKeys, clipBlobCache, reloadProjectState } =
+    useProjectSync({
+      currentProject,
+      instruments,
+      midiFile,
+      gridArrangement,
+      trackVolumes,
+      renderPreset,
+      compositionStyle,
+      clipStyles,
+      loadProjectState,
+      saveProjectState,
+      toInstrumentKey,
+      precachedKeysRef,
+      setMidiFile,
+      setGridArrangement,
+      setTrackVolumes,
+      setRenderPreset,
+      setCompositionStyle,
+      setClipStyles,
+      setVideoFiles,
+      setInstrumentVideos,
+      setBackgroundAsset,
+      onProjectConflict: handleProjectConflict,
+    });
+
+  const handleRemoteStateSaved = useCallback(
+    (payload) => {
+      if (payload?.clientId && payload.clientId === realtimeClientId) {
+        return;
+      }
+
+      const nextVersion = Number(payload?.stateVersion) || 0;
+      if (nextVersion <= Number(currentProjectStateVersion || 0)) {
+        return;
+      }
+
+      setRemoteProjectUpdate((prev) => {
+        if ((prev?.stateVersion || 0) >= nextVersion) {
+          return prev;
+        }
+
+        return {
+          type: 'remote-save',
+          message: payload?.actor?.username
+            ? `@${payload.actor.username} saved a newer version of this project.`
+            : 'A newer collaborator save is available for this project.',
+          actorUsername: payload?.actor?.username || null,
+          stateVersion: nextVersion,
+          updatedAt: payload?.updatedAt || null,
+        };
+      });
+    },
+    [currentProjectStateVersion, realtimeClientId],
+  );
+
+  const { presenceUsers, connectionState } = useProjectRealtime({
+    token,
+    currentProjectId: currentProject?.id,
+    onRemoteStateSaved: handleRemoteStateSaved,
   });
+
+  const otherLiveCollaborators = presenceUsers.filter(
+    (presenceUser) => presenceUser.id !== user?.id,
+  );
+
+  useEffect(() => {
+    setRemoteProjectUpdate(null);
+  }, [currentProject?.id]);
 
   useEffect(
     () => () => {
@@ -715,6 +793,30 @@ function MainApp({ onChangeProject, onLogout }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
+
+  const handleReloadLatestProjectState = useCallback(async () => {
+    setReloadingRemoteState(true);
+
+    try {
+      const state = await reloadProjectState();
+      setRemoteProjectUpdate(null);
+      resetHistory({
+        gridArrangement: normalizeGridArrangement(state?.gridArrangement),
+        compositionStyle: {
+          ...DEFAULT_COMPOSITION_STYLE,
+          ...(state?.compositionStyle || {}),
+        },
+        clipStyles: state?.clipStyles || {},
+        trackVolumes: state?.trackVolumes || {},
+        muteStates,
+        soloTrack,
+      });
+    } catch (err) {
+      console.warn('[collab] Failed to reload latest project state:', err);
+    } finally {
+      setReloadingRemoteState(false);
+    }
+  }, [muteStates, reloadProjectState, resetHistory, soloTrack]);
 
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -1023,6 +1125,56 @@ function MainApp({ onChangeProject, onLogout }) {
         ) : (
           <MidiUploader onMidiProcessed={handleMidiProcessed} compact />
         )}
+
+        {currentProject && (
+          <div
+            className={`editor-topbar__presence-pill editor-topbar__presence-pill--${connectionState}`}
+            title={
+              otherLiveCollaborators.length > 0
+                ? otherLiveCollaborators
+                    .map((presenceUser) => `@${presenceUser.username}`)
+                    .join(', ')
+                : 'No other collaborators are currently in this project.'
+            }
+          >
+            <Users size={14} />
+            <span>
+              {otherLiveCollaborators.length > 0
+                ? `${otherLiveCollaborators.length} collaborator${otherLiveCollaborators.length === 1 ? '' : 's'} live`
+                : connectionState === 'connected'
+                  ? 'Solo editing'
+                  : 'Live sync offline'}
+            </span>
+          </div>
+        )}
+
+        {remoteProjectUpdate && (
+          <div className='editor-topbar__notice' role='status'>
+            <div className='editor-topbar__notice-copy'>
+              <AlertTriangle size={14} />
+              <span>{remoteProjectUpdate.message}</span>
+            </div>
+            <div className='editor-topbar__notice-actions'>
+              <button
+                type='button'
+                className='editor-topbar__btn editor-topbar__btn--notice'
+                onClick={handleReloadLatestProjectState}
+                disabled={reloadingRemoteState}
+              >
+                <RefreshCw size={14} />
+                {reloadingRemoteState ? 'Reloading…' : 'Reload latest'}
+              </button>
+              <button
+                type='button'
+                className='editor-topbar__btn'
+                onClick={() => setRemoteProjectUpdate(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className='editor-topbar__spacer' />
 
         {/* Undo / Redo */}

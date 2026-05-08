@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   DEFAULT_COMPOSITION_STYLE,
   DEFAULT_CLIP_STYLE,
@@ -63,6 +63,7 @@ export function useProjectSync({
   setVideoFiles,
   setInstrumentVideos,
   setBackgroundAsset,
+  onProjectConflict,
 }) {
   const [savedClipKeys, setSavedClipKeys] = useState(new Set());
   const clipBlobCache = useRef({});
@@ -70,6 +71,140 @@ export function useProjectSync({
   const saveArrangementTimeoutRef = useRef(null);
   // In-memory shadow of the last saved project state — avoids GET-before-POST on every save
   const shadowStateRef = useRef(null);
+  const suspendPersistenceUntilRef = useRef(0);
+
+  const suspendPersistence = useCallback((durationMs = 1500) => {
+    suspendPersistenceUntilRef.current = Date.now() + durationMs;
+  }, []);
+
+  const isPersistenceSuspended = useCallback(
+    () => Date.now() < suspendPersistenceUntilRef.current,
+    [],
+  );
+
+  const applyLoadedState = useCallback(
+    async (state, version) => {
+      suspendPersistence();
+      shadowStateRef.current = state || {};
+
+      const stateSchemaVersion = Number(state?.schemaVersion || 0);
+      setRenderPreset(normalizeRenderPreset(state?.renderPreset));
+
+      if (state?.midiFileBase64) {
+        const [header, data] = state.midiFileBase64.split(',');
+        const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
+        const bytes = atob(data);
+        const arr = new Uint8Array(bytes.length);
+        for (let index = 0; index < bytes.length; index += 1) {
+          arr[index] = bytes.charCodeAt(index);
+        }
+        const file = new File([arr], state.midiFileName || 'project.mid', {
+          type: mime,
+        });
+        setMidiFile(file);
+      } else {
+        setMidiFile(null);
+      }
+
+      if (hasGridArrangement(state?.gridArrangement)) {
+        setGridArrangement(normalizeGridArrangement(state.gridArrangement));
+      } else {
+        setGridArrangement({});
+      }
+
+      setTrackVolumes(
+        state?.trackVolumes && Object.keys(state.trackVolumes).length > 0
+          ? state.trackVolumes
+          : {},
+      );
+
+      setCompositionStyle({
+        ...DEFAULT_COMPOSITION_STYLE,
+        ...(state?.compositionStyle || {}),
+      });
+
+      const savedBackground = state?.compositionStyle?.backgroundMedia;
+      const backgroundMode = state?.compositionStyle?.backgroundMode;
+      if (
+        savedBackground?.saved &&
+        backgroundMode &&
+        backgroundMode !== 'color'
+      ) {
+        try {
+          const blob = await fetchProjectBackgroundFile(currentProject.id);
+          if (!blob || clipsLoadingVersion.current !== version) return state;
+          setBackgroundAsset({
+            blob,
+            url: URL.createObjectURL(blob),
+            kind:
+              savedBackground.kind ||
+              (blob.type.startsWith('video/') ? 'video' : 'image'),
+            mimeType: savedBackground.mimeType || blob.type,
+            originalName: savedBackground.originalName || 'project background',
+          });
+        } catch (err) {
+          console.warn('[background] Failed to load project background:', err);
+          setBackgroundAsset(null);
+        }
+      } else {
+        setBackgroundAsset(null);
+      }
+
+      if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {
+        setClipStyles(
+          Object.fromEntries(
+            Object.entries(state.clipStyles).map(([id, saved]) => [
+              id,
+              normalizeSavedClipStyle(saved, stateSchemaVersion),
+            ]),
+          ),
+        );
+      } else {
+        setClipStyles({});
+      }
+
+      return state;
+    },
+    [
+      currentProject?.id,
+      setBackgroundAsset,
+      setClipStyles,
+      setCompositionStyle,
+      setGridArrangement,
+      setMidiFile,
+      setRenderPreset,
+      setTrackVolumes,
+      suspendPersistence,
+    ],
+  );
+
+  const refreshSavedClipKeys = useCallback(async (projectId, version) => {
+    try {
+      const response = await apiFetch(`/projects/${projectId}/clips`);
+      const { clips } = await response.json();
+      if (clipsLoadingVersion.current !== version) return;
+      setSavedClipKeys(new Set(clips.map((clip) => clip.instrument_key)));
+    } catch (err) {
+      console.warn('[clips] Failed to load clip list:', err);
+    }
+  }, []);
+
+  const reloadProjectState = useCallback(async () => {
+    if (!currentProject) return null;
+
+    const version = clipsLoadingVersion.current;
+    await refreshSavedClipKeys(currentProject.id, version);
+
+    const state = await loadProjectState(currentProject.id);
+    if (clipsLoadingVersion.current !== version) return null;
+
+    return applyLoadedState(state, version);
+  }, [
+    applyLoadedState,
+    currentProject,
+    loadProjectState,
+    refreshSavedClipKeys,
+  ]);
 
   // ── 1. On project switch: load clip list + restore state ─────────────────
   useEffect(() => {
@@ -97,80 +232,12 @@ export function useProjectSync({
       return;
     }
 
-    apiFetch(`/projects/${currentProject.id}/clips`)
-      .then((r) => r.json())
-      .then(({ clips }) => {
-        if (clipsLoadingVersion.current !== version) return;
-        setSavedClipKeys(new Set(clips.map((c) => c.instrument_key)));
-      })
-      .catch((err) => console.warn('[clips] Failed to load clip list:', err));
+    refreshSavedClipKeys(currentProject.id, version);
 
     loadProjectState(currentProject.id)
       .then((state) => {
         if (clipsLoadingVersion.current !== version) return;
-        shadowStateRef.current = state || {}; // seed shadow from server
-        const stateSchemaVersion = Number(state?.schemaVersion || 0);
-        setRenderPreset(normalizeRenderPreset(state?.renderPreset));
-        if (state?.midiFileBase64) {
-          const [header, data] = state.midiFileBase64.split(',');
-          const mime = header.match(/:(.*?);/)?.[1] || 'audio/midi';
-          const bytes = atob(data);
-          const arr = new Uint8Array(bytes.length);
-          for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-          const file = new File([arr], state.midiFileName || 'project.mid', {
-            type: mime,
-          });
-          setMidiFile(file);
-        }
-        if (hasGridArrangement(state?.gridArrangement)) {
-          setGridArrangement(normalizeGridArrangement(state.gridArrangement));
-        }
-        if (state?.trackVolumes && Object.keys(state.trackVolumes).length > 0)
-          setTrackVolumes(state.trackVolumes);
-        if (state?.compositionStyle)
-          setCompositionStyle((prev) => ({
-            ...DEFAULT_COMPOSITION_STYLE,
-            ...prev,
-            ...state.compositionStyle,
-          }));
-        const savedBackground = state?.compositionStyle?.backgroundMedia;
-        const backgroundMode = state?.compositionStyle?.backgroundMode;
-        if (
-          savedBackground?.saved &&
-          backgroundMode &&
-          backgroundMode !== 'color'
-        ) {
-          fetchProjectBackgroundFile(currentProject.id)
-            .then((blob) => {
-              if (!blob || clipsLoadingVersion.current !== version) return;
-              setBackgroundAsset({
-                blob,
-                url: URL.createObjectURL(blob),
-                kind:
-                  savedBackground.kind ||
-                  (blob.type.startsWith('video/') ? 'video' : 'image'),
-                mimeType: savedBackground.mimeType || blob.type,
-                originalName:
-                  savedBackground.originalName || 'project background',
-              });
-            })
-            .catch((err) =>
-              console.warn(
-                '[background] Failed to load project background:',
-                err,
-              ),
-            );
-        }
-        if (state?.clipStyles && Object.keys(state.clipStyles).length > 0) {
-          setClipStyles(
-            Object.fromEntries(
-              Object.entries(state.clipStyles).map(([id, saved]) => [
-                id,
-                normalizeSavedClipStyle(saved, stateSchemaVersion),
-              ]),
-            ),
-          );
-        }
+        void applyLoadedState(state, version);
       })
       .catch((err) =>
         console.warn('[clips] Failed to load project state:', err),
@@ -228,6 +295,7 @@ export function useProjectSync({
   // ── 3. Persist MIDI file to project state when it changes ─────────────────
   useEffect(() => {
     if (!midiFile || !currentProject) return;
+    if (isPersistenceSuspended()) return;
     const reader = new FileReader();
     reader.onload = async () => {
       try {
@@ -241,6 +309,10 @@ export function useProjectSync({
         };
         await saveProjectState(shadowStateRef.current);
       } catch (err) {
+        if (err?.code === 'PROJECT_CONFLICT' && onProjectConflict) {
+          onProjectConflict(err);
+          return;
+        }
         console.warn('[clips] Failed to save MIDI to project state:', err);
       }
     };
@@ -251,6 +323,7 @@ export function useProjectSync({
   // ── 4. Debounced save of arrangement, volumes, and style ──────────────────
   useEffect(() => {
     if (!currentProject || !hasGridArrangement(gridArrangement)) return;
+    if (isPersistenceSuspended()) return;
     clearTimeout(saveArrangementTimeoutRef.current);
     saveArrangementTimeoutRef.current = setTimeout(async () => {
       try {
@@ -268,6 +341,10 @@ export function useProjectSync({
         };
         await saveProjectState(shadowStateRef.current);
       } catch (err) {
+        if (err?.code === 'PROJECT_CONFLICT' && onProjectConflict) {
+          onProjectConflict(err);
+          return;
+        }
         console.warn('[state] Failed to save arrangement:', err);
       }
     }, 1500);
@@ -280,5 +357,5 @@ export function useProjectSync({
     currentProject?.id,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { savedClipKeys, setSavedClipKeys, clipBlobCache };
+  return { savedClipKeys, setSavedClipKeys, clipBlobCache, reloadProjectState };
 }

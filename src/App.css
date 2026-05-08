@@ -697,6 +697,70 @@
   max-width: 200px;
   text-overflow: ellipsis;
 }
+
+.editor-topbar__presence-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: #d1d5db;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 999px;
+  padding: 0.24rem 0.65rem;
+  white-space: nowrap;
+}
+
+.editor-topbar__presence-pill--connected {
+  color: #bfdbfe;
+}
+
+.editor-topbar__presence-pill--connecting,
+.editor-topbar__presence-pill--disconnected {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.22);
+}
+
+.editor-topbar__notice {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.75rem;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.18);
+}
+
+.editor-topbar__notice-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #fde68a;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.editor-topbar__notice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.editor-topbar__btn--notice {
+  color: #fff;
+  background: rgba(245, 158, 11, 0.22);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.editor-topbar__btn--notice:hover {
+  color: #fff;
+  background: rgba(245, 158, 11, 0.32);
+  border-color: rgba(245, 158, 11, 0.4);
+}
 .editor-topbar__sep {
   width: 1px;
   height: 20px;
@@ -894,6 +958,16 @@
 
   .editor-topbar__icon-btn {
     padding: 0 0.5rem;
+  }
+
+  .editor-topbar__notice {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .editor-topbar__notice-actions {
+    width: 100%;
+    flex-wrap: wrap;
   }
 }
 

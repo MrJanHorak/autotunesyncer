@@ -29,6 +29,7 @@ db.exec(`
     name        TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     state       TEXT DEFAULT NULL,
+    state_version INTEGER NOT NULL DEFAULT 1,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -141,6 +142,13 @@ db.exec(`
 const userCols = db.pragma('table_info(users)').map((c) => c.name);
 if (!userCols.includes('bio')) {
   db.exec(`ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''`);
+}
+
+const projectCols = db.pragma('table_info(projects)').map((c) => c.name);
+if (!projectCols.includes('state_version')) {
+  db.exec(
+    `ALTER TABLE projects ADD COLUMN state_version INTEGER NOT NULL DEFAULT 1`,
+  );
 }
 
 const compCols = db.pragma('table_info(compositions)').map((c) => c.name);

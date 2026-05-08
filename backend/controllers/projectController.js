@@ -26,6 +26,7 @@ import {
   canWriteProject,
   getProjectAccess,
 } from '../services/projectAccessService.js';
+import { emitProjectStateSaved } from '../services/realtimeService.js';
 
 const PROJECT_STATE_SCHEMA_VERSION = 2;
 const PROJECT_CARD_PREVIEW_ITEM_LIMIT = 12;
@@ -69,6 +70,7 @@ const PROJECT_SELECT = `
     p.name,
     p.description,
     p.state,
+    p.state_version,
     p.created_at,
     p.updated_at,
     COALESCE(cc.clip_count, 0) AS clip_count,
@@ -200,6 +202,7 @@ const buildProjectSummary = (row) => {
     ownerId: row.owner_id,
     ownerUsername: row.owner_username,
     accessRole: row.access_role,
+    stateVersion: Number(row.state_version) || 1,
     name: row.name,
     description: row.description,
     created_at: row.created_at,
@@ -342,27 +345,111 @@ export const saveProjectState = (req, res) => {
     return res.status(403).json({ error: 'Project write access required' });
   }
 
+  const baseStateVersion = Number(req.body?.baseStateVersion);
+  const realtimeClientId = req.body?.realtimeClientId || null;
+  const currentStateVersion = Number(project.state_version) || 1;
+
+  if (!Number.isFinite(baseStateVersion)) {
+    return res.status(400).json({
+      error: 'baseStateVersion is required',
+      currentStateVersion,
+    });
+  }
+
+  if (baseStateVersion !== currentStateVersion) {
+    let currentState = null;
+    try {
+      currentState = project.state ? JSON.parse(project.state) : null;
+    } catch {
+      currentState = null;
+    }
+
+    return res.status(409).json({
+      error: 'Project state has changed since you loaded it',
+      currentStateVersion,
+      currentState,
+    });
+  }
+
+  const nextStateVersion = currentStateVersion + 1;
+
   const state = JSON.stringify({
     ...req.body,
     schemaVersion: PROJECT_STATE_SCHEMA_VERSION,
+    baseStateVersion: undefined,
+    realtimeClientId: undefined,
+    stateVersion: nextStateVersion,
     savedAt: new Date().toISOString(),
   });
-  db.prepare(
-    "UPDATE projects SET state = ?, updated_at = datetime('now') WHERE id = ?",
-  ).run(state, req.params.id);
-  res.json({ message: 'State saved' });
+  const result = db
+    .prepare(
+      "UPDATE projects SET state = ?, state_version = ?, updated_at = datetime('now') WHERE id = ? AND state_version = ?",
+    )
+    .run(state, nextStateVersion, req.params.id, currentStateVersion);
+
+  if (result.changes === 0) {
+    const latestProject = getProjectAccess(req.params.id, req.user.id);
+    let currentState = null;
+    try {
+      currentState = latestProject?.state
+        ? JSON.parse(latestProject.state)
+        : null;
+    } catch {
+      currentState = null;
+    }
+
+    return res.status(409).json({
+      error: 'Project state has changed since you loaded it',
+      currentStateVersion:
+        Number(latestProject?.state_version) || nextStateVersion,
+      currentState,
+    });
+  }
+
+  const updatedProject = getProjectAccess(req.params.id, req.user.id);
+  const updatedAt = updatedProject?.updated_at || new Date().toISOString();
+
+  emitProjectStateSaved(req.params.id, {
+    actor: {
+      id: req.user.id,
+      username: req.user.username,
+    },
+    clientId: realtimeClientId,
+    stateVersion: Number(updatedProject?.state_version) || nextStateVersion,
+    updatedAt,
+  });
+
+  res.json({
+    message: 'State saved',
+    stateVersion: Number(updatedProject?.state_version) || nextStateVersion,
+    updatedAt,
+  });
 };
 
 export const loadProjectState = (req, res) => {
   const project = getProjectAccess(req.params.id, req.user.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  if (!project.state) return res.json({ state: null });
+  if (!project.state) {
+    return res.json({
+      state: null,
+      stateVersion: Number(project.stateVersion) || 1,
+      updatedAt: project.updatedAt || null,
+    });
+  }
 
   try {
-    res.json({ state: JSON.parse(project.state) });
+    res.json({
+      state: JSON.parse(project.state),
+      stateVersion: Number(project.stateVersion) || 1,
+      updatedAt: project.updatedAt || null,
+    });
   } catch {
-    res.json({ state: null });
+    res.json({
+      state: null,
+      stateVersion: Number(project.stateVersion) || 1,
+      updatedAt: project.updatedAt || null,
+    });
   }
 };
 
