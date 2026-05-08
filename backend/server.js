@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
-import { existsSync, readdirSync, statSync, unlinkSync, mkdirSync } from 'fs';
+import { existsSync, readdirSync, statSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import midiRoutes from './routes/midiRoutes.js';
@@ -12,9 +12,9 @@ import uploadRoutes from './routes/uploadRoutes.js';
 import processVideos from './routes/processVideos.js';
 import precacheRoutes from './routes/precache.js';
 import authRoutes from './routes/authRoutes.js';
+import billingRoutes from './routes/billingRoutes.js';
 import projectRoutes from './routes/projectRoutes.js';
-import socialRoutes from './routes/socialRoutes.js';
-import shareRoutes from './routes/shareRoutes.js';
+import { handleStripeWebhook } from './controllers/billingController.js';
 import { initRealtime } from './services/realtimeService.js';
 
 const app = express();
@@ -24,6 +24,12 @@ app.use((req, _, next) => {
   req.id = crypto.randomUUID();
   next();
 });
+
+app.post(
+  '/api/billing/webhook',
+  express.raw({ type: 'application/json' }),
+  handleStripeWebhook,
+);
 
 // Body parser: keep a modest global limit (all large payloads use multipart/FormData, not JSON).
 // 10 MB is plenty for MIDI metadata and API calls.
@@ -68,12 +74,6 @@ app.use(
   }),
 );
 
-// Serve published compositions as static files (public, intentionally shareable)
-const __dirnameServer = dirname(fileURLToPath(import.meta.url));
-const publishedDir = join(__dirnameServer, 'published');
-mkdirSync(publishedDir, { recursive: true });
-app.use('/published', express.static(publishedDir));
-
 // Health check — load-balancers and Docker HEALTHCHECK use this
 app.get('/healthz', (req, res) => {
   if (isShuttingDown) return res.status(503).json({ status: 'shutting_down' });
@@ -82,8 +82,8 @@ app.get('/healthz', (req, res) => {
 
 // Use routes
 app.use('/api/auth', authRoutes);
+app.use('/api/billing', billingRoutes);
 app.use('/api/projects', projectRoutes);
-app.use('/api/social', socialRoutes);
 app.use('/api/midi', midiRoutes);
 app.use('/api/video', videoRoutes);
 app.use('/api/compose', compositionRoutes);
@@ -91,7 +91,6 @@ app.use('/api/autotune', autotuneRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/process-videos', processVideos);
 app.use('/api/autotune/precache', precacheRoutes);
-app.use('/api/share', shareRoutes);
 
 // Add error handling for large payloads
 app.use((err, req, res, next) => {

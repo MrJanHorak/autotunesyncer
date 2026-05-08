@@ -68,6 +68,45 @@ db.exec(`
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS legal_acceptances (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    document_key   TEXT NOT NULL,
+    version        TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT 'registration',
+    ip_address     TEXT,
+    user_agent     TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS billing_customers (
+    user_id            TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    stripe_customer_id TEXT NOT NULL UNIQUE,
+    email              TEXT NOT NULL DEFAULT '',
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS billing_subscriptions (
+    user_id                TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    stripe_subscription_id TEXT NOT NULL UNIQUE,
+    stripe_customer_id     TEXT NOT NULL,
+    stripe_price_id        TEXT,
+    plan_key               TEXT,
+    status                 TEXT NOT NULL,
+    cancel_at_period_end   INTEGER NOT NULL DEFAULT 0,
+    current_period_start   TEXT,
+    current_period_end     TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS billing_webhook_events (
+    stripe_event_id TEXT PRIMARY KEY,
+    event_type      TEXT NOT NULL,
+    processed_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_projects_user_id        ON projects(user_id);
   CREATE INDEX IF NOT EXISTS idx_users_email             ON users(email);
   CREATE INDEX IF NOT EXISTS idx_users_username          ON users(username);
@@ -77,6 +116,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_comments_composition_id ON comments(composition_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_follows_follower_id     ON follows(follower_id);
   CREATE INDEX IF NOT EXISTS idx_follows_following_id    ON follows(following_id);
+  CREATE INDEX IF NOT EXISTS idx_legal_acceptances_user_id ON legal_acceptances(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_billing_customers_customer_id ON billing_customers(stripe_customer_id);
+  CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_status ON billing_subscriptions(status, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_customer_id ON billing_subscriptions(stripe_customer_id, updated_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_acceptances_unique_version
+    ON legal_acceptances(user_id, document_key, version);
 
   CREATE TABLE IF NOT EXISTS project_clips (
     project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -128,6 +173,20 @@ db.exec(`
     responded_at   TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS project_invite_links (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    inviter_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role           TEXT NOT NULL DEFAULT 'editor',
+    token          TEXT NOT NULL UNIQUE,
+    status         TEXT NOT NULL DEFAULT 'pending',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at     TEXT NOT NULL,
+    claimed_by     TEXT REFERENCES users(id) ON DELETE SET NULL,
+    claimed_at     TEXT,
+    revoked_at     TEXT
+  );
+
   CREATE INDEX IF NOT EXISTS idx_project_clips_project_id ON project_clips(project_id);
   CREATE INDEX IF NOT EXISTS idx_project_backgrounds_project_id ON project_backgrounds(project_id);
   CREATE INDEX IF NOT EXISTS idx_project_renders_status ON project_renders(status, updated_at DESC);
@@ -135,6 +194,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_project_collaborators_user_id ON project_collaborators(user_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_project_invites_project_id ON project_invites(project_id, status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_project_invites_invitee_id ON project_invites(invitee_id, status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_project_invite_links_project_id ON project_invite_links(project_id, status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_project_invite_links_token ON project_invite_links(token, status);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_project_invites_pending_unique ON project_invites(project_id, invitee_id) WHERE status = 'pending';
 `);
 

@@ -156,6 +156,41 @@
   margin: 0;
 }
 
+.pm-upgrade-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(250, 204, 21, 0.18);
+  background: rgba(120, 53, 15, 0.18);
+  margin-bottom: 1rem;
+}
+
+.pm-upgrade-note__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #facc15;
+}
+
+.pm-upgrade-note__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+}
+
+.pm-upgrade-note__copy strong {
+  color: #fef3c7;
+  font-size: 0.88rem;
+}
+
+.pm-upgrade-note__copy span {
+  color: #fde68a;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
 .pm-invites-panel {
   margin-bottom: 1.5rem;
   padding: 1rem 1.1rem;
@@ -684,6 +719,84 @@
 
 .pm-card__thumb-status--danger {
   background: rgba(220, 38, 38, 0.9);
+}
+
+.pm-modal__section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pm-btn-ghost--compact {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+.pm-invite-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.pm-invite-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(192, 132, 252, 0.14);
+  border-radius: 0.8rem;
+  background: rgba(18, 19, 42, 0.46);
+}
+
+.pm-invite-link-row__copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.pm-invite-link-row__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #d1d5db;
+}
+
+.pm-invite-link-row__input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(192, 132, 252, 0.16);
+  background: rgba(12, 13, 30, 0.9);
+  color: #f9fafb;
+  font-size: 0.82rem;
+}
+
+.pm-invite-link-row__meta {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+}
+
+.pm-invite-link-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+@media (max-width: 720px) {
+  .pm-invite-link-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pm-invite-link-row__actions {
+    width: 100%;
+  }
 }
 
 .pm-card__thumb-format {

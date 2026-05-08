@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import PropTypes from 'prop-types';
-import { X, User, Lock, Check, AlertCircle } from 'lucide-react';
+import { X, User, Lock, CreditCard, Sparkles, Check, AlertCircle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.jsx';
 
 const API_BASE = 'http://localhost:3000/api';
@@ -35,9 +35,36 @@ function FieldMsg({ ok, msg }) {
 
 FieldMsg.propTypes = { ok: PropTypes.bool, msg: PropTypes.string };
 
-const Settings = ({ onClose }) => {
+function getInitialBillingMessage() {
+  if (typeof window === 'undefined') {
+    return { ok: false, msg: '' };
+  }
+
+  const checkoutState = new URLSearchParams(window.location.search).get('checkout');
+  if (checkoutState === 'success') {
+    return {
+      ok: true,
+      msg: 'Stripe checkout completed. Billing status will refresh once the subscription is confirmed.',
+    };
+  }
+
+  if (checkoutState === 'cancelled') {
+    return {
+      ok: false,
+      msg: 'Stripe checkout was cancelled before a subscription was created.',
+    };
+  }
+
+  return { ok: false, msg: '' };
+}
+
+function normalizeTab(tab) {
+  return tab === 'billing' || tab === 'security' ? tab : 'profile';
+}
+
+const Settings = ({ initialTab, onClose }) => {
   const { user, updateUser } = useAuth();
-  const [tab, setTab] = useState('profile');
+  const [tab, setTab] = useState(normalizeTab(initialTab));
 
   // Profile tab state
   const [username, setUsername] = useState(user?.username || '');
@@ -57,6 +84,61 @@ const Settings = ({ onClose }) => {
   const [confirmPw, setConfirmPw] = useState('');
   const [pwSaving, setPwSaving] = useState(false);
   const [pwMsg, setPwMsg] = useState({ ok: false, msg: '' });
+
+  // Billing tab state
+  const [billingLoading, setBillingLoading] = useState(false);
+  const [billingAction, setBillingAction] = useState('');
+  const [billingData, setBillingData] = useState({
+    enabled: false,
+    webhookReady: false,
+    customer: null,
+    subscription: null,
+    plans: [],
+  });
+  const [promotionCode, setPromotionCode] = useState('');
+  const [billingMsg, setBillingMsg] = useState(getInitialBillingMessage);
+
+  useEffect(() => {
+    setTab(normalizeTab(initialTab));
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (tab !== 'billing') {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const loadBillingStatus = async () => {
+      setBillingLoading(true);
+      try {
+        const data = await apiFetch('/billing/status');
+        if (cancelled) return;
+        setBillingData(data.billing || {
+          enabled: false,
+          webhookReady: false,
+          customer: null,
+          subscription: null,
+          plans: [],
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setBillingMsg((current) =>
+          current.msg ? current : { ok: false, msg: err.message },
+        );
+      } finally {
+        if (!cancelled) {
+          setBillingLoading(false);
+        }
+      }
+    };
+
+    void loadBillingStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tab]);
 
   const handleSaveProfile = async (e) => {
     e.preventDefault();
@@ -117,6 +199,48 @@ const Settings = ({ onClose }) => {
     }
   };
 
+  const handleStartCheckout = async (planKey) => {
+    setBillingAction(`checkout:${planKey}`);
+    setBillingMsg({ ok: false, msg: '' });
+    try {
+      const data = await apiFetch('/billing/checkout-session', {
+        method: 'POST',
+        body: JSON.stringify({
+          planKey,
+          promotionCode: promotionCode.trim() || undefined,
+        }),
+      });
+
+      if (!data.url) {
+        throw new Error('Checkout URL was not returned');
+      }
+
+      window.location.assign(data.url);
+    } catch (err) {
+      setBillingMsg({ ok: false, msg: err.message });
+      setBillingAction('');
+    }
+  };
+
+  const handleOpenBillingPortal = async () => {
+    setBillingAction('portal');
+    setBillingMsg({ ok: false, msg: '' });
+    try {
+      const data = await apiFetch('/billing/portal-session', {
+        method: 'POST',
+      });
+
+      if (!data.url) {
+        throw new Error('Billing portal URL was not returned');
+      }
+
+      window.location.assign(data.url);
+    } catch (err) {
+      setBillingMsg({ ok: false, msg: err.message });
+      setBillingAction('');
+    }
+  };
+
   return (
     <div className='settings-overlay' onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className='settings-modal'>
@@ -133,6 +257,9 @@ const Settings = ({ onClose }) => {
           </button>
           <button className={`settings-tab ${tab === 'security' ? 'settings-tab--active' : ''}`} onClick={() => setTab('security')}>
             <Lock size={14} /> Security
+          </button>
+          <button className={`settings-tab ${tab === 'billing' ? 'settings-tab--active' : ''}`} onClick={() => setTab('billing')}>
+            <CreditCard size={14} /> Billing
           </button>
         </div>
 
@@ -224,12 +351,128 @@ const Settings = ({ onClose }) => {
             </form>
           </div>
         )}
+
+        {tab === 'billing' && (
+          <div className='settings-billing'>
+            <div className='settings-billing__hero'>
+              <div>
+                <h4 className='settings-billing__title'>Stripe billing foundation</h4>
+                <p className='settings-billing__copy'>
+                  Keep subscriptions, promo codes, invoices, and plan changes out of the editor workflow.
+                </p>
+              </div>
+              <span className='settings-billing__badge'>
+                <Sparkles size={14} /> Private tool stack
+              </span>
+            </div>
+
+            <FieldMsg {...billingMsg} />
+
+            {billingLoading ? (
+              <div className='settings-billing__panel'>
+                <p className='settings-billing__hint'>Loading billing status…</p>
+              </div>
+            ) : !billingData.enabled ? (
+              <div className='settings-billing__panel'>
+                <h4 className='settings-billing__panel-title'>Billing is not configured yet</h4>
+                <p className='settings-billing__hint'>
+                  Set `STRIPE_SECRET_KEY` and at least one Stripe price ID in the backend environment to enable checkout.
+                </p>
+                {!billingData.webhookReady ? (
+                  <p className='settings-billing__hint'>
+                    `STRIPE_WEBHOOK_SECRET` is also missing, so subscription status sync is not active yet.
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <>
+                <div className='settings-billing__panel'>
+                  <div className='settings-billing__panel-row'>
+                    <div>
+                      <h4 className='settings-billing__panel-title'>Current plan</h4>
+                      <p className='settings-billing__hint'>
+                        {billingData.subscription
+                          ? `${billingData.subscription.planName} · ${billingData.subscription.status}`
+                          : 'No paid plan is active yet.'}
+                      </p>
+                    </div>
+                    <span className='settings-billing__pill'>
+                      {billingData.subscription?.currentPeriodEnd
+                        ? `Renews ${new Date(billingData.subscription.currentPeriodEnd).toLocaleDateString()}`
+                        : 'Free'}
+                    </span>
+                  </div>
+
+                  {billingData.subscription?.cancelAtPeriodEnd ? (
+                    <p className='settings-billing__hint'>
+                      This subscription is set to cancel at the end of the current billing period.
+                    </p>
+                  ) : null}
+
+                  <div className='settings-billing__actions'>
+                    <button
+                      type='button'
+                      className='settings-save-btn'
+                      onClick={handleOpenBillingPortal}
+                      disabled={!billingData.customer || billingAction === 'portal'}
+                    >
+                      {billingAction === 'portal' ? 'Opening…' : 'Manage Billing'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className='settings-billing__panel'>
+                  <label className='settings-label'>
+                    Promotion code
+                    <input
+                      className='settings-input'
+                      value={promotionCode}
+                      onChange={(e) => setPromotionCode(e.target.value)}
+                      placeholder='Optional promo or launch code'
+                      maxLength={64}
+                    />
+                  </label>
+                  <p className='settings-billing__hint'>
+                    Leave this blank to let Stripe handle promotion codes during checkout.
+                  </p>
+                </div>
+
+                <div className='settings-billing__plan-grid'>
+                  {billingData.plans.map((plan) => (
+                    <article key={plan.key} className='settings-billing__plan-card'>
+                      <div className='settings-billing__plan-copy'>
+                        <div>
+                          <h4 className='settings-billing__plan-name'>{plan.name}</h4>
+                          <div className='settings-billing__plan-price'>{plan.priceLabel}</div>
+                        </div>
+                        <p className='settings-billing__plan-desc'>{plan.description}</p>
+                      </div>
+                      <button
+                        type='button'
+                        className='settings-save-btn'
+                        onClick={() => handleStartCheckout(plan.key)}
+                        disabled={!plan.available || Boolean(billingAction)}
+                      >
+                        {billingAction === `checkout:${plan.key}`
+                          ? 'Redirecting…'
+                          : plan.available
+                            ? `Start ${plan.name}`
+                            : 'Not configured'}
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 };
 
 Settings.propTypes = {
+  initialTab: PropTypes.oneOf(['profile', 'security', 'billing']),
   onClose: PropTypes.func.isRequired,
 };
 

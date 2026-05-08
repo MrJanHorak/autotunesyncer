@@ -55,12 +55,6 @@ const PROJECT_SELECT = `
     SELECT project_id, COUNT(*) AS collaborator_count
     FROM project_collaborators
     GROUP BY project_id
-  ),
-  shared_counts AS (
-    SELECT project_id, COUNT(*) AS shared_count, MAX(created_at) AS last_shared_at
-    FROM compositions
-    WHERE project_id IS NOT NULL
-    GROUP BY project_id
   )
   SELECT
     p.id,
@@ -80,9 +74,7 @@ const PROJECT_SELECT = `
     pr.progress AS render_progress,
     pr.output_path AS render_output_path,
     pr.error AS render_error,
-    pr.completed_at AS render_completed_at,
-    COALESCE(sc.shared_count, 0) AS shared_count,
-    sc.last_shared_at
+    pr.completed_at AS render_completed_at
   FROM accessible_projects ap
   JOIN projects p ON p.id = ap.project_id
   JOIN users owner ON owner.id = p.user_id
@@ -90,7 +82,6 @@ const PROJECT_SELECT = `
   LEFT JOIN collaborator_counts colc ON colc.project_id = p.id
   LEFT JOIN project_backgrounds pb ON pb.project_id = p.id
   LEFT JOIN project_renders pr ON pr.project_id = p.id
-  LEFT JOIN shared_counts sc ON sc.project_id = p.id
 `;
 
 const parseProjectState = (stateText) => {
@@ -137,14 +128,9 @@ const getWorkflowState = ({
   hasMidi,
   layoutItemCount,
   hasBackground,
-  sharedCount,
   renderStatus,
   hasRenderOutput,
 }) => {
-  if (sharedCount > 0) {
-    return { stage: 'shared', progress: 100 };
-  }
-
   if (renderStatus === 'processing' || renderStatus === 'queued') {
     return { stage: 'rendering', progress: 86 };
   }
@@ -176,7 +162,6 @@ const buildProjectSummary = (row) => {
   );
   const { itemCount, preview } = getLayoutPreview(state?.gridArrangement);
   const clipCount = Number(row.clip_count) || 0;
-  const sharedCount = Number(row.shared_count) || 0;
   const renderStatus = row.render_status || 'idle';
   const renderProgress =
     renderStatus === 'done'
@@ -192,7 +177,6 @@ const buildProjectSummary = (row) => {
     hasMidi,
     layoutItemCount: itemCount,
     hasBackground,
-    sharedCount,
     renderStatus,
     hasRenderOutput,
   });
@@ -221,9 +205,6 @@ const buildProjectSummary = (row) => {
       hasRenderOutput,
       renderError: row.render_error || null,
       renderCompletedAt: row.render_completed_at || null,
-      sharedCount,
-      hasSharedComposition: sharedCount > 0,
-      lastSharedAt: row.last_shared_at || null,
       workflowStage: workflow.stage,
       workflowProgress: workflow.progress,
     },
@@ -409,15 +390,26 @@ export const saveProjectState = (req, res) => {
   const updatedProject = getProjectAccess(req.params.id, req.user.id);
   const updatedAt = updatedProject?.updated_at || new Date().toISOString();
 
-  emitProjectStateSaved(req.params.id, {
-    actor: {
-      id: req.user.id,
-      username: req.user.username,
-    },
-    clientId: realtimeClientId,
-    stateVersion: Number(updatedProject?.state_version) || nextStateVersion,
-    updatedAt,
-  });
+  const hasCollaborators = Boolean(
+    project.accessRole !== 'owner' ||
+      db
+        .prepare(
+          'SELECT 1 FROM project_collaborators WHERE project_id = ? LIMIT 1',
+        )
+        .get(req.params.id),
+  );
+
+  if (hasCollaborators) {
+    emitProjectStateSaved(req.params.id, {
+      actor: {
+        id: req.user.id,
+        username: req.user.username,
+      },
+      clientId: realtimeClientId,
+      stateVersion: Number(updatedProject?.state_version) || nextStateVersion,
+      updatedAt,
+    });
+  }
 
   res.json({
     message: 'State saved',

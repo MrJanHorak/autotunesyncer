@@ -3,16 +3,48 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import db from '../db/database.js';
 import { JWT_SECRET } from '../middleware/auth.js';
+import { CURRENT_LEGAL_VERSIONS } from '../../shared/legalDocuments.js';
+
+const REQUIRED_LEGAL_DOCUMENTS = Object.keys(CURRENT_LEGAL_VERSIONS);
+
+function validateLegalAcceptance(legalAcceptance) {
+  if (!legalAcceptance?.accepted) {
+    return {
+      ok: false,
+      error:
+        'You must accept the Terms of Use, Privacy Policy, and Copyright Policy to register.',
+    };
+  }
+
+  const submittedVersions = legalAcceptance?.versions || {};
+
+  for (const documentKey of REQUIRED_LEGAL_DOCUMENTS) {
+    if (submittedVersions[documentKey] !== CURRENT_LEGAL_VERSIONS[documentKey]) {
+      return {
+        ok: false,
+        error:
+          'Your legal acceptance is out of date. Refresh the page and review the current policies before registering.',
+      };
+    }
+  }
+
+  return { ok: true };
+}
 
 export const register = async (req, res) => {
   try {
-    const { username, email, password } = req.body;
+    const { username, email, password, legalAcceptance } = req.body;
 
     if (!username?.trim() || !email?.trim() || !password) {
       return res.status(400).json({ error: 'username, email, and password are required' });
     }
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const acceptance = validateLegalAcceptance(legalAcceptance);
+    if (!acceptance.ok) {
+      return res.status(400).json({ error: acceptance.error });
     }
 
     const existing = db
@@ -25,8 +57,37 @@ export const register = async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 12);
     const id = uuidv4();
 
-    db.prepare('INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)')
-      .run(id, username.trim(), email.toLowerCase().trim(), passwordHash);
+    db.transaction(() => {
+      db.prepare('INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)')
+        .run(id, username.trim(), email.toLowerCase().trim(), passwordHash);
+
+      const ipAddress = req.ip || null;
+      const userAgent = req.get('user-agent') || null;
+
+      for (const documentKey of REQUIRED_LEGAL_DOCUMENTS) {
+        db.prepare(
+          `
+            INSERT INTO legal_acceptances (
+              id,
+              user_id,
+              document_key,
+              version,
+              source,
+              ip_address,
+              user_agent
+            )
+            VALUES (?, ?, ?, ?, 'registration', ?, ?)
+          `,
+        ).run(
+          uuidv4(),
+          id,
+          documentKey,
+          CURRENT_LEGAL_VERSIONS[documentKey],
+          ipAddress,
+          userAgent,
+        );
+      }
+    })();
 
     const token = jwt.sign({ id, username: username.trim(), email: email.toLowerCase().trim() }, JWT_SECRET, { expiresIn: '7d' });
     res.status(201).json({ token, user: { id, username: username.trim(), email: email.toLowerCase().trim(), bio: '' } });

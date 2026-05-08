@@ -4,11 +4,9 @@ import {
   startCompositionJob,
   trackCompositionJob,
 } from '../../../services/videoServices.js';
-import ShareCompositionModal from '../Social/ShareCompositionModal.jsx';
 import {
   fetchProjectRenderFile,
   fetchProjectRenderStatus,
-  shareComposition,
 } from '../../services/apiService.js';
 import {
   hasGridArrangement,
@@ -49,7 +47,6 @@ const VideoComposer = ({
   compositionStyle = null,
   clipStyles = null,
   renderPreset = DEFAULT_RENDER_PRESET,
-  projectName = '',
   projectId = null,
   onProgress = null,
   onError = null,
@@ -63,10 +60,6 @@ const VideoComposer = ({
   const [renderProgress, setRenderProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [composedVideoUrl, setComposedVideoUrl] = useState(null);
-  const [composedBlob, setComposedBlob] = useState(null);
-  const [showShareModal, setShowShareModal] = useState(false);
-  const [shareUrl, setShareUrl] = useState(null);
-  const [shareLoading, setShareLoading] = useState(false);
   const [error, setError] = useState(null);
   const timerRef = useRef(null);
   const abortRef = useRef(null);
@@ -87,14 +80,10 @@ const VideoComposer = ({
       composedVideoUrlRef.current = null;
     }
     setComposedVideoUrl(null);
-    setComposedBlob(null);
-    setShareUrl(null);
   }, []);
 
   const applyComposedBlob = useCallback((blob) => {
     if (!blob) return;
-    setComposedBlob(blob);
-    setShareUrl(null);
     if (composedVideoUrlRef.current) {
       URL.revokeObjectURL(composedVideoUrlRef.current);
     }
@@ -375,7 +364,6 @@ const VideoComposer = ({
     setRenderProgress(0);
     setElapsedSeconds(0);
     setError(null);
-    setShareUrl(null);
 
     // Start elapsed-time counter
     startElapsedTimer();
@@ -489,17 +477,6 @@ const VideoComposer = ({
 
   return (
     <div className='video-composer'>
-      {showShareModal && composedBlob && (
-        <ShareCompositionModal
-          blob={composedBlob}
-          suggestedTitle={
-            compositionStyle?.titleText?.trim() || projectName || ''
-          }
-          projectId={projectId || null}
-          onClose={() => setShowShareModal(false)}
-          onShared={() => setShowShareModal(false)}
-        />
-      )}
       <div className='composition-toolbar'>
         <div className='composition-actions'>
           <button
@@ -713,94 +690,6 @@ const VideoComposer = ({
               >
                 ⬇ Download
               </a>
-              <button
-                onClick={() => setShowShareModal(true)}
-                style={{
-                  padding: '0.5rem 1.1rem',
-                  background: '#0f3460',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '8px',
-                  fontWeight: 600,
-                  fontSize: '0.875rem',
-                  cursor: 'pointer',
-                }}
-              >
-                📤 Share to Feed
-              </button>
-              <button
-                onClick={async () => {
-                  if (!composedBlob) return;
-                  setShareLoading(true);
-                  setShareUrl(null);
-                  try {
-                    const { url } = await shareComposition(composedBlob);
-                    setShareUrl(url);
-                  } catch (err) {
-                    if (err.message.includes('not configured')) {
-                      alert('Share links are not configured on this server.');
-                    } else {
-                      alert(`Share failed: ${err.message}`);
-                    }
-                  } finally {
-                    setShareLoading(false);
-                  }
-                }}
-                disabled={shareLoading || !composedBlob}
-                style={{
-                  padding: '0.5rem 1.1rem',
-                  background: '#7c3aed',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '8px',
-                  fontWeight: 600,
-                  fontSize: '0.875rem',
-                  cursor: shareLoading ? 'wait' : 'pointer',
-                  opacity: shareLoading ? 0.7 : 1,
-                }}
-              >
-                {shareLoading ? '⏳ Uploading…' : '🔗 Get Share Link'}
-              </button>
-              {shareUrl && (
-                <div
-                  style={{
-                    width: '100%',
-                    marginTop: '0.5rem',
-                    display: 'flex',
-                    gap: '0.5rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  <input
-                    readOnly
-                    value={shareUrl}
-                    style={{
-                      flex: 1,
-                      padding: '0.4rem 0.6rem',
-                      borderRadius: '6px',
-                      border: '1px solid #7c3aed',
-                      fontSize: '0.8rem',
-                    }}
-                    onClick={(e) => e.target.select()}
-                  />
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(shareUrl);
-                    }}
-                    style={{
-                      padding: '0.4rem 0.75rem',
-                      background: '#7c3aed',
-                      color: '#fff',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      fontSize: '0.8rem',
-                    }}
-                  >
-                    Copy
-                  </button>
-                </div>
-              )}
             </div>
           </div>
         </div>

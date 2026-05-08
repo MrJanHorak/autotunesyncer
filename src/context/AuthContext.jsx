@@ -41,11 +41,11 @@ export function AuthProvider({ children }) {
     return data.user;
   }, []);
 
-  const register = useCallback(async (username, email, password) => {
+  const register = useCallback(async (username, email, password, legalAcceptance) => {
     const res = await fetch(`${API_BASE}/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, email, password }),
+      body: JSON.stringify({ username, email, password, legalAcceptance }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Registration failed');

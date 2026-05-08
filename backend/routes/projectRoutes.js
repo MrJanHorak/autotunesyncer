@@ -16,10 +16,14 @@ import {
 } from '../controllers/projectController.js';
 import {
   acceptProjectInvite,
+  acceptProjectInviteLink,
+  createProjectInviteLink,
   declineProjectInvite,
+  getProjectInviteLink,
   inviteProjectCollaborator,
   listPendingProjectInvites,
   listProjectCollaborators,
+  revokeProjectInviteLink,
 } from '../controllers/projectCollaborationController.js';
 import {
   saveClip,
@@ -65,6 +69,9 @@ router.use(authenticateToken);
 router.get('/', listProjects);
 router.post('/', createProject);
 router.get('/invites', listPendingProjectInvites);
+router.get('/invite-links/:token', getProjectInviteLink);
+router.post('/invite-links/:token/accept', acceptProjectInviteLink);
+router.delete('/invite-links/:inviteLinkId', revokeProjectInviteLink);
 router.post('/invites/:inviteId/accept', acceptProjectInvite);
 router.post('/invites/:inviteId/decline', declineProjectInvite);
 router.post(
@@ -78,6 +85,7 @@ router.post(
 );
 router.get('/:id/collaborators', listProjectCollaborators);
 router.post('/:id/invites', inviteProjectCollaborator);
+router.post('/:id/invite-links', createProjectInviteLink);
 router.get('/:id', getProject);
 router.put('/:id', updateProject);
 router.delete('/:id', deleteProject);

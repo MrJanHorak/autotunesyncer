@@ -17,7 +17,8 @@ import {
   Plus,
   FolderOpen,
   Search,
-  Share2,
+  Link2,
+  Copy,
   UserPlus,
   Users,
   X,
@@ -31,6 +32,13 @@ import {
 import './ProjectManager.css';
 
 const API_BASE = 'http://localhost:3000/api';
+
+function buildInviteLinkUrl(token) {
+  if (typeof window === 'undefined') {
+    return `?invite=${encodeURIComponent(token)}`;
+  }
+  return `${window.location.origin}?invite=${encodeURIComponent(token)}`;
+}
 
 function formatRelative(dateStr) {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -77,11 +85,6 @@ const WORKFLOW_META = {
     description: 'A final composition is available for this project.',
     tone: 'success',
   },
-  shared: {
-    label: 'Shared',
-    description: 'A version of this project has been published to the feed.',
-    tone: 'shared',
-  },
 };
 
 const PROJECT_SCOPES = [
@@ -92,7 +95,6 @@ const PROJECT_SCOPES = [
 
 const PROJECT_FILTERS = [
   { id: 'all', label: 'All' },
-  { id: 'shared', label: 'Published' },
   { id: 'rendered', label: 'Rendered' },
   { id: 'active', label: 'In Progress' },
 ];
@@ -129,8 +131,6 @@ const projectSummaryShape = PropTypes.shape({
   renderStatus: PropTypes.string,
   renderProgress: PropTypes.number,
   hasRenderOutput: PropTypes.bool,
-  sharedCount: PropTypes.number,
-  hasSharedComposition: PropTypes.bool,
   workflowStage: PropTypes.string,
   workflowProgress: PropTypes.number,
 });
@@ -191,12 +191,10 @@ function matchesProjectFilter(project, filterMode) {
   const summary = getProjectSummary(project);
 
   switch (filterMode) {
-    case 'shared':
-      return Boolean(summary.hasSharedComposition);
     case 'rendered':
       return Boolean(summary.hasRenderOutput);
     case 'active':
-      return !summary.hasSharedComposition && !summary.hasRenderOutput;
+      return !summary.hasRenderOutput;
     default:
       return true;
   }
@@ -419,7 +417,7 @@ function ProjectCard({
         {project.accessRole !== 'owner' && project.ownerUsername && (
           <div className='pm-card__meta pm-card__meta--owner'>
             <Users size={14} />
-            <span>Shared by @{project.ownerUsername}</span>
+            <span>Owner @{project.ownerUsername}</span>
           </div>
         )}
 
@@ -445,14 +443,6 @@ function ProjectCard({
           <div className='pm-card__stat'>
             <Music size={13} />
             <span>{summary.hasMidi ? 'MIDI loaded' : 'No MIDI'}</span>
-          </div>
-          <div className='pm-card__stat'>
-            <Share2 size={13} />
-            <span>
-              {summary.hasSharedComposition
-                ? `${summary.sharedCount} shared`
-                : 'Not shared'}
-            </span>
           </div>
         </div>
 
@@ -546,18 +536,30 @@ InviteRow.propTypes = {
 
 function InviteCollaboratorModal({
   project,
+  billing,
   collaborators,
   pendingInvites,
+  pendingInviteLinks,
   inviteUsername,
   onInviteUsernameChange,
+  onCreateInviteLink,
+  onCopyInviteLink,
+  onRevokeInviteLink,
   onClose,
   onSubmit,
   loading,
   submitting,
+  inviteLinkSubmitting,
+  inviteLinkPendingId,
   error,
   success,
 }) {
   if (!project) return null;
+
+  const collaborationLocked =
+    project.accessRole === 'owner' &&
+    billing?.requiredPlan === 'studio' &&
+    billing?.canManageCollaboration === false;
 
   return (
     <div className='pm-modal-overlay' onClick={onClose}>
@@ -579,6 +581,20 @@ function InviteCollaboratorModal({
           </button>
         </div>
 
+        {collaborationLocked ? (
+          <div className='pm-upgrade-note' role='status'>
+            <div className='pm-upgrade-note__icon'>
+              <Crown size={16} />
+            </div>
+            <div className='pm-upgrade-note__copy'>
+              <strong>Studio plan required</strong>
+              <span>
+                Upgrade in Settings → Billing before you can invite new collaborators or create collaboration links.
+              </span>
+            </div>
+          </div>
+        ) : null}
+
         <form className='pm-modal__form' onSubmit={onSubmit}>
           <label className='pm-label' htmlFor='project-collaborator-username'>
             Invite by username
@@ -591,6 +607,7 @@ function InviteCollaboratorModal({
             onChange={(event) => onInviteUsernameChange(event.target.value)}
             placeholder='Enter an existing username'
             autoFocus
+            disabled={collaborationLocked}
           />
           {error ? <p className='pm-error'>{error}</p> : null}
           {success ? <p className='pm-success'>{success}</p> : null}
@@ -598,7 +615,7 @@ function InviteCollaboratorModal({
             <button
               type='submit'
               className='pm-btn-primary'
-              disabled={submitting || !inviteUsername.trim()}
+              disabled={collaborationLocked || submitting || !inviteUsername.trim()}
             >
               {submitting ? 'Sending…' : 'Send Invite'}
             </button>
@@ -645,6 +662,68 @@ function InviteCollaboratorModal({
             <div className='pm-modal__empty'>No pending invites.</div>
           )}
         </div>
+
+        <div className='pm-modal__section'>
+          <div className='pm-modal__section-header'>
+            <h4 className='pm-modal__section-title'>Invite links</h4>
+            <button
+              type='button'
+              className='pm-btn-ghost pm-btn-ghost--compact'
+              onClick={onCreateInviteLink}
+              disabled={collaborationLocked || inviteLinkSubmitting}
+            >
+              {inviteLinkSubmitting ? 'Creating…' : 'Create link'}
+            </button>
+          </div>
+          {loading ? (
+            <div className='pm-modal__empty'>Loading invite links…</div>
+          ) : pendingInviteLinks.length > 0 ? (
+            <div className='pm-invite-link-list'>
+              {pendingInviteLinks.map((inviteLink) => {
+                const isPending = inviteLinkPendingId === inviteLink.id;
+                return (
+                  <div key={inviteLink.id} className='pm-invite-link-row'>
+                    <div className='pm-invite-link-row__copy'>
+                      <span className='pm-invite-link-row__label'>
+                        <Link2 size={13} /> Private collaboration link
+                      </span>
+                      <input
+                        className='pm-invite-link-row__input'
+                        readOnly
+                        value={buildInviteLinkUrl(inviteLink.token)}
+                        onFocus={(event) => event.target.select()}
+                      />
+                      <span className='pm-invite-link-row__meta'>
+                        Expires{' '}
+                        {new Date(inviteLink.expires_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                    <div className='pm-invite-link-row__actions'>
+                      <button
+                        type='button'
+                        className='pm-btn-primary'
+                        onClick={() => onCopyInviteLink(inviteLink)}
+                        disabled={isPending}
+                      >
+                        <Copy size={13} /> {isPending ? 'Working…' : 'Copy'}
+                      </button>
+                      <button
+                        type='button'
+                        className='pm-btn-ghost'
+                        onClick={() => onRevokeInviteLink(inviteLink.id)}
+                        disabled={isPending}
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className='pm-modal__empty'>No active invite links.</div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -652,6 +731,11 @@ function InviteCollaboratorModal({
 
 InviteCollaboratorModal.propTypes = {
   project: projectShape,
+  billing: PropTypes.shape({
+    requiredPlan: PropTypes.string,
+    canManageCollaboration: PropTypes.bool,
+    planKey: PropTypes.string,
+  }),
   collaborators: PropTypes.arrayOf(
     PropTypes.shape({
       id: PropTypes.string.isRequired,
@@ -664,12 +748,24 @@ InviteCollaboratorModal.propTypes = {
       invitee_username: PropTypes.string.isRequired,
     }),
   ).isRequired,
+  pendingInviteLinks: PropTypes.arrayOf(
+    PropTypes.shape({
+      id: PropTypes.string.isRequired,
+      token: PropTypes.string.isRequired,
+      expires_at: PropTypes.string.isRequired,
+    }),
+  ).isRequired,
   inviteUsername: PropTypes.string.isRequired,
   onInviteUsernameChange: PropTypes.func.isRequired,
+  onCreateInviteLink: PropTypes.func.isRequired,
+  onCopyInviteLink: PropTypes.func.isRequired,
+  onRevokeInviteLink: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
   onSubmit: PropTypes.func.isRequired,
   loading: PropTypes.bool,
   submitting: PropTypes.bool,
+  inviteLinkSubmitting: PropTypes.bool,
+  inviteLinkPendingId: PropTypes.string,
   error: PropTypes.string,
   success: PropTypes.string,
 };
@@ -704,11 +800,15 @@ export default function ProjectManager({ onContinue }) {
   const [inviteProject, setInviteProject] = useState(null);
   const [inviteUsername, setInviteUsername] = useState('');
   const [inviteSubmitting, setInviteSubmitting] = useState(false);
+  const [inviteLinkSubmitting, setInviteLinkSubmitting] = useState(false);
+  const [inviteLinkPendingId, setInviteLinkPendingId] = useState(null);
   const [inviteError, setInviteError] = useState('');
   const [inviteSuccess, setInviteSuccess] = useState('');
   const [collaboratorSnapshot, setCollaboratorSnapshot] = useState({
+    billing: null,
     collaborators: [],
     pendingInvites: [],
+    pendingInviteLinks: [],
   });
   const [loadingCollaborators, setLoadingCollaborators] = useState(false);
 
@@ -751,8 +851,10 @@ export default function ProjectManager({ onContinue }) {
           throw new Error(data.error || 'Failed to load collaborators');
         }
         setCollaboratorSnapshot({
+          billing: data.billing || null,
           collaborators: data.collaborators || [],
           pendingInvites: data.pendingInvites || [],
+          pendingInviteLinks: data.pendingInviteLinks || [],
         });
       } catch (err) {
         setInviteError(err.message);
@@ -769,7 +871,12 @@ export default function ProjectManager({ onContinue }) {
 
   useEffect(() => {
     if (!inviteProject?.id) {
-      setCollaboratorSnapshot({ collaborators: [], pendingInvites: [] });
+      setCollaboratorSnapshot({
+        billing: null,
+        collaborators: [],
+        pendingInvites: [],
+        pendingInviteLinks: [],
+      });
       setInviteError('');
       setInviteSuccess('');
       return;
@@ -793,7 +900,6 @@ export default function ProjectManager({ onContinue }) {
           project.ownerUsername,
           project.accessRole === 'owner' ? 'mine' : 'collaborating',
           WORKFLOW_META[summary.workflowStage]?.label,
-          summary.hasSharedComposition ? 'shared' : '',
           summary.hasRenderOutput ? 'rendered' : '',
           summary.hasMidi ? 'midi' : '',
         ]
@@ -873,6 +979,66 @@ export default function ProjectManager({ onContinue }) {
     }
   };
 
+  const handleCreateInviteLink = async () => {
+    if (!inviteProject?.id) return;
+
+    setInviteLinkSubmitting(true);
+    setInviteError('');
+    setInviteSuccess('');
+    try {
+      const res = await authFetch(`/projects/${inviteProject.id}/invite-links`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to create invite link');
+      }
+      setInviteSuccess('Invite link created. Copy it and send it to your collaborator.');
+      await loadCollaborators(inviteProject.id);
+    } catch (err) {
+      setInviteError(err.message);
+    } finally {
+      setInviteLinkSubmitting(false);
+    }
+  };
+
+  const handleCopyInviteLink = async (inviteLink) => {
+    setInviteLinkPendingId(inviteLink.id);
+    setInviteError('');
+    setInviteSuccess('');
+    try {
+      await navigator.clipboard.writeText(buildInviteLinkUrl(inviteLink.token));
+      setInviteSuccess('Invite link copied to the clipboard.');
+    } catch (err) {
+      setInviteError(err.message || 'Failed to copy invite link');
+    } finally {
+      setInviteLinkPendingId(null);
+    }
+  };
+
+  const handleRevokeInviteLink = async (inviteLinkId) => {
+    setInviteLinkPendingId(inviteLinkId);
+    setInviteError('');
+    setInviteSuccess('');
+    try {
+      const res = await authFetch(`/projects/invite-links/${inviteLinkId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to revoke invite link');
+      }
+      setInviteSuccess('Invite link revoked.');
+      if (inviteProject?.id) {
+        await loadCollaborators(inviteProject.id);
+      }
+    } catch (err) {
+      setInviteError(err.message);
+    } finally {
+      setInviteLinkPendingId(null);
+    }
+  };
+
   const handleAcceptInvite = async (inviteId) => {
     setInviteActionPendingId(inviteId);
     setCollabError('');
@@ -938,7 +1104,7 @@ export default function ProjectManager({ onContinue }) {
               <div>
                 <h3 className='pm-invites-panel__title'>Pending invites</h3>
                 <p className='pm-invites-panel__subtitle'>
-                  Accept an invite to bring a shared project into your
+                  Accept an invite to bring a collaborative project into your
                   workspace.
                 </p>
               </div>
@@ -1161,14 +1327,21 @@ export default function ProjectManager({ onContinue }) {
 
         <InviteCollaboratorModal
           project={inviteProject}
+          billing={collaboratorSnapshot.billing}
           collaborators={collaboratorSnapshot.collaborators}
           pendingInvites={collaboratorSnapshot.pendingInvites}
+          pendingInviteLinks={collaboratorSnapshot.pendingInviteLinks}
           inviteUsername={inviteUsername}
           onInviteUsernameChange={setInviteUsername}
+          onCreateInviteLink={handleCreateInviteLink}
+          onCopyInviteLink={handleCopyInviteLink}
+          onRevokeInviteLink={handleRevokeInviteLink}
           onClose={() => setInviteProject(null)}
           onSubmit={handleInviteSubmit}
           loading={loadingCollaborators}
           submitting={inviteSubmitting}
+          inviteLinkSubmitting={inviteLinkSubmitting}
+          inviteLinkPendingId={inviteLinkPendingId}
           error={inviteError}
           success={inviteSuccess}
         />

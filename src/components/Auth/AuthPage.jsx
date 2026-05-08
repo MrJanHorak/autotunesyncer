@@ -1,16 +1,26 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import LegalModal from '../Legal/LegalModal.jsx';
+import { CURRENT_LEGAL_VERSIONS } from '../../../shared/legalDocuments.js';
 import './AuthPage.css';
 
 export default function AuthPage() {
   const { login, register } = useAuth();
   const [mode, setMode] = useState('login'); // 'login' | 'register'
-  const [form, setForm] = useState({ username: '', email: '', password: '' });
+  const [form, setForm] = useState({
+    username: '',
+    email: '',
+    password: '',
+    acceptLegal: false,
+  });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [activeLegalDocument, setActiveLegalDocument] = useState(null);
 
   const handleChange = (e) => {
-    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+    const value =
+      e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    setForm((prev) => ({ ...prev, [e.target.name]: value }));
     setError('');
   };
 
@@ -22,7 +32,15 @@ export default function AuthPage() {
       if (mode === 'login') {
         await login(form.email, form.password);
       } else {
-        await register(form.username, form.email, form.password);
+        if (!form.acceptLegal) {
+          throw new Error(
+            'You must accept the Terms, Privacy Policy, and Copyright Policy to create an account.',
+          );
+        }
+        await register(form.username, form.email, form.password, {
+          accepted: true,
+          versions: CURRENT_LEGAL_VERSIONS,
+        });
       }
     } catch (err) {
       setError(err.message);
@@ -33,6 +51,12 @@ export default function AuthPage() {
 
   return (
     <div className="auth-page">
+      {activeLegalDocument && (
+        <LegalModal
+          documentKey={activeLegalDocument}
+          onClose={() => setActiveLegalDocument(null)}
+        />
+      )}
       <div className="auth-card">
         <h1 className="auth-title">🎵 AutoTuneSyncer</h1>
         <p className="auth-subtitle">Sign in to manage your projects and clips</p>
@@ -98,12 +122,55 @@ export default function AuthPage() {
             />
           </div>
 
+          {mode === 'register' && (
+            <label className="auth-consent">
+              <input
+                name="acceptLegal"
+                type="checkbox"
+                checked={form.acceptLegal}
+                onChange={handleChange}
+                required
+              />
+              <span>
+                I agree to the{' '}
+                <button type="button" onClick={() => setActiveLegalDocument('terms')}>
+                  Terms of Use
+                </button>
+                ,{' '}
+                <button type="button" onClick={() => setActiveLegalDocument('privacy')}>
+                  Privacy Policy
+                </button>
+                , and{' '}
+                <button type="button" onClick={() => setActiveLegalDocument('copyright')}>
+                  Copyright Policy
+                </button>
+                . I understand I may upload only media I own or am authorized to use.
+              </span>
+            </label>
+          )}
+
           {error && <p className="auth-error">{error}</p>}
 
           <button className="auth-submit" type="submit" disabled={loading}>
             {loading ? 'Please wait…' : mode === 'login' ? 'Sign In' : 'Create Account'}
           </button>
         </form>
+
+        <div className="auth-legal-note">
+          Upload only content you own or are licensed to use. Valid infringement notices may lead to removal and repeat-infringer enforcement.
+        </div>
+
+        <div className="auth-legal-links">
+          <button type="button" onClick={() => setActiveLegalDocument('terms')}>
+            Terms
+          </button>
+          <button type="button" onClick={() => setActiveLegalDocument('privacy')}>
+            Privacy
+          </button>
+          <button type="button" onClick={() => setActiveLegalDocument('copyright')}>
+            Copyright
+          </button>
+        </div>
       </div>
     </div>
   );

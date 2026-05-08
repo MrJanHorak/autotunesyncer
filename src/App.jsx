@@ -5,12 +5,10 @@ import {
   AlertTriangle,
   Film,
   Music,
-  Grid3x3,
   FolderOpen,
   LogOut,
-  Bell,
   Settings,
-  User,
+  FileText,
   Download,
   Upload,
   Undo2,
@@ -61,11 +59,8 @@ import Mixer from './components/Mixer/Mixer';
 import PreviewPlayer from './components/PreviewPlayer/PreviewPlayer';
 import CompositionStylePanel from './components/CompositionStylePanel/CompositionStylePanel';
 
-// Social components
-import SocialFeed from './components/Social/SocialFeed.jsx';
-import CompositionDetail from './components/Social/CompositionDetail.jsx';
-import UserProfile from './components/Social/UserProfile.jsx';
-import Notifications from './components/Social/Notifications.jsx';
+// Account settings currently reuse the existing modal implementation.
+import LegalModal from './components/Legal/LegalModal.jsx';
 import SettingsModal from './components/Social/Settings.jsx';
 import './components/Social/Social.css';
 
@@ -104,23 +99,17 @@ function App() {
   } = useAuth();
   const { currentProject, selectProject } = useProject();
 
-  // Top-level view: 'compose' (requires project) | 'feed' (social)
+  // Top-level view: 'compose' (editor) | 'projects'
   const [appView, setAppView] = useState('compose');
-
-  // Social navigation: { page: 'feed' | 'detail' | 'profile', id: null | string }
-  const [socialNav, setSocialNav] = useState({ page: 'feed', id: null });
-
-  // Handle deep-link: ?composition=ID — open the feed and navigate to that composition
-  useEffect(() => {
+  const [inviteToken, setInviteToken] = useState(() => {
     const params = new URLSearchParams(window.location.search);
-    const compositionId = params.get('composition');
-    if (compositionId) {
-      setAppView('feed');
-      setSocialNav({ page: 'detail', id: compositionId });
-      // Clean the URL so refreshing doesn't re-trigger
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, []);
+    return params.get('invite');
+  });
+  const [settingsQueryTab, setSettingsQueryTab] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedTab = params.get('settings');
+    return requestedTab === 'billing' ? 'billing' : null;
+  });
 
   // When a project is selected while on the Projects tab, auto-switch to Editor
   useEffect(() => {
@@ -152,67 +141,129 @@ function App() {
     };
   }, [userMenuOpen]);
 
-  // Notifications panel
-  const [notifOpen, setNotifOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
-
-  const fetchUnreadCount = useCallback(async () => {
-    if (!isAuthenticated) return;
-    try {
-      const token = localStorage.getItem('auth_token');
-      const res = await fetch(
-        'http://localhost:3000/api/social/notifications/unread-count',
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setUnreadCount(data.count || 0);
-      }
-    } catch {
-      /* ignore */
-    }
-  }, [isAuthenticated]);
-
-  useEffect(() => {
-    fetchUnreadCount();
-    const interval = setInterval(fetchUnreadCount, 15000);
-    const handleFocus = () => fetchUnreadCount();
-    window.addEventListener('focus', handleFocus);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocus);
-    };
-  }, [fetchUnreadCount]);
-
-  const handleSelectProjectFromNotification = useCallback(
-    async (projectId) => {
-      if (!projectId) return;
-      if (currentProject?.id === projectId) {
-        setAppView('compose');
-        setNotifOpen(false);
-        return;
-      }
-
-      try {
-        const res = await apiFetch(`/projects/${projectId}`);
-        const data = await res.json();
-        if (data?.project) {
-          selectProject(data.project);
-          setAppView('compose');
-        }
-      } catch (err) {
-        console.warn('[notifications] Failed to open project:', err);
-      } finally {
-        setNotifOpen(false);
-      }
-    },
-    [currentProject?.id, selectProject],
-  );
-
   // Settings modal
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState(
+    settingsQueryTab || 'profile',
+  );
+  const [legalDocument, setLegalDocument] = useState(null);
+  const [inviteLinkState, setInviteLinkState] = useState({
+    loading: false,
+    inviteLink: null,
+    error: '',
+  });
+
+  const clearSettingsQuery = useCallback(() => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('settings');
+    params.delete('checkout');
+    const nextSearch = params.toString();
+    window.history.replaceState(
+      {},
+      '',
+      nextSearch ? `${window.location.pathname}?${nextSearch}` : window.location.pathname,
+    );
+    setSettingsQueryTab(null);
+  }, []);
+
+  const handleOpenSettings = useCallback((initialTab = 'profile') => {
+    setSettingsInitialTab(initialTab);
+    setSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false);
+    clearSettingsQuery();
+  }, [clearSettingsQuery]);
+
+  const clearInviteToken = useCallback(() => {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('invite');
+    const nextSearch = params.toString();
+    window.history.replaceState(
+      {},
+      '',
+      nextSearch ? `${window.location.pathname}?${nextSearch}` : window.location.pathname,
+    );
+    setInviteToken(null);
+    setInviteLinkState({ loading: false, inviteLink: null, error: '' });
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated && inviteToken) {
+      setShowAuth(true);
+    }
+  }, [isAuthenticated, inviteToken]);
+
+  useEffect(() => {
+    if (isAuthenticated && settingsQueryTab) {
+      setSettingsInitialTab(settingsQueryTab);
+      setSettingsOpen(true);
+    }
+  }, [isAuthenticated, settingsQueryTab]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !inviteToken) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadInviteLink = async () => {
+      setInviteLinkState({ loading: true, inviteLink: null, error: '' });
+      try {
+        const res = await apiFetch(`/projects/invite-links/${inviteToken}`);
+        const data = await res.json();
+        if (cancelled) return;
+        setInviteLinkState({
+          loading: false,
+          inviteLink: data.inviteLink,
+          error: '',
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setInviteLinkState({
+          loading: false,
+          inviteLink: null,
+          error: err.message,
+        });
+      }
+    };
+
+    void loadInviteLink();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteToken, isAuthenticated]);
+
+  const handleAcceptInviteLink = useCallback(async () => {
+    if (!inviteToken) return;
+
+    setInviteLinkState((prev) => ({ ...prev, loading: true, error: '' }));
+    try {
+      const acceptRes = await apiFetch(
+        `/projects/invite-links/${inviteToken}/accept`,
+        {
+          method: 'POST',
+        },
+      );
+      const acceptData = await acceptRes.json();
+      const projectRes = await apiFetch(`/projects/${acceptData.project.id}`);
+      const projectData = await projectRes.json();
+      if (projectData?.project) {
+        selectProject(projectData.project);
+      }
+      setAppView('compose');
+      clearInviteToken();
+    } catch (err) {
+      setInviteLinkState((prev) => ({
+        ...prev,
+        loading: false,
+        error: err.message,
+      }));
+    }
+  }, [clearInviteToken, inviteToken, selectProject]);
 
   // Auth modal wrapper
   function AuthPageModal({ onClose }) {
@@ -262,6 +313,75 @@ function App() {
   }
   AuthPageModal.propTypes = { onClose: PropTypes.func.isRequired };
 
+  function InviteLinkModal({ inviteState, onAccept, onClose }) {
+    const inviteLink = inviteState.inviteLink;
+
+    return (
+      <div className='pm-modal-overlay' onClick={onClose}>
+        <div className='pm-modal' onClick={(event) => event.stopPropagation()}>
+          <div className='pm-modal__header'>
+            <div>
+              <h3 className='pm-modal__title'>Project invitation</h3>
+              <p className='pm-modal__subtitle'>
+                {inviteLink
+                  ? `@${inviteLink.inviterUsername} invited you to collaborate on ${inviteLink.projectName}.`
+                  : 'Resolve this collaboration invite to continue.'}
+              </p>
+            </div>
+          </div>
+
+          {inviteState.error ? <p className='pm-error'>{inviteState.error}</p> : null}
+
+          {inviteLink ? (
+            <div className='pm-modal__section'>
+              <div className='pm-collab-list'>
+                <div className='pm-collab-chip'>
+                  <Users size={13} /> {inviteLink.projectName}
+                </div>
+                <div className='pm-collab-chip'>
+                  Expires {new Date(inviteLink.expiresAt).toLocaleDateString()}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          <div className='pm-create-form__actions'>
+            <button
+              type='button'
+              className='pm-btn-primary'
+              onClick={onAccept}
+              disabled={inviteState.loading || !inviteLink?.canAccept}
+            >
+              {inviteState.loading
+                ? 'Working…'
+                : inviteLink?.canAccept
+                  ? 'Accept invite'
+                  : 'Access already granted'}
+            </button>
+            <button type='button' className='pm-btn-ghost' onClick={onClose}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  InviteLinkModal.propTypes = {
+    inviteState: PropTypes.shape({
+      loading: PropTypes.bool.isRequired,
+      inviteLink: PropTypes.shape({
+        projectName: PropTypes.string,
+        inviterUsername: PropTypes.string,
+        expiresAt: PropTypes.string,
+        canAccept: PropTypes.bool,
+      }),
+      error: PropTypes.string,
+    }).isRequired,
+    onAccept: PropTypes.func.isRequired,
+    onClose: PropTypes.func.isRequired,
+  };
+
   // Wire API service so all fetch helpers include auth headers + projectId.
   // Called synchronously (not in useEffect) so child effects can use apiFetch immediately.
   configureApiService({
@@ -301,7 +421,7 @@ function App() {
           </button>
           <div className='app-nav__tabs'>
             <button className='app-nav__tab app-nav__tab--active'>
-              <Grid3x3 className='app-nav__tab-icon' /> Feed
+              <FolderOpen className='app-nav__tab-icon' /> Projects
             </button>
           </div>
           <div className='app-nav__right'>
@@ -323,7 +443,6 @@ function App() {
         className='app-nav__brand'
         onClick={() => {
           setAppView('compose');
-          setSocialNav({ page: 'feed', id: null });
         }}
       >
         <span className='app-nav__brand-icon'>
@@ -340,15 +459,6 @@ function App() {
           <Music className='app-nav__tab-icon' /> Editor
         </button>
         <button
-          className={`app-nav__tab${appView === 'feed' ? ' app-nav__tab--active' : ''}`}
-          onClick={() => {
-            setAppView('feed');
-            setSocialNav({ page: 'feed', id: null });
-          }}
-        >
-          <Grid3x3 className='app-nav__tab-icon' /> Feed
-        </button>
-        <button
           className={`app-nav__tab${appView === 'projects' ? ' app-nav__tab--active' : ''}`}
           onClick={() => setAppView('projects')}
         >
@@ -363,86 +473,65 @@ function App() {
           </span>
         )}
         {user && (
-          <>
-            {/* Bell icon with unread dot */}
+          <div className='app-nav__user-menu' ref={userMenuRef}>
             <button
-              className='app-nav__bell-btn'
+              className='app-nav__avatar-btn'
               onClick={() => {
-                setNotifOpen((v) => !v);
-                setUserMenuOpen(false);
+                setUserMenuOpen((v) => !v);
               }}
-              aria-label='Notifications'
+              aria-label='User menu'
+              aria-expanded={userMenuOpen}
             >
-              <Bell size={18} />
-              {unreadCount > 0 && (
-                <span className='app-nav__notif-dot'>
-                  {unreadCount > 9 ? '9+' : unreadCount}
+              {user.profileImageUrl ? (
+                <img
+                  src={user.profileImageUrl}
+                  alt={user.username}
+                  className='app-nav__avatar-img'
+                />
+              ) : (
+                <span className='app-nav__avatar-initials'>
+                  {user.username?.[0]?.toUpperCase() || 'U'}
                 </span>
               )}
             </button>
-
-            <div className='app-nav__user-menu' ref={userMenuRef}>
-              <button
-                className='app-nav__avatar-btn'
-                onClick={() => {
-                  setUserMenuOpen((v) => !v);
-                  setNotifOpen(false);
-                }}
-                aria-label='User menu'
-                aria-expanded={userMenuOpen}
-              >
-                {user.profileImageUrl ? (
-                  <img
-                    src={user.profileImageUrl}
-                    alt={user.username}
-                    className='app-nav__avatar-img'
-                  />
-                ) : (
-                  <span className='app-nav__avatar-initials'>
-                    {user.username?.[0]?.toUpperCase() || 'U'}
+            {userMenuOpen && (
+              <div className='app-nav__dropdown'>
+                <div className='app-nav__dropdown-header'>
+                  <span className='app-nav__dropdown-username'>
+                    @{user.username}
                   </span>
-                )}
-              </button>
-              {userMenuOpen && (
-                <div className='app-nav__dropdown'>
-                  <div className='app-nav__dropdown-header'>
-                    <span className='app-nav__dropdown-username'>
-                      @{user.username}
-                    </span>
-                  </div>
-                  <button
-                    className='app-nav__dropdown-item'
-                    onClick={() => {
-                      setAppView('feed');
-                      setSocialNav({ page: 'profile', id: user.id });
-                      setUserMenuOpen(false);
-                    }}
-                  >
-                    <User size={15} /> My Profile
-                  </button>
-                  <button
-                    className='app-nav__dropdown-item'
-                    onClick={() => {
-                      setSettingsOpen(true);
-                      setUserMenuOpen(false);
-                    }}
-                  >
-                    <Settings size={15} /> Settings
-                  </button>
-                  <div className='app-nav__dropdown-divider' />
-                  <button
-                    className='app-nav__dropdown-item app-nav__dropdown-item--danger'
-                    onClick={() => {
-                      setUserMenuOpen(false);
-                      logout();
-                    }}
-                  >
-                    <LogOut size={15} /> Sign Out
-                  </button>
                 </div>
-              )}
-            </div>
-          </>
+                <button
+                  className='app-nav__dropdown-item'
+                  onClick={() => {
+                    setLegalDocument('terms');
+                    setUserMenuOpen(false);
+                  }}
+                >
+                  <FileText size={15} /> Legal
+                </button>
+                <button
+                  className='app-nav__dropdown-item'
+                  onClick={() => {
+                    handleOpenSettings('profile');
+                    setUserMenuOpen(false);
+                  }}
+                >
+                  <Settings size={15} /> Settings
+                </button>
+                <div className='app-nav__dropdown-divider' />
+                <button
+                  className='app-nav__dropdown-item app-nav__dropdown-item--danger'
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    logout();
+                  }}
+                >
+                  <LogOut size={15} /> Sign Out
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </nav>
@@ -450,66 +539,27 @@ function App() {
 
   const overlays = (
     <>
-      {notifOpen && (
-        <div className='notif-panel-wrap'>
-          <Notifications
-            onClose={() => {
-              setNotifOpen(false);
-              setUnreadCount(0);
-            }}
-            onOpenProjects={() => {
-              setAppView('projects');
-              setNotifOpen(false);
-            }}
-            onSelectProject={handleSelectProjectFromNotification}
-            onSelectComposition={(id) => {
-              setAppView('feed');
-              setSocialNav({ page: 'detail', id });
-              setNotifOpen(false);
-            }}
-          />
-        </div>
+      {legalDocument && (
+        <LegalModal
+          documentKey={legalDocument}
+          onClose={() => setLegalDocument(null)}
+        />
       )}
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {inviteToken && (
+        <InviteLinkModal
+          inviteState={inviteLinkState}
+          onAccept={handleAcceptInviteLink}
+          onClose={clearInviteToken}
+        />
+      )}
+      {settingsOpen && (
+        <SettingsModal
+          initialTab={settingsInitialTab}
+          onClose={handleCloseSettings}
+        />
+      )}
     </>
   );
-
-  if (appView === 'feed') {
-    return (
-      <div style={{ minHeight: '100vh', background: 'var(--social-bg)' }}>
-        {navBar}
-        {overlays}
-        {socialNav.page === 'feed' && (
-          <SocialFeed
-            onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
-            onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
-            disableInteractions={!isAuthenticated}
-          />
-        )}
-        {socialNav.page === 'detail' && (
-          <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 1rem' }}>
-            <CompositionDetail
-              compositionId={socialNav.id}
-              onBack={() => setSocialNav({ page: 'feed', id: null })}
-              onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
-              onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
-              disableInteractions={!isAuthenticated}
-            />
-          </div>
-        )}
-        {socialNav.page === 'profile' && (
-          <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 1rem' }}>
-            <UserProfile
-              userId={socialNav.id}
-              onBack={() => setSocialNav({ page: 'feed', id: null })}
-              onSelectComposition={(id) => setSocialNav({ page: 'detail', id })}
-              onSelectUser={(id) => setSocialNav({ page: 'profile', id })}
-            />
-          </div>
-        )}
-      </div>
-    );
-  }
 
   // Projects tab — always shows project manager
   if (appView === 'projects') {
@@ -613,8 +663,22 @@ function MainApp({ onChangeProject, onLogout }) {
   // so we don't send duplicate requests on every re-render.
   const precachedKeysRef = useRef(new Set());
 
+  const isCollaborativeProject = Boolean(
+    currentProject &&
+      (currentProject.accessRole !== 'owner' ||
+        Number(currentProject.summary?.collaboratorCount || 0) > 0),
+  );
+
   // Project-scoped persistence: clip list, blob cache, state restore & save
   const handleProjectConflict = useCallback((conflictError) => {
+    if (
+      !currentProject ||
+      (currentProject.accessRole === 'owner' &&
+        Number(currentProject.summary?.collaboratorCount || 0) === 0)
+    ) {
+      return;
+    }
+
     setRemoteProjectUpdate((prev) => {
       const nextVersion = Number(conflictError?.currentStateVersion) || 0;
       if ((prev?.stateVersion || 0) >= nextVersion) {
@@ -630,7 +694,7 @@ function MainApp({ onChangeProject, onLogout }) {
         stateVersion: nextVersion,
       };
     });
-  }, []);
+  }, [currentProject]);
 
   const { savedClipKeys, setSavedClipKeys, clipBlobCache, reloadProjectState } =
     useProjectSync({
@@ -660,6 +724,10 @@ function MainApp({ onChangeProject, onLogout }) {
 
   const handleRemoteStateSaved = useCallback(
     (payload) => {
+      if (!isCollaborativeProject) {
+        return;
+      }
+
       if (payload?.clientId && payload.clientId === realtimeClientId) {
         return;
       }
@@ -685,7 +753,7 @@ function MainApp({ onChangeProject, onLogout }) {
         };
       });
     },
-    [currentProjectStateVersion, realtimeClientId],
+    [currentProjectStateVersion, isCollaborativeProject, realtimeClientId],
   );
 
   const { presenceUsers, connectionState } = useProjectRealtime({
