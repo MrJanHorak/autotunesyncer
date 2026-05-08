@@ -275,10 +275,9 @@
 
 .pm-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, auto) minmax(220px, 1.2fr) minmax(
-      280px,
-      1.3fr
-    ) auto;
+  grid-template-columns:
+    minmax(220px, auto) minmax(220px, 1.2fr) minmax(280px, 1.3fr)
+    auto;
   gap: 0.85rem;
   align-items: center;
   margin-bottom: 1.25rem;

@@ -392,11 +392,11 @@ export const saveProjectState = (req, res) => {
 
   const hasCollaborators = Boolean(
     project.accessRole !== 'owner' ||
-      db
-        .prepare(
-          'SELECT 1 FROM project_collaborators WHERE project_id = ? LIMIT 1',
-        )
-        .get(req.params.id),
+    db
+      .prepare(
+        'SELECT 1 FROM project_collaborators WHERE project_id = ? LIMIT 1',
+      )
+      .get(req.params.id),
   );
 
   if (hasCollaborators) {

@@ -50,124 +50,157 @@ export default function AuthPage() {
   };
 
   return (
-    <div className="auth-page">
+    <div className='auth-page'>
       {activeLegalDocument && (
         <LegalModal
           documentKey={activeLegalDocument}
           onClose={() => setActiveLegalDocument(null)}
         />
       )}
-      <div className="auth-card">
-        <h1 className="auth-title">🎵 AutoTuneSyncer</h1>
-        <p className="auth-subtitle">Sign in to manage your projects and clips</p>
+      <div className='auth-card'>
+        <h1 className='auth-title'>🎵 AutoTuneSyncer</h1>
+        <p className='auth-subtitle'>
+          Sign in to manage your projects and clips
+        </p>
 
-        <div className="auth-tabs">
+        <div className='auth-tabs'>
           <button
             className={`auth-tab ${mode === 'login' ? 'active' : ''}`}
-            onClick={() => { setMode('login'); setError(''); }}
+            onClick={() => {
+              setMode('login');
+              setError('');
+            }}
           >
             Sign In
           </button>
           <button
             className={`auth-tab ${mode === 'register' ? 'active' : ''}`}
-            onClick={() => { setMode('register'); setError(''); }}
+            onClick={() => {
+              setMode('register');
+              setError('');
+            }}
           >
             Create Account
           </button>
         </div>
 
-        <form className="auth-form" onSubmit={handleSubmit}>
+        <form className='auth-form' onSubmit={handleSubmit}>
           {mode === 'register' && (
-            <div className="auth-field">
-              <label htmlFor="username">Username</label>
+            <div className='auth-field'>
+              <label htmlFor='username'>Username</label>
               <input
-                id="username"
-                name="username"
-                type="text"
-                placeholder="Your username"
+                id='username'
+                name='username'
+                type='text'
+                placeholder='Your username'
                 value={form.username}
                 onChange={handleChange}
                 required
-                autoComplete="username"
+                autoComplete='username'
               />
             </div>
           )}
 
-          <div className="auth-field">
-            <label htmlFor="email">Email</label>
+          <div className='auth-field'>
+            <label htmlFor='email'>Email</label>
             <input
-              id="email"
-              name="email"
-              type="email"
-              placeholder="you@example.com"
+              id='email'
+              name='email'
+              type='email'
+              placeholder='you@example.com'
               value={form.email}
               onChange={handleChange}
               required
-              autoComplete="email"
+              autoComplete='email'
             />
           </div>
 
-          <div className="auth-field">
-            <label htmlFor="password">Password</label>
+          <div className='auth-field'>
+            <label htmlFor='password'>Password</label>
             <input
-              id="password"
-              name="password"
-              type="password"
-              placeholder={mode === 'register' ? 'At least 6 characters' : 'Your password'}
+              id='password'
+              name='password'
+              type='password'
+              placeholder={
+                mode === 'register' ? 'At least 6 characters' : 'Your password'
+              }
               value={form.password}
               onChange={handleChange}
               required
-              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              autoComplete={
+                mode === 'login' ? 'current-password' : 'new-password'
+              }
               minLength={mode === 'register' ? 6 : undefined}
             />
           </div>
 
           {mode === 'register' && (
-            <label className="auth-consent">
+            <label className='auth-consent'>
               <input
-                name="acceptLegal"
-                type="checkbox"
+                name='acceptLegal'
+                type='checkbox'
                 checked={form.acceptLegal}
                 onChange={handleChange}
                 required
               />
               <span>
                 I agree to the{' '}
-                <button type="button" onClick={() => setActiveLegalDocument('terms')}>
+                <button
+                  type='button'
+                  onClick={() => setActiveLegalDocument('terms')}
+                >
                   Terms of Use
                 </button>
                 ,{' '}
-                <button type="button" onClick={() => setActiveLegalDocument('privacy')}>
+                <button
+                  type='button'
+                  onClick={() => setActiveLegalDocument('privacy')}
+                >
                   Privacy Policy
                 </button>
                 , and{' '}
-                <button type="button" onClick={() => setActiveLegalDocument('copyright')}>
+                <button
+                  type='button'
+                  onClick={() => setActiveLegalDocument('copyright')}
+                >
                   Copyright Policy
                 </button>
-                . I understand I may upload only media I own or am authorized to use.
+                . I understand I may upload only media I own or am authorized to
+                use.
               </span>
             </label>
           )}
 
-          {error && <p className="auth-error">{error}</p>}
+          {error && <p className='auth-error'>{error}</p>}
 
-          <button className="auth-submit" type="submit" disabled={loading}>
-            {loading ? 'Please wait…' : mode === 'login' ? 'Sign In' : 'Create Account'}
+          <button className='auth-submit' type='submit' disabled={loading}>
+            {loading
+              ? 'Please wait…'
+              : mode === 'login'
+                ? 'Sign In'
+                : 'Create Account'}
           </button>
         </form>
 
-        <div className="auth-legal-note">
-          Upload only content you own or are licensed to use. Valid infringement notices may lead to removal and repeat-infringer enforcement.
+        <div className='auth-legal-note'>
+          Upload only content you own or are licensed to use. Valid infringement
+          notices may lead to removal and repeat-infringer enforcement.
         </div>
 
-        <div className="auth-legal-links">
-          <button type="button" onClick={() => setActiveLegalDocument('terms')}>
+        <div className='auth-legal-links'>
+          <button type='button' onClick={() => setActiveLegalDocument('terms')}>
             Terms
           </button>
-          <button type="button" onClick={() => setActiveLegalDocument('privacy')}>
+          <button
+            type='button'
+            onClick={() => setActiveLegalDocument('privacy')}
+          >
             Privacy
           </button>
-          <button type="button" onClick={() => setActiveLegalDocument('copyright')}>
+          <button
+            type='button'
+            onClick={() => setActiveLegalDocument('copyright')}
+          >
             Copyright
           </button>
         </div>

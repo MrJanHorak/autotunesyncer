@@ -31,7 +31,7 @@ export const LEGAL_DOCUMENTS = {
       {
         title: 'Prohibited Uses',
         body: [
-          'Do not upload infringing content, illegal content, malware, or content that violates another person\'s rights, privacy, or publicity rights.',
+          "Do not upload infringing content, illegal content, malware, or content that violates another person's rights, privacy, or publicity rights.",
           'Do not abuse compute resources, attempt to bypass account limits, or interfere with other users, collaborators, or the platform infrastructure.',
         ],
       },
@@ -119,7 +119,7 @@ export const LEGAL_DOCUMENTS = {
       {
         title: 'Draft Notice Procedure',
         body: [
-          'A copyright notice should identify the copyrighted work, the allegedly infringing material, the reporting party\'s contact information, and the required legal statements under the DMCA.',
+          "A copyright notice should identify the copyrighted work, the allegedly infringing material, the reporting party's contact information, and the required legal statements under the DMCA.",
           'This draft implementation is incomplete until the operator adds the production notice address, designated agent information, and a documented counter-notice process.',
         ],
       },

@@ -38,7 +38,7 @@ export function getBillingAccess(userId) {
   const normalizedPlanKey = normalizePlanKey(subscription?.plan_key);
   const isActive = Boolean(
     normalizedPlanKey &&
-      ACTIVE_BILLING_SUBSCRIPTION_STATUSES.has(subscription?.status),
+    ACTIVE_BILLING_SUBSCRIPTION_STATUSES.has(subscription?.status),
   );
   const effectivePlanKey = isActive ? normalizedPlanKey : null;
   const planRank = effectivePlanKey ? PLAN_RANK[effectivePlanKey] : 0;
@@ -54,6 +54,7 @@ export function getBillingAccess(userId) {
 }
 
 export function hasBillingPlan(userId, requiredPlanKey) {
-  const requiredPlanRank = PLAN_RANK[requiredPlanKey] || Number.MAX_SAFE_INTEGER;
+  const requiredPlanRank =
+    PLAN_RANK[requiredPlanKey] || Number.MAX_SAFE_INTEGER;
   return getBillingAccess(userId).planRank >= requiredPlanRank;
 }

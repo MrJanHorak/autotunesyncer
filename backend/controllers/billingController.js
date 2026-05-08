@@ -9,14 +9,16 @@ const PLAN_DEFINITIONS = [
   {
     key: 'creator',
     name: 'Creator',
-    description: 'Solo workspace with exports, private projects, and billing-ready growth.',
+    description:
+      'Solo workspace with exports, private projects, and billing-ready growth.',
     priceEnv: 'STRIPE_PRICE_CREATOR_MONTHLY',
     priceLabel: '$12 / month',
   },
   {
     key: 'studio',
     name: 'Studio',
-    description: 'Team billing for shared projects, invite-based collaboration, and admin controls.',
+    description:
+      'Team billing for shared projects, invite-based collaboration, and admin controls.',
     priceEnv: 'STRIPE_PRICE_STUDIO_MONTHLY',
     priceLabel: '$29 / month',
   },
@@ -90,7 +92,10 @@ function findPlanByPriceId(priceId) {
 }
 
 function isBillingEnabled() {
-  return Boolean(getStripeClient()) && getPlanCatalog().some((plan) => plan.available);
+  return (
+    Boolean(getStripeClient()) &&
+    getPlanCatalog().some((plan) => plan.available)
+  );
 }
 
 function readBillingCustomer(userId) {
@@ -219,7 +224,9 @@ function serializeBillingSubscription(subscription) {
     return null;
   }
 
-  const mappedPlan = PLAN_DEFINITIONS.find((plan) => plan.key === subscription.plan_key);
+  const mappedPlan = PLAN_DEFINITIONS.find(
+    (plan) => plan.key === subscription.plan_key,
+  );
 
   return {
     status: subscription.status,
@@ -399,8 +406,12 @@ async function syncLatestSubscriptionForUser(userId) {
   });
 
   const latestSubscription =
-    subscriptions.data.find((item) => ACTIVE_BILLING_SUBSCRIPTION_STATUSES.has(item.status)) ||
-    subscriptions.data.sort((left, right) => (right.created || 0) - (left.created || 0))[0];
+    subscriptions.data.find((item) =>
+      ACTIVE_BILLING_SUBSCRIPTION_STATUSES.has(item.status),
+    ) ||
+    subscriptions.data.sort(
+      (left, right) => (right.created || 0) - (left.created || 0),
+    )[0];
 
   if (!latestSubscription) {
     return readBillingSubscription(userId);
@@ -445,7 +456,9 @@ export const createCheckoutSession = async (req, res) => {
   }
 
   if (!plan.priceId) {
-    return res.status(400).json({ error: 'That billing plan is not configured yet' });
+    return res
+      .status(400)
+      .json({ error: 'That billing plan is not configured yet' });
   }
 
   try {
@@ -456,7 +469,8 @@ export const createCheckoutSession = async (req, res) => {
       ACTIVE_BILLING_SUBSCRIPTION_STATUSES.has(activeSubscription.status)
     ) {
       return res.status(409).json({
-        error: 'An active subscription already exists. Use Manage Billing instead.',
+        error:
+          'An active subscription already exists. Use Manage Billing instead.',
       });
     }
 
@@ -466,7 +480,9 @@ export const createCheckoutSession = async (req, res) => {
     );
 
     if (String(req.body?.promotionCode || '').trim() && !promotionCodeId) {
-      return res.status(400).json({ error: 'Promo code was not found or is inactive' });
+      return res
+        .status(400)
+        .json({ error: 'Promo code was not found or is inactive' });
     }
 
     const customerId = await ensureStripeCustomer(req.user);
@@ -479,7 +495,9 @@ export const createCheckoutSession = async (req, res) => {
       cancel_url: `${baseUrl}/?settings=billing&checkout=cancelled`,
       line_items: [{ price: plan.priceId, quantity: 1 }],
       allow_promotion_codes: !promotionCodeId,
-      discounts: promotionCodeId ? [{ promotion_code: promotionCodeId }] : undefined,
+      discounts: promotionCodeId
+        ? [{ promotion_code: promotionCodeId }]
+        : undefined,
       metadata: {
         userId: req.user.id,
         planKey: plan.key,
@@ -511,7 +529,9 @@ export const createBillingPortalSession = async (req, res) => {
 
   const customer = readBillingCustomer(req.user.id);
   if (!customer?.stripe_customer_id) {
-    return res.status(404).json({ error: 'No billing customer exists for this account yet' });
+    return res
+      .status(404)
+      .json({ error: 'No billing customer exists for this account yet' });
   }
 
   try {
@@ -528,9 +548,12 @@ export const createBillingPortalSession = async (req, res) => {
 };
 
 async function handleCheckoutCompleted(stripe, session) {
-  const userId = session.client_reference_id || session.metadata?.userId || null;
+  const userId =
+    session.client_reference_id || session.metadata?.userId || null;
   const stripeCustomerId =
-    typeof session.customer === 'string' ? session.customer : session.customer?.id;
+    typeof session.customer === 'string'
+      ? session.customer
+      : session.customer?.id;
 
   if (!userId || !stripeCustomerId) {
     return;
@@ -553,7 +576,9 @@ async function handleCheckoutCompleted(stripe, session) {
   });
 
   if (session.subscription) {
-    const subscription = await stripe.subscriptions.retrieve(session.subscription);
+    const subscription = await stripe.subscriptions.retrieve(
+      session.subscription,
+    );
     await syncSubscriptionRecord(stripe, subscription, userId);
   }
 }

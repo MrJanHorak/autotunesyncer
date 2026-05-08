@@ -199,7 +199,14 @@ export const createProjectInviteLink = (req, res) => {
       )
       VALUES (?, ?, ?, ?, ?, ?)
     `,
-  ).run(inviteLinkId, req.params.id, req.user.id, INVITE_ROLE, token, expiresAt);
+  ).run(
+    inviteLinkId,
+    req.params.id,
+    req.user.id,
+    INVITE_ROLE,
+    token,
+    expiresAt,
+  );
 
   res.status(201).json({
     inviteLink: {

@@ -589,7 +589,8 @@ function InviteCollaboratorModal({
             <div className='pm-upgrade-note__copy'>
               <strong>Studio plan required</strong>
               <span>
-                Upgrade in Settings → Billing before you can invite new collaborators or create collaboration links.
+                Upgrade in Settings → Billing before you can invite new
+                collaborators or create collaboration links.
               </span>
             </div>
           </div>
@@ -615,7 +616,9 @@ function InviteCollaboratorModal({
             <button
               type='submit'
               className='pm-btn-primary'
-              disabled={collaborationLocked || submitting || !inviteUsername.trim()}
+              disabled={
+                collaborationLocked || submitting || !inviteUsername.trim()
+              }
             >
               {submitting ? 'Sending…' : 'Send Invite'}
             </button>
@@ -986,14 +989,19 @@ export default function ProjectManager({ onContinue }) {
     setInviteError('');
     setInviteSuccess('');
     try {
-      const res = await authFetch(`/projects/${inviteProject.id}/invite-links`, {
-        method: 'POST',
-      });
+      const res = await authFetch(
+        `/projects/${inviteProject.id}/invite-links`,
+        {
+          method: 'POST',
+        },
+      );
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Failed to create invite link');
       }
-      setInviteSuccess('Invite link created. Copy it and send it to your collaborator.');
+      setInviteSuccess(
+        'Invite link created. Copy it and send it to your collaborator.',
+      );
       await loadCollaborators(inviteProject.id);
     } catch (err) {
       setInviteError(err.message);

@@ -161,7 +161,9 @@ function App() {
     window.history.replaceState(
       {},
       '',
-      nextSearch ? `${window.location.pathname}?${nextSearch}` : window.location.pathname,
+      nextSearch
+        ? `${window.location.pathname}?${nextSearch}`
+        : window.location.pathname,
     );
     setSettingsQueryTab(null);
   }, []);
@@ -183,7 +185,9 @@ function App() {
     window.history.replaceState(
       {},
       '',
-      nextSearch ? `${window.location.pathname}?${nextSearch}` : window.location.pathname,
+      nextSearch
+        ? `${window.location.pathname}?${nextSearch}`
+        : window.location.pathname,
     );
     setInviteToken(null);
     setInviteLinkState({ loading: false, inviteLink: null, error: '' });
@@ -330,7 +334,9 @@ function App() {
             </div>
           </div>
 
-          {inviteState.error ? <p className='pm-error'>{inviteState.error}</p> : null}
+          {inviteState.error ? (
+            <p className='pm-error'>{inviteState.error}</p>
+          ) : null}
 
           {inviteLink ? (
             <div className='pm-modal__section'>
@@ -665,36 +671,39 @@ function MainApp({ onChangeProject, onLogout }) {
 
   const isCollaborativeProject = Boolean(
     currentProject &&
-      (currentProject.accessRole !== 'owner' ||
-        Number(currentProject.summary?.collaboratorCount || 0) > 0),
+    (currentProject.accessRole !== 'owner' ||
+      Number(currentProject.summary?.collaboratorCount || 0) > 0),
   );
 
   // Project-scoped persistence: clip list, blob cache, state restore & save
-  const handleProjectConflict = useCallback((conflictError) => {
-    if (
-      !currentProject ||
-      (currentProject.accessRole === 'owner' &&
-        Number(currentProject.summary?.collaboratorCount || 0) === 0)
-    ) {
-      return;
-    }
-
-    setRemoteProjectUpdate((prev) => {
-      const nextVersion = Number(conflictError?.currentStateVersion) || 0;
-      if ((prev?.stateVersion || 0) >= nextVersion) {
-        return prev;
+  const handleProjectConflict = useCallback(
+    (conflictError) => {
+      if (
+        !currentProject ||
+        (currentProject.accessRole === 'owner' &&
+          Number(currentProject.summary?.collaboratorCount || 0) === 0)
+      ) {
+        return;
       }
 
-      return {
-        type: 'conflict',
-        message:
-          conflictError?.message ||
-          'A newer collaborator save is available for this project.',
-        actorUsername: null,
-        stateVersion: nextVersion,
-      };
-    });
-  }, [currentProject]);
+      setRemoteProjectUpdate((prev) => {
+        const nextVersion = Number(conflictError?.currentStateVersion) || 0;
+        if ((prev?.stateVersion || 0) >= nextVersion) {
+          return prev;
+        }
+
+        return {
+          type: 'conflict',
+          message:
+            conflictError?.message ||
+            'A newer collaborator save is available for this project.',
+          actorUsername: null,
+          stateVersion: nextVersion,
+        };
+      });
+    },
+    [currentProject],
+  );
 
   const { savedClipKeys, setSavedClipKeys, clipBlobCache, reloadProjectState } =
     useProjectSync({

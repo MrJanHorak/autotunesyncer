@@ -71,8 +71,8 @@ export default function LandingPage({ onLogin }) {
           fontSize: '0.98rem',
         }}
       >
-        Private collaboration and local downloads are the focus of this
-        release. Upload only content you own or are authorized to use.
+        Private collaboration and local downloads are the focus of this release.
+        Upload only content you own or are authorized to use.
       </p>
       <div style={{ display: 'flex', gap: 32 }}>
         <div
@@ -125,8 +125,8 @@ export default function LandingPage({ onLogin }) {
             Private Collaboration
           </h2>
           <p style={{ color: '#bdb7d2', fontSize: '1rem' }}>
-            Invite collaborators into projects, work together in the editor,
-            and keep outputs private by default.
+            Invite collaborators into projects, work together in the editor, and
+            keep outputs private by default.
           </p>
         </div>
       </div>

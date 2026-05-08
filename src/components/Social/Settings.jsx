@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import PropTypes from 'prop-types';
-import { X, User, Lock, CreditCard, Sparkles, Check, AlertCircle } from 'lucide-react';
+import {
+  X,
+  User,
+  Lock,
+  CreditCard,
+  Sparkles,
+  Check,
+  AlertCircle,
+} from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.jsx';
 
 const API_BASE = 'http://localhost:3000/api';
@@ -27,7 +35,9 @@ async function apiFetch(path, options = {}) {
 function FieldMsg({ ok, msg }) {
   if (!msg) return null;
   return (
-    <div className={`settings-msg ${ok ? 'settings-msg--ok' : 'settings-msg--err'}`}>
+    <div
+      className={`settings-msg ${ok ? 'settings-msg--ok' : 'settings-msg--err'}`}
+    >
       {ok ? <Check size={13} /> : <AlertCircle size={13} />} {msg}
     </div>
   );
@@ -40,7 +50,9 @@ function getInitialBillingMessage() {
     return { ok: false, msg: '' };
   }
 
-  const checkoutState = new URLSearchParams(window.location.search).get('checkout');
+  const checkoutState = new URLSearchParams(window.location.search).get(
+    'checkout',
+  );
   if (checkoutState === 'success') {
     return {
       ok: true,
@@ -114,13 +126,15 @@ const Settings = ({ initialTab, onClose }) => {
       try {
         const data = await apiFetch('/billing/status');
         if (cancelled) return;
-        setBillingData(data.billing || {
-          enabled: false,
-          webhookReady: false,
-          customer: null,
-          subscription: null,
-          plans: [],
-        });
+        setBillingData(
+          data.billing || {
+            enabled: false,
+            webhookReady: false,
+            customer: null,
+            subscription: null,
+            plans: [],
+          },
+        );
       } catch (err) {
         if (cancelled) return;
         setBillingMsg((current) =>
@@ -165,7 +179,10 @@ const Settings = ({ initialTab, onClose }) => {
     try {
       const data = await apiFetch('/auth/email', {
         method: 'PATCH',
-        body: JSON.stringify({ email: email.trim(), currentPassword: emailPassword }),
+        body: JSON.stringify({
+          email: email.trim(),
+          currentPassword: emailPassword,
+        }),
       });
       updateUser(data.user, data.token);
       setEmailMsg({ ok: true, msg: 'Email updated!' });
@@ -188,10 +205,15 @@ const Settings = ({ initialTab, onClose }) => {
     try {
       await apiFetch('/auth/password', {
         method: 'PATCH',
-        body: JSON.stringify({ currentPassword: currentPw, newPassword: newPw }),
+        body: JSON.stringify({
+          currentPassword: currentPw,
+          newPassword: newPw,
+        }),
       });
       setPwMsg({ ok: true, msg: 'Password changed!' });
-      setCurrentPw(''); setNewPw(''); setConfirmPw('');
+      setCurrentPw('');
+      setNewPw('');
+      setConfirmPw('');
     } catch (err) {
       setPwMsg({ ok: false, msg: err.message });
     } finally {
@@ -242,23 +264,39 @@ const Settings = ({ initialTab, onClose }) => {
   };
 
   return (
-    <div className='settings-overlay' onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div
+      className='settings-overlay'
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
       <div className='settings-modal'>
         <div className='settings-modal__header'>
           <span className='settings-modal__title'>Account Settings</span>
-          <button className='settings-modal__close' onClick={onClose} aria-label='Close settings'>
+          <button
+            className='settings-modal__close'
+            onClick={onClose}
+            aria-label='Close settings'
+          >
             <X size={18} />
           </button>
         </div>
 
         <div className='settings-tabs'>
-          <button className={`settings-tab ${tab === 'profile' ? 'settings-tab--active' : ''}`} onClick={() => setTab('profile')}>
+          <button
+            className={`settings-tab ${tab === 'profile' ? 'settings-tab--active' : ''}`}
+            onClick={() => setTab('profile')}
+          >
             <User size={14} /> Profile
           </button>
-          <button className={`settings-tab ${tab === 'security' ? 'settings-tab--active' : ''}`} onClick={() => setTab('security')}>
+          <button
+            className={`settings-tab ${tab === 'security' ? 'settings-tab--active' : ''}`}
+            onClick={() => setTab('security')}
+          >
             <Lock size={14} /> Security
           </button>
-          <button className={`settings-tab ${tab === 'billing' ? 'settings-tab--active' : ''}`} onClick={() => setTab('billing')}>
+          <button
+            className={`settings-tab ${tab === 'billing' ? 'settings-tab--active' : ''}`}
+            onClick={() => setTab('billing')}
+          >
             <CreditCard size={14} /> Billing
           </button>
         </div>
@@ -289,7 +327,11 @@ const Settings = ({ initialTab, onClose }) => {
               <span className='settings-char-count'>{bio.length}/200</span>
             </label>
             <FieldMsg {...profileMsg} />
-            <button className='settings-save-btn' type='submit' disabled={profileSaving}>
+            <button
+              className='settings-save-btn'
+              type='submit'
+              disabled={profileSaving}
+            >
               {profileSaving ? 'Saving…' : 'Save Profile'}
             </button>
           </form>
@@ -322,7 +364,11 @@ const Settings = ({ initialTab, onClose }) => {
                 />
               </label>
               <FieldMsg {...emailMsg} />
-              <button className='settings-save-btn' type='submit' disabled={emailSaving}>
+              <button
+                className='settings-save-btn'
+                type='submit'
+                disabled={emailSaving}
+              >
                 {emailSaving ? 'Saving…' : 'Update Email'}
               </button>
             </form>
@@ -334,18 +380,41 @@ const Settings = ({ initialTab, onClose }) => {
               <h4 className='settings-section-title'>Change Password</h4>
               <label className='settings-label'>
                 Current password
-                <input className='settings-input' type='password' value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} required />
+                <input
+                  className='settings-input'
+                  type='password'
+                  value={currentPw}
+                  onChange={(e) => setCurrentPw(e.target.value)}
+                  required
+                />
               </label>
               <label className='settings-label'>
                 New password
-                <input className='settings-input' type='password' value={newPw} onChange={(e) => setNewPw(e.target.value)} required minLength={6} />
+                <input
+                  className='settings-input'
+                  type='password'
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  required
+                  minLength={6}
+                />
               </label>
               <label className='settings-label'>
                 Confirm new password
-                <input className='settings-input' type='password' value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} required />
+                <input
+                  className='settings-input'
+                  type='password'
+                  value={confirmPw}
+                  onChange={(e) => setConfirmPw(e.target.value)}
+                  required
+                />
               </label>
               <FieldMsg {...pwMsg} />
-              <button className='settings-save-btn' type='submit' disabled={pwSaving}>
+              <button
+                className='settings-save-btn'
+                type='submit'
+                disabled={pwSaving}
+              >
                 {pwSaving ? 'Saving…' : 'Change Password'}
               </button>
             </form>
@@ -356,9 +425,12 @@ const Settings = ({ initialTab, onClose }) => {
           <div className='settings-billing'>
             <div className='settings-billing__hero'>
               <div>
-                <h4 className='settings-billing__title'>Stripe billing foundation</h4>
+                <h4 className='settings-billing__title'>
+                  Stripe billing foundation
+                </h4>
                 <p className='settings-billing__copy'>
-                  Keep subscriptions, promo codes, invoices, and plan changes out of the editor workflow.
+                  Keep subscriptions, promo codes, invoices, and plan changes
+                  out of the editor workflow.
                 </p>
               </div>
               <span className='settings-billing__badge'>
@@ -370,17 +442,23 @@ const Settings = ({ initialTab, onClose }) => {
 
             {billingLoading ? (
               <div className='settings-billing__panel'>
-                <p className='settings-billing__hint'>Loading billing status…</p>
+                <p className='settings-billing__hint'>
+                  Loading billing status…
+                </p>
               </div>
             ) : !billingData.enabled ? (
               <div className='settings-billing__panel'>
-                <h4 className='settings-billing__panel-title'>Billing is not configured yet</h4>
+                <h4 className='settings-billing__panel-title'>
+                  Billing is not configured yet
+                </h4>
                 <p className='settings-billing__hint'>
-                  Set `STRIPE_SECRET_KEY` and at least one Stripe price ID in the backend environment to enable checkout.
+                  Set `STRIPE_SECRET_KEY` and at least one Stripe price ID in
+                  the backend environment to enable checkout.
                 </p>
                 {!billingData.webhookReady ? (
                   <p className='settings-billing__hint'>
-                    `STRIPE_WEBHOOK_SECRET` is also missing, so subscription status sync is not active yet.
+                    `STRIPE_WEBHOOK_SECRET` is also missing, so subscription
+                    status sync is not active yet.
                   </p>
                 ) : null}
               </div>
@@ -389,7 +467,9 @@ const Settings = ({ initialTab, onClose }) => {
                 <div className='settings-billing__panel'>
                   <div className='settings-billing__panel-row'>
                     <div>
-                      <h4 className='settings-billing__panel-title'>Current plan</h4>
+                      <h4 className='settings-billing__panel-title'>
+                        Current plan
+                      </h4>
                       <p className='settings-billing__hint'>
                         {billingData.subscription
                           ? `${billingData.subscription.planName} · ${billingData.subscription.status}`
@@ -405,7 +485,8 @@ const Settings = ({ initialTab, onClose }) => {
 
                   {billingData.subscription?.cancelAtPeriodEnd ? (
                     <p className='settings-billing__hint'>
-                      This subscription is set to cancel at the end of the current billing period.
+                      This subscription is set to cancel at the end of the
+                      current billing period.
                     </p>
                   ) : null}
 
@@ -414,9 +495,13 @@ const Settings = ({ initialTab, onClose }) => {
                       type='button'
                       className='settings-save-btn'
                       onClick={handleOpenBillingPortal}
-                      disabled={!billingData.customer || billingAction === 'portal'}
+                      disabled={
+                        !billingData.customer || billingAction === 'portal'
+                      }
                     >
-                      {billingAction === 'portal' ? 'Opening…' : 'Manage Billing'}
+                      {billingAction === 'portal'
+                        ? 'Opening…'
+                        : 'Manage Billing'}
                     </button>
                   </div>
                 </div>
@@ -433,19 +518,29 @@ const Settings = ({ initialTab, onClose }) => {
                     />
                   </label>
                   <p className='settings-billing__hint'>
-                    Leave this blank to let Stripe handle promotion codes during checkout.
+                    Leave this blank to let Stripe handle promotion codes during
+                    checkout.
                   </p>
                 </div>
 
                 <div className='settings-billing__plan-grid'>
                   {billingData.plans.map((plan) => (
-                    <article key={plan.key} className='settings-billing__plan-card'>
+                    <article
+                      key={plan.key}
+                      className='settings-billing__plan-card'
+                    >
                       <div className='settings-billing__plan-copy'>
                         <div>
-                          <h4 className='settings-billing__plan-name'>{plan.name}</h4>
-                          <div className='settings-billing__plan-price'>{plan.priceLabel}</div>
+                          <h4 className='settings-billing__plan-name'>
+                            {plan.name}
+                          </h4>
+                          <div className='settings-billing__plan-price'>
+                            {plan.priceLabel}
+                          </div>
                         </div>
-                        <p className='settings-billing__plan-desc'>{plan.description}</p>
+                        <p className='settings-billing__plan-desc'>
+                          {plan.description}
+                        </p>
                       </div>
                       <button
                         type='button'
