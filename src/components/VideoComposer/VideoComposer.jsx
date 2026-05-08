@@ -288,7 +288,7 @@ const VideoComposer = ({
 
         reconnectingJob = true;
         lastModeRef.current = false;
-  onStartRef.current?.();
+        onStartRef.current?.();
         setIsProcessing(true);
         setProcessingMode('full');
         setUploadProgress(100);

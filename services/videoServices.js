@@ -167,7 +167,8 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
     const xhrOldUrl = withProjectId(`${API_BASE_URL}/process-videos`);
     xhrOld.open('POST', xhrOldUrl);
     const tokenOld = getToken();
-    if (tokenOld) xhrOld.setRequestHeader('Authorization', `Bearer ${tokenOld}`);
+    if (tokenOld)
+      xhrOld.setRequestHeader('Authorization', `Bearer ${tokenOld}`);
     xhrOld.responseType = 'blob';
 
     if (onUploadProgress) {
@@ -188,7 +189,13 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
         reader.onload = () => {
           try {
             const errData = JSON.parse(reader.result);
-            reject(new Error(errData.details || errData.error || `Server error ${xhrOld.status}`));
+            reject(
+              new Error(
+                errData.details ||
+                  errData.error ||
+                  `Server error ${xhrOld.status}`,
+              ),
+            );
           } catch {
             reject(new Error(`Server error ${xhrOld.status}`));
           }
@@ -197,7 +204,8 @@ export const composeVideos = (formData, progressCallbacks = {}) => {
       }
     };
 
-    xhrOld.onerror = () => reject(new Error('Network error during video composition'));
+    xhrOld.onerror = () =>
+      reject(new Error('Network error during video composition'));
     xhrOld.ontimeout = () => reject(new Error('Request timed out'));
 
     xhrOld.send(formData);
@@ -245,20 +253,30 @@ export const startCompositionJob = (formData, progressCallbacks = {}) => {
           const data = JSON.parse(xhr.responseText);
           settle(resolve, data.jobId);
         } catch {
-          settle(reject, new Error('Invalid server response: expected { jobId }'));
+          settle(
+            reject,
+            new Error('Invalid server response: expected { jobId }'),
+          );
         }
       } else {
         try {
           const errData = JSON.parse(xhr.responseText);
-          settle(reject, new Error(errData.details || errData.error || `Server error ${xhr.status}`));
+          settle(
+            reject,
+            new Error(
+              errData.details || errData.error || `Server error ${xhr.status}`,
+            ),
+          );
         } catch {
           settle(reject, new Error(`Server error ${xhr.status}`));
         }
       }
     };
 
-    xhr.onabort = () => settle(reject, new DOMException('Upload cancelled', 'AbortError'));
-    xhr.onerror = () => settle(reject, new Error('Network error during video composition'));
+    xhr.onabort = () =>
+      settle(reject, new DOMException('Upload cancelled', 'AbortError'));
+    xhr.onerror = () =>
+      settle(reject, new Error('Network error during video composition'));
     xhr.ontimeout = () => settle(reject, new Error('Upload timed out'));
 
     // Wire AbortSignal → XHR abort
@@ -304,8 +322,8 @@ export const pollCompositionJob = (jobId, onProgress) => {
       }
 
       fetch(withProjectId(`${API_BASE_URL}/process-videos/status/${jobId}`), {
-          headers: authFetchHeaders(),
-        })
+        headers: authFetchHeaders(),
+      })
         .then((r) => {
           if (!r.ok) throw new Error(`Status check failed: ${r.statusText}`);
           return r.json();
@@ -314,11 +332,15 @@ export const pollCompositionJob = (jobId, onProgress) => {
           if (onProgress && typeof progress === 'number') onProgress(progress);
 
           if (status === 'done') {
-            return fetch(withProjectId(`${API_BASE_URL}/process-videos/result/${jobId}`), {
+            return fetch(
+              withProjectId(`${API_BASE_URL}/process-videos/result/${jobId}`),
+              {
                 headers: authFetchHeaders(),
-              })
+              },
+            )
               .then((r) => {
-                if (!r.ok) throw new Error('Failed to download composition result');
+                if (!r.ok)
+                  throw new Error('Failed to download composition result');
                 return r.blob();
               })
               .then(resolve);
@@ -376,7 +398,9 @@ export const trackCompositionJob = (jobId, onProgress, signal) => {
       fn(...args);
     };
 
-    const url = withProjectId(`${API_BASE_URL}/process-videos/progress/${jobId}`);
+    const url = withProjectId(
+      `${API_BASE_URL}/process-videos/progress/${jobId}`,
+    );
 
     fetch(url, { headers: authFetchHeaders(), signal })
       .then(async (r) => {
@@ -407,7 +431,8 @@ export const trackCompositionJob = (jobId, onProgress, signal) => {
               if (onProgress && typeof pct === 'number') onProgress(pct);
               if (status === 'done') {
                 settle(
-                  (res) => downloadCompositionResult(jobId).then(res).catch(reject),
+                  (res) =>
+                    downloadCompositionResult(jobId).then(res).catch(reject),
                   resolve,
                 );
                 return; // stop reading
@@ -415,7 +440,9 @@ export const trackCompositionJob = (jobId, onProgress, signal) => {
                 settle(reject, new Error(error || 'Composition failed'));
                 return;
               }
-            } catch { /* malformed JSON — skip */ }
+            } catch {
+              /* malformed JSON — skip */
+            }
           }
         }
       })
@@ -423,11 +450,17 @@ export const trackCompositionJob = (jobId, onProgress, signal) => {
         if (settled) return;
         // Re-throw abort errors so the caller's catch/finally runs cleanly
         if (err?.name === 'AbortError' || signal?.aborted) {
-          settle(reject, new DOMException('Composition cancelled', 'AbortError'));
+          settle(
+            reject,
+            new DOMException('Composition cancelled', 'AbortError'),
+          );
           return;
         }
         // SSE failed — fall back to polling
-        console.warn('[videoServices] SSE unavailable, falling back to poll:', err.message);
+        console.warn(
+          '[videoServices] SSE unavailable, falling back to poll:',
+          err.message,
+        );
         pollCompositionJob(jobId, onProgress).then(
           (blob) => settle(resolve, blob),
           (e) => settle(reject, e),

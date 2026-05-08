@@ -82,7 +82,9 @@ function getBypassUser(userId) {
     return null;
   }
 
-  const normalizedEmail = String(user.email || '').trim().toLowerCase();
+  const normalizedEmail = String(user.email || '')
+    .trim()
+    .toLowerCase();
   if (bypassUserIds.has(user.id) || bypassEmails.has(normalizedEmail)) {
     return user;
   }
