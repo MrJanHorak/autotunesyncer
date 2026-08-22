@@ -391,7 +391,6 @@ const VideoComposer = ({
     lastModeRef.current = isPreview;
     clearComposedVideo();
 
-    console.log('Grid arrangement:', normalizedGridArrangement);
     onStartRef.current?.();
     setIsProcessing(true);
     setProcessingMode(isPreview ? 'preview' : 'full');
@@ -426,7 +425,6 @@ const VideoComposer = ({
         renderPreset,
         previewStageDimensions: getLivePreviewStageDimensions(),
       };
-      console.log('Midi data being sent:', midiPayload);
       const midiBlob = new Blob([JSON.stringify(midiPayload)], {
         type: 'application/json',
       });
@@ -460,9 +458,7 @@ const VideoComposer = ({
         }
 
         formData.append('videos', videoBlob, `${instrumentName}.mp4`);
-        console.log(
-          `Added video for ${instrumentName}, size: ${videoBlob.size}`,
-        );
+
       }
 
       // ── Async job: upload → get jobId → poll → download ──────────────────
@@ -470,7 +466,6 @@ const VideoComposer = ({
         onUploadProgress: (pct) => setUploadProgress(pct),
         signal: abort.signal,
       });
-      console.log('Composition job started:', jobId);
 
       const blob = await trackCompositionJob(
         jobId,

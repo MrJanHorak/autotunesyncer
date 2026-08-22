@@ -1,4 +1,4 @@
-# AutoTuneSyncer — Terms of Service
+# Symphovie — Terms of Service
 
 **Last updated:** [DATE]
 
@@ -8,11 +8,11 @@
 
 ## 1. Who this applies to
 
-These Terms govern your use of AutoTuneSyncer (the "Service"), operated by [YOUR NAME / BUSINESS NAME] ("we," "us"). By creating an account or using the Service, you agree to these Terms.
+These Terms govern your use of Symphovie (the "Service"), operated by [YOUR NAME / BUSINESS NAME] ("we," "us"). By creating an account or using the Service, you agree to these Terms.
 
 ## 2. The Service
 
-AutoTuneSyncer lets you upload MIDI and video files and generates synchronized, autotuned music videos from them. Your uploads and generated output are stored privately in your account dashboard and are not shared, published, or made visible to other users or the public by us. Some features may require a paid subscription (see Section 6).
+Symphovie lets you upload MIDI and video files and generates synchronized, autotuned music videos from them. Your uploads and generated output are stored privately in your account dashboard — the Service does not include a social feed, public sharing, or any feature for other users or the public to view your content. Some features may require a paid subscription (see Section 6).
 
 ## 3. Your account
 
@@ -32,7 +32,7 @@ You must provide accurate information when creating an account and are responsib
 
 **4.4 No content library.** The Service does not include, provide, or license any pre-existing copyrighted musical works, MIDI files, or video clips. All source material comes from you.
 
-**4.5 Private storage doesn't change these obligations.** Your uploads and generated output are kept private to your account and are not published or shared by us (see Section 2). This does not remove your responsibility under Section 4.2 — you must still have the rights to any content you upload, whether or not you ever share the result publicly. If you export, download, or share your generated output outside the Service, you are solely responsible for that use.
+**4.5 Private storage doesn't change these obligations.** Your uploads and generated output are kept private to your account (see Section 2). This does not remove your responsibility under Section 4.2 — you must still have the rights to any content you upload, whether or not you ever share the result outside the Service. If you export, download, or share your generated output elsewhere (including on other platforms), you are solely responsible for that use.
 
 ## 5. Acceptable use
 

@@ -112,7 +112,6 @@ const PreviewPlayer = ({
         const sampler = new Tone.Sampler({
           urls: { C4: fileUrl },
           release: 1,
-          onload: () => console.log(`Loaded sample for ${key}`),
           onerror: (err) =>
             console.error(`Failed to load sample for ${key}:`, err),
         }).connect(channel);

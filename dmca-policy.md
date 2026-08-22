@@ -1,4 +1,4 @@
-# AutoTuneSyncer — DMCA / Copyright Policy
+# Symphovie — DMCA / Copyright Policy
 
 **Last updated:** [DATE]
 
@@ -8,13 +8,13 @@
 
 ## Our policy
 
-AutoTuneSyncer respects the intellectual property rights of others and expects users of the Service to do the same. We respond to clear notices of alleged copyright infringement in accordance with the Digital Millennium Copyright Act ("DMCA").
+Symphovie respects the intellectual property rights of others and expects users of the Service to do the same. We respond to clear notices of alleged copyright infringement in accordance with the Digital Millennium Copyright Act ("DMCA").
 
-**A note on private storage:** User uploads and generated output are stored privately in each user's dashboard and are not published or shared by us. DMCA safe harbor under 17 U.S.C. §512(c) covers material "stored at the direction of a user" regardless of whether it's public — the same way private cloud storage or file-sharing services register an agent even though most stored content isn't publicly visible. We maintain this policy and a registered agent so that if a rights holder ever becomes aware of specific infringing material (for example, because a user shared their exported output elsewhere), there is a clear, statutory process to address it.
+**A note on private storage:** User uploads and generated output are stored privately in each user's dashboard. Symphovie does not include a social feed, public sharing, or any way for other users or the public to view another user's content. DMCA safe harbor under 17 U.S.C. §512(c) covers material "stored at the direction of a user" regardless of whether it's public — the same way private cloud storage services register an agent even though stored content isn't publicly visible. We maintain this policy and a registered agent so that if a rights holder ever becomes aware of specific infringing material (for example, because a user exported and shared their output on another platform), there is a clear, statutory process to address it.
 
 ## Filing a takedown notice
 
-If you believe content hosted or processed through AutoTuneSyncer infringes your copyright, send a written notice to our designated agent (below) that includes:
+If you believe content hosted or processed through Symphovie infringes your copyright, send a written notice to our designated agent (below) that includes:
 
 1. A physical or electronic signature of the copyright owner or a person authorized to act on their behalf;
 2. Identification of the copyrighted work claimed to have been infringed;

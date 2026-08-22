@@ -58,14 +58,6 @@ const VideoPlayer = ({ videoFiles, midiData }) => {
         const trackNotes = getTrackNotes(midiData, parseInt(trackIndex, 10));
         const videoBlob = videoFiles[key];
 
-        console.log('Processing track:', {
-          key,
-          instrument,
-          trackIndex,
-          noteCount: trackNotes.length,
-          hasVideoBlob: !!videoBlob
-        });
-
         if (!videoBlob || !videoRefs.current[key]) {
           console.warn(`Missing video blob or element for key: ${key}`);
           continue;

@@ -15,7 +15,6 @@ export const uploadVideo = async (videoFile) => {
 // eslint-disable-next-line no-unused-vars
 const uploadDirectVideo = async (videoFile) => {
   try {
-    console.log('Uploading video directly...', videoFile.size);
     const formData = new FormData();
     formData.append('video', videoFile);
 
@@ -42,7 +41,6 @@ const autotuneToMiddleC = async (videoFile) => {
   formData.append('video', videoFile);
 
   try {
-    console.log('Sending video for autotuning...', videoFile.size);
     const response = await fetch('http://localhost:3000/api/autotune', {
       method: 'POST',
       body: formData,
@@ -59,10 +57,6 @@ const autotuneToMiddleC = async (videoFile) => {
     }
 
     const autotunedVideoBlob = await response.blob();
-    console.log('Received autotuned video:', {
-      size: autotunedVideoBlob.size,
-      type: autotunedVideoBlob.type
-    });
     
     if (autotunedVideoBlob.size === 0) {
       throw new Error('Received empty video file');
@@ -155,12 +149,10 @@ export const handleRecord = async (setRecordedVideoURL, setAutotunedVideoURL, is
         const videoFile = new File([videoBlob], 'webcam-video.mp4', { type: 'video/mp4' });
 
         if (isAutotuneEnabled) {
-          console.log('Processing video for autotuning...');
           const autotunedVideoFile = await autotuneToMiddleC(videoFile);
           const autotunedVideoURL = URL.createObjectURL(autotunedVideoFile);
           setAutotunedVideoURL(autotunedVideoURL);
         } else {
-          console.log('Recording completed without autotuning.');
           setAutotunedVideoURL(videoURL);
         }
         resolve();

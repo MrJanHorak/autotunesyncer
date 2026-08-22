@@ -7,7 +7,7 @@ export const initializeAudioContext = async (setAudioContextStarted, setIsAudioC
     await context.resume();
     setAudioContextStarted(true);
     setIsAudioContextReady(true);
-    console.log('Audio context initialized successfully');
+    // console.log('Audio context initialized successfully');
   } catch (error) {
     console.error('Failed to initialize audio context:', error);
     setError('Failed to initialize audio context: ' + error.message);

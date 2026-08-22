@@ -44,20 +44,6 @@ const useRecordingState = (currentVideo) => {
     }
   }, []);
 
-  // const handleDataAvailable = (event) => {
-  //   if (event.data && event.data.size > 0) {
-  //     const recordedBlob = new Blob([event.data], {
-  //       type: 'video/webm;codecs=vp8,opus', // Explicit codec specification
-  //     });
-  //     console.log('Recording format:', recordedBlob.type); // Debug log
-  //     setRecordingState((prev) => ({
-  //       ...prev,
-  //       recordedBlob,
-  //       recordedURL: URL.createObjectURL(recordedBlob),
-  //     }));
-  //   }
-  // };
-
   useEffect(() => {
     return () => {
       cleanupMediaStream();
@@ -215,9 +201,7 @@ const VideoRecorder = ({
 
   const handleAutotuneToggle = useCallback(
     (e) => {
-      console.log('Toggle clicked, previous state:', isAutotuneEnabled);
       setIsAutotuneEnabled(e.target.checked);
-      console.log('New state:', e.target.checked);
     },
     [isAutotuneEnabled],
   );
@@ -396,8 +380,6 @@ const VideoRecorder = ({
         return;
       }
 
-      console.log('Recording finished, blob size:', blob.size); // Debug log
-
       setRecordingState((prev) => ({
         ...prev,
         lastVideoSource: 'recorded',
@@ -414,10 +396,6 @@ const VideoRecorder = ({
   );
 
   const stopRecording = useCallback(() => {
-    console.log(
-      'Stopping recording at duration:',
-      recordingState.recordingDuration,
-    );
 
     if (recordingTimer.current) {
       clearInterval(recordingTimer.current);
@@ -456,7 +434,7 @@ const VideoRecorder = ({
   ]);
 
   const handleFileUpload = async (event) => {
-    console.log(`Uploading for instrument: ${instrument}`); // Debug log
+
     const file = event.target.files[0];
     if (!file) return;
 

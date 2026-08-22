@@ -1,10 +1,8 @@
 /* eslint-disable react/prop-types */
 import './ToggleSwitch.css';
 const ToggleSwitch = ({ checked, onChange, onText, offText }) => {
-  console.log('ToggleSwitch render:', { checked, onText, offText });
   
   const handleChange = (e) => {
-    console.log('Toggle clicked');
     onChange?.(e);
   };
 

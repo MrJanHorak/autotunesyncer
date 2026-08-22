@@ -1,24 +1,29 @@
-# AutoTuneSyncer
+# Symphovie
 
 **A GPU-accelerated video composition tool for synchronizing MIDI-triggered autotune effects with video backgrounds.**
 
+> **Status note:** This project is feature-complete for personal/free use. Monetization is on hold pending copyright/ToS review — see [Legal](#legal) below.
+
+> **Naming note:** The product is branded **Symphovie** (a blend of "symphony" and "movie") across the live UI. The repo, npm package name, and most backend module paths still use the original working name **autotunesyncer** — that's fine as an internal/technical identifier as long as it stays consistent; it doesn't need to match the product name. This README uses "Symphovie" for the product and "AutoTuneSyncer"/`autotunesyncer` only when referring to the repo or package itself.
+
 ## Project Overview
 
-AutoTuneSyncer is a fullstack web application that enables musicians and video creators to generate music videos by synchronizing MIDI note events with autotuned audio and dynamic video backgrounds. The system processes MIDI files, applies pitch correction, and composites timestamped video segments based on note triggers—all accelerated with GPU computing for real-time performance.
+Symphovie is a fullstack web application that enables musicians and video creators to generate music videos by synchronizing MIDI note events with autotuned audio and dynamic video backgrounds. The system processes MIDI files, applies pitch correction, and composites timestamped video segments based on note triggers — accelerated with GPU computing where available.
 
 ## Core Functionality
 
 1. **MIDI Note Analysis**: Parse MIDI files to extract note events, velocities, and timing
-2. **Autotune Audio Processing**: Apply pitch correction to audio based on MIDI note data
-3. **Note-Triggered Video Composition**: Map MIDI notes to video clips and compose synchronized output
-4. **GPU-Accelerated Rendering**: Use CUDA/PyTorch for parallel video frame processing
-5. **Web-Based Interface**: React frontend with drag-and-drop MIDI/video upload and real-time preview
+2. **Autotune Audio Processing**: Apply pitch correction to audio based on MIDI note data (CREPE if installed, librosa fallback otherwise)
+3. **Note-Triggered Video Composition**: Map MIDI notes to video clips and compose synchronized output via a background job queue
+4. **GPU-Accelerated Rendering**: Use CUDA/PyTorch and NVENC where a GPU is available; falls back to CPU (`libx264`) otherwise
+5. **Accounts, Projects & Collaboration**: JWT-authenticated accounts, saved projects, and project invite links for collaborators
+6. **Web-Based Interface**: React frontend with drag-and-drop MIDI/video upload and real-time preview
 
 ## Architecture
 
 ### Frontend (React + Vite)
 
-- **Framework**: React 18.3 with Vite for fast HMR (Hot Module Replacement)
+- **Framework**: React 18.3 with Vite 5.4 for fast HMR
 - **UI Components**: Drag-and-drop interface for MIDI and video file uploads
 - **MIDI Visualization**: Real-time MIDI playback and note event display using Tone.js and @tonejs/midi
 - **Video Preview**: React Player for video playback and composition preview
@@ -26,14 +31,27 @@ AutoTuneSyncer is a fullstack web application that enables musicians and video c
 
 ### Backend (Node.js + Python Hybrid)
 
-- **Node.js Server** ([`backend/server.js`](backend/server.js)): Express.js API handling HTTP requests, CORS, and routing
-- **Python Video Processing** ([`backend/python/video_composer.py`](backend/python/video_composer.py)): GPU-accelerated video composition using PyTorch and FFmpeg
-- **API Routes**:
-  - `/api/midi` - MIDI file parsing and note extraction
-  - `/api/video` - Video upload and metadata extraction
-  - `/api/compose` - Video composition orchestration (calls Python subprocess)
-  - `/api/autotune` - Autotune processing (pitch correction)
-  - `/api/upload` - File upload handling with large payload support
+- **Node.js Server** ([`backend/server.js`](backend/server.js)): Express.js API handling HTTP requests, auth, CORS, and routing
+- **Job Queue** ([`backend/services/queueService.js`](backend/services/queueService.js)): Bull (Redis-backed) queue that runs composition jobs asynchronously and reports progress
+- **Python Video Processing** ([`backend/utils/video_processor.py`](backend/utils/video_processor.py)): GPU-accelerated video composition, invoked by the queue worker as a subprocess with `--midi-json`, `--video-files-json`, and `--output-path` arguments. This wraps [`backend/python/video_composer.py`](backend/python/video_composer.py), the core chunk-based compositor.
+- **API Routes** (mounted in [`backend/server.js`](backend/server.js)):
+  - `/api/auth` — registration, login, session (JWT)
+  - `/api/billing` — Stripe subscription status/checkout/portal
+  - `/api/projects` — saved projects, clips, collaborator invites, render status/export
+  - `/api/midi` — MIDI file parsing and note extraction
+  - `/api/video` — video upload and metadata extraction
+  - `/api/process-videos` — **the actual composition pipeline entry point** (submit job, poll `/progress/:jobId`, `/status/:jobId`, `/result/:jobId`)
+  - `/api/autotune` (+ `/api/autotune/precache`) — pitch-correction processing and precaching
+  - `/api/upload` — file upload handling with large payload support
+  - `/api/compose` — **deprecated**; every endpoint in this route now returns a deprecation response. Kept only for backward compatibility with any old clients. Use `/api/process-videos` instead.
+
+> `backend/routes/shareRoutes.js` and `backend/routes/socialRoutes.js` still exist in the codebase from an earlier social-feed feature but are **not mounted** in `server.js` and are no longer part of the product. That feature was deliberately dropped: a public feed where users could publish compositions meaningfully increases exposure to third-party copyright claims (MIDI transcriptions and video clips can both encode copyrighted material), which isn't a risk worth carrying for a free/low-revenue product. See [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for the full note, and [Legal](#legal) for how the private-dashboard-only model is reflected in the ToS/DMCA policy.
+>
+> **Recommended cleanup** (dead code implementing a dropped feature is a maintenance and confusion risk — e.g., an "AI Tool Integration Guide" reader could pattern-match against it and resurrect the feature by accident):
+> - Delete `backend/routes/shareRoutes.js`, `backend/routes/socialRoutes.js`, `backend/controllers/shareController.js`, `backend/controllers/socialController.js`
+> - Delete `src/components/Social/SocialFeed.jsx`, `CompositionDetail.jsx`, `CompositionCard.jsx`, `ShareCompositionModal.jsx`, `UserProfile.jsx`, `Notifications.jsx`
+> - **Careful:** `src/components/Social/Settings.jsx` and `src/components/Social/Social.css` are *not* part of the dropped feature — both are actively imported in `App.jsx`. Move them out of the `Social/` folder (e.g. into `src/components/` directly) before deleting the rest of the directory, and update the two import paths in `App.jsx` accordingly.
+> - Remove the `S3_BUCKET`/`SHARE_URL_EXPIRY` env vars from `.env`/`.env.example` if nothing else picks up `@aws-sdk/client-s3` usage (see the note in Technologies Stack above)
 
 ### Technologies Stack
 
@@ -44,18 +62,30 @@ AutoTuneSyncer is a fullstack web application that enables musicians and video c
 - Axios (HTTP client), React Player (video playback)
 - @dnd-kit (drag-and-drop), lucide-react (icons)
 
-**Backend:**
+**Backend (Node.js):**
 
-- **Node.js**: Express.js, CORS, midi-parser-js
-- **Python 3.8+**: PyTorch (GPU tensors), FFmpeg (video encoding), NumPy
-- **GPU Acceleration**: CUDA Toolkit 11.x, CuPy (optional for array operations)
-- **Audio Processing**: aubio (pitch detection), Tone.js (autotune synthesis)
+- Express.js, CORS, midi-parser-js
+- Bull + Redis (job queue)
+- jsonwebtoken + bcryptjs (auth)
+- Stripe (billing)
+- @aws-sdk/client-s3 — currently only used by `shareController.js` (the removed share-link feature, see note below); if that file is deleted per the recommendation below, this dependency becomes unused unless/until it's picked back up for the separate R2 storage work described in [Deployment](#deployment)
+
+**Backend (Python 3.10+):**
+
+- PyTorch 2.7 (GPU tensors, CUDA 11.8 build), torchvision, torchaudio
+- FFmpeg (via subprocess — NVENC when available, libx264 fallback)
+- librosa, soundfile, scipy (audio analysis / pitch shifting)
+- moviepy 2.1.x
+- aubio (pitch/audio analysis), pyrubberband (optional time-stretching — requires the external `rubberband` binary on `PATH`)
+- CREPE (optional, TensorFlow-based pitch detection) — **not installed by default**; code falls back to librosa-based pitch detection if it's absent. See [`backend/requirements.txt`](backend/requirements.txt) for why it's omitted by default.
+
+> **Python version requirement:** `backend/python/ffmpeg_profiles.py` uses `bool | None` type-hint syntax (PEP 604), which requires **Python 3.10+**. The `>=3.8` requirement previously stated here (and in `setup.py`) was inaccurate — a 3.8/3.9 interpreter will fail on import.
 
 ## Project Structure
 
 ```
 ├── index.html                          # Entry point for React app
-├── package.json                        # Frontend dependencies (React, Vite, Tone.js)
+├── package.json                        # Frontend dependencies + npm scripts (dev/build/test)
 ├── vite.config.js                      # Vite build configuration
 ├── config.js                           # Application configuration (API URLs, paths)
 │
@@ -65,76 +95,26 @@ AutoTuneSyncer is a fullstack web application that enables musicians and video c
 │   └── App.jsx                         # Main React application
 │
 ├── backend/
-│   ├── server.js                       # Express.js API server (port 3000)
+│   ├── server.js                       # Express.js API server
 │   ├── package.json                    # Backend Node.js dependencies
-│   ├── requirements.txt                # Python dependencies (PyTorch, numpy, etc.)
+│   ├── requirements.txt                # Python dependencies (PyTorch, moviepy, etc.)
 │   │
-│   ├── routes/                         # Express route handlers
-│   │   ├── midiRoutes.js               # MIDI parsing endpoints
-│   │   ├── videoRoutes.js              # Video upload/metadata endpoints
-│   │   ├── composition.js              # Video composition orchestration
-│   │   ├── autotuneRoutes.js           # Autotune processing endpoints
-│   │   └── uploadRoutes.js             # File upload handling
+│   ├── routes/                         # Express route handlers (see Architecture above)
+│   ├── controllers/                    # Request handlers (auth, billing, projects, sharing, ...)
+│   ├── services/                       # Business logic — job queue, billing access, caching
+│   ├── middleware/                     # Express middleware (auth, validation)
+│   ├── db/                             # Database access
 │   │
 │   ├── python/
-│   │   └── video_composer.py           # GPU-accelerated video compositor (6100 lines)
+│   │   └── video_composer.py           # Core chunk-based GPU-accelerated video compositor
 │   │
-│   ├── services/                       # Business logic layer
-│   ├── controllers/                    # Request handlers
-│   ├── middleware/                     # Express middleware (auth, validation)
-│   └── utils/                          # Shared utilities
+│   └── utils/                          # Shared Python + Node utilities (video_processor.py entrypoint,
+│                                        # ffmpeg_gpu.py, ffmpeg_profiles.py, autotune.py, r2Client.js, ...)
 │
 ├── public/                             # Static assets
-└── test_*.py, test_*.js                # Integration and unit tests
+├── docs/                               # Design notes, style guide, and archived fix/migration history
+└── test_*.py, test_*.js, test-*.ps1    # Integration and unit tests
 ```
-
-## Key Components & Data Flow
-
-### 1. MIDI Note Extraction
-
-**Files**: [`backend/routes/midiRoutes.js`](backend/routes/midiRoutes.js)
-
-- User uploads MIDI file via frontend
-- `midi-parser-js` parses binary MIDI data
-- Extract note events: `{pitch, velocity, startTime, duration}`
-- Return JSON array of note events to frontend
-
-### 2. Autotune Processing
-
-**Files**: [`backend/routes/autotuneRoutes.js`](backend/routes/autotuneRoutes.js), Tone.js in frontend
-
-- User uploads audio file
-- MIDI note data determines target pitches
-- Apply pitch correction using Tone.js or Python audio libraries
-- Return autotuned audio file
-
-### 3. Video Composition (Core Pipeline)
-
-**Files**: [`backend/python/video_composer.py`](backend/python/video_composer.py), [`backend/routes/composition.js`](backend/routes/composition.js)
-
-**Flow**:
-
-1. Frontend sends composition request with:
-   - MIDI note events
-   - Video background clips
-   - Note-to-video mapping rules
-2. Express calls Python subprocess: `python backend/python/video_composer.py <config_json>`
-3. Python loads video clips into PyTorch GPU tensors
-4. For each MIDI note event:
-   - Fetch corresponding video clip
-   - Crop/resize frame using GPU operations
-   - Composite onto background at note timestamp
-5. Encode final video with FFmpeg
-6. Return video file path to frontend
-
-### 4. GPU Acceleration
-
-**Files**: [`backend/python/video_composer.py`](backend/python/video_composer.py), [`backend/verify_cuda.py`](backend/verify_cuda.py)
-
-- Frame tensors stored on GPU: `torch.cuda.FloatTensor`
-- Parallel batch processing: 100+ frames simultaneously
-- Fallback to CPU if GPU unavailable
-- See [`GPU_FIX_SUMMARY.md`](GPU_FIX_SUMMARY.md) for optimization history
 
 ## Installation
 
@@ -142,14 +122,15 @@ AutoTuneSyncer is a fullstack web application that enables musicians and video c
 
 **Required:**
 
-- **Python 3.8+** (for video processing backend)
-- **Node.js 16+** (for Express API and Vite frontend)
-- **FFmpeg** (for video encoding/decoding)
+- **Python 3.10+** (3.11 recommended — see version note above)
+- **Node.js 18+** (project uses ESM `"type": "module"` throughout)
+- **FFmpeg**, available on `PATH`
+- **Redis** (for the Bull job queue — local install or a hosted instance)
 
 **Optional (Highly Recommended):**
 
-- **CUDA Toolkit 11.x** (for GPU acceleration - 10-50x speedup)
-- **NVIDIA GPU** with compute capability 3.5+
+- **NVIDIA GPU** with a CUDA 11.8-compatible driver, for GPU-accelerated encoding (NVENC) and PyTorch tensor ops
+- The external **`rubberband`** CLI binary on `PATH`, if you want `pyrubberband`'s time-stretching rather than the librosa fallback
 
 ### System Dependencies
 
@@ -157,16 +138,17 @@ AutoTuneSyncer is a fullstack web application that enables musicians and video c
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y ffmpeg python3-dev python3-pip nodejs npm
+sudo apt-get install -y ffmpeg redis-server python3-dev python3-pip nodejs npm
 ```
 
 **Windows:**
 
-- Install [Python](https://www.python.org/downloads/) (3.8+)
-- Install [Node.js](https://nodejs.org/) (16+)
+- Install [Python](https://www.python.org/downloads/) 3.10+
+- Install [Node.js](https://nodejs.org/) 18+
 - Install [FFmpeg](https://ffmpeg.org/download.html) and add to PATH
+- Install [Redis](https://github.com/microsoftarchive/redis/releases) or run it via WSL/Docker
 - Install [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-- (Optional) Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
+- (Optional) Install a CUDA 11.8-compatible [NVIDIA driver](https://www.nvidia.com/drivers/)
 
 ### Project Setup
 
@@ -191,392 +173,153 @@ npm install
 cd ..
 ```
 
-4. **Install Python Dependencies:**
+4. **Set up a Python virtual environment and install dependencies:**
 
 ```bash
 cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\Activate.ps1   macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 cd ..
 ```
 
-5. **Verify GPU Setup (Optional but Recommended):**
+`requirements.txt` includes a PyTorch CUDA 11.8 wheel index. If your GPU/driver needs a different CUDA build, get the matching install command from [pytorch.org](https://pytorch.org/get-started/locally/) before running the install above.
+
+5. **Verify GPU setup (optional but recommended):**
 
 ```bash
 cd backend
-python verify_cuda.py
-# Should print: "CUDA Available: True" and GPU details
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
 cd ..
 ```
 
 ### Environment Configuration
 
-**Backend Memory Settings:**
-For processing large videos (>100MB), configure Node.js memory limits:
-
-```bash
-# Linux/macOS
-export NODE_OPTIONS="--max-old-space-size=8192"
-
-# Windows PowerShell
-$env:NODE_OPTIONS="--max-old-space-size=8192"
-```
-
-**Optional Environment Variables:**
-Create a `.env` file in the project root:
-
-```bash
-# Video processing
-VIDEO_TEMP_DIR=./backend/temp
-VIDEO_OUTPUT_DIR=./backend/processed_videos
-MAX_VIDEO_SIZE_MB=500
-
-# GPU settings
-CUDA_VISIBLE_DEVICES=0
-PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-
-# API configuration
-BACKEND_PORT=3000
-FRONTEND_PORT=5173
-```
+Copy [`.env.example`](.env.example) to `.env` in the project root and fill in the values for your environment. See that file for the full list of required and optional variables (Redis connection, JWT secret, Stripe keys, S3/R2 storage, etc.).
 
 ## Running the Application
 
-### Quick Start (Local Development)
+### Development
 
-From the project root, start the backend and frontend in separate terminals.
+You'll need Redis running locally (or reachable via your `.env` config) before starting the backend, since the job queue depends on it.
 
-1. **Terminal 1 - Backend (Node + Python environment):**
-
-**Windows (PowerShell):**
-
-```powershell
-Set-Location backend
-if (Test-Path .venv\Scripts\Activate.ps1) { .\.venv\Scripts\Activate.ps1 }
-npm install
-pip install -r requirements.txt
-npm start
-```
-
-**macOS/Linux:**
-
-```bash
-cd backend
-if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi
-npm install
-pip install -r requirements.txt
-npm start
-```
-
-2. **Terminal 2 - Frontend (Vite):**
-
-```bash
-npm install
-npm run dev
-```
-
-3. **Open the app:**
-
-- Frontend: `http://localhost:5173`
-- Backend API: `http://localhost:3000`
-
-4. **Optional validation:**
-
-```bash
-npm run test:quick
-```
-
-### Development Mode (Recommended)
-
-**Terminal 1 - Backend API Server:**
+**Terminal 1 — Backend:**
 
 ```bash
 cd backend
 npm start
-# Express server runs on http://localhost:3000
+# Express server starts; port is configured via .env (see .env.example)
 ```
 
-**Terminal 2 - Frontend Dev Server:**
+**Terminal 2 — Frontend:**
 
 ```bash
 npm run dev
-# Vite dev server runs on http://localhost:5173
-# Open browser to http://localhost:5173
+# Vite dev server on http://localhost:5173
 ```
 
-### Production Mode
-
-**Build Frontend:**
+### Production Build
 
 ```bash
-npm run build
-# Generates optimized build in dist/
+npm run build     # generates dist/
+npm run preview   # serve the production build locally
 ```
 
-**Serve Production Build:**
+For actual production deployment (not just a local production build), see [Deployment](#deployment) below.
 
-```bash
-npm run preview
-```
+## Composition Pipeline — How It Actually Works
 
-## API Endpoints
+1. Frontend submits a job to `POST /api/process-videos` with MIDI note data and video clip references.
+2. The request is enqueued via Bull (`backend/services/queueService.js`), backed by Redis.
+3. The queue worker spawns `backend/utils/video_processor.py` as a subprocess, passing MIDI/video data via temp JSON files (`--midi-json`, `--video-files-json`) and an output path.
+4. `video_processor.py` drives `backend/python/video_composer.py`, which composites video chunks per note event — using GPU tensor ops and NVENC where available, falling back to CPU/libx264 otherwise.
+5. The client polls `GET /api/process-videos/progress/:jobId` (or `/status/:jobId`) for progress, then fetches the result via `/result/:jobId`.
 
-Base URL: `http://localhost:3000/api`
-
-### MIDI Endpoints
-
-**POST `/api/midi/parse`**
-Parse MIDI file and extract note events.
-
-**Request:**
-
-```javascript
-// FormData with MIDI file
-const formData = new FormData();
-formData.append('midiFile', file);
-```
-
-**Response:**
-
-```json
-{
-  "notes": [
-    { "pitch": 60, "velocity": 80, "startTime": 0.0, "duration": 0.5 },
-    { "pitch": 64, "velocity": 75, "startTime": 0.5, "duration": 0.5 }
-  ],
-  "tempo": 120,
-  "duration": 30.5
-}
-```
-
-### Video Endpoints
-
-**POST `/api/video/upload`**
-Upload video file and extract metadata.
-
-**Response:**
-
-```json
-{
-  "filename": "background.mp4",
-  "duration": 15.3,
-  "width": 1920,
-  "height": 1080,
-  "fps": 30
-}
-```
-
-### Composition Endpoints
-
-**POST `/api/compose/generate`**
-Generate composed video from MIDI and video clips.
-
-**Request:**
-
-```json
-{
-  "midiData": {
-    /* parsed MIDI notes */
-  },
-  "videoClips": [
-    { "noteRange": [60, 64], "clipPath": "background1.mp4" },
-    { "noteRange": [65, 72], "clipPath": "background2.mp4" }
-  ],
-  "outputFilename": "final_composition.mp4"
-}
-```
-
-**Response:**
-
-```json
-{
-  "status": "success",
-  "outputPath": "backend/processed_videos/final_composition.mp4",
-  "duration": 45.2,
-  "processTime": 12.5
-}
-```
+The legacy `/api/compose/*` endpoints are deprecated stubs kept only for backward compatibility — don't build new features against them.
 
 ## Testing
 
-### Quick Validation
-
 ```bash
-npm run test:quick
-# Runs: test-quick.ps1 - Basic API connectivity tests
+npm run test:regressions   # python -m unittest -v test_video_composer_regressions
+npm run test:components    # python test_components.py — validates GPU setup, processing utils, autotune, composer
+npm run test:quick         # test-quick.ps1 — basic API connectivity (Windows/PowerShell)
+npm run test:dev           # test-dev.ps1
+npm run test:e2e           # test-e2e.ps1 — full pipeline validation
+npm run test:production    # test-production.ps1
 ```
 
-### Component Tests
+The PowerShell-based test scripts (`test:quick`, `test:dev`, `test:e2e`, `test:production`) require `pwsh` and are Windows-oriented; the Python-based ones (`test:regressions`, `test:components`) run anywhere.
 
-```bash
-npm run test:components
-# Runs: test_components.py - Tests Python video compositor
-```
+## Deployment
 
-### End-to-End Tests
+This project currently runs as a monolith: the Node API and the Python worker share one host, since `queueService.js` spawns the Python process locally rather than dispatching it to a separate worker. For a low-traffic/free-tier deployment, the recommended path is a single scale-to-zero container (e.g. Modal or RunPod Serverless) running both Node and Python together, with:
 
-```bash
-npm run test:e2e
-# Runs: test-e2e.ps1 - Full pipeline validation
-```
+- **Frontend** on Vercel
+- **Redis** via a serverless provider (e.g. Upstash) rather than an always-on instance
+- **File storage** on Cloudflare R2 (S3-compatible — see `backend/utils/r2Client.js`)
 
-### Manual Testing Files
+A fully decoupled architecture (separate always-on API + scale-to-zero GPU worker function) is a follow-up step once there's real usage data — see `modal_app.py` at the repo root for a starting point on the GPU-worker side.
 
-- **[`test_note_triggered_integration.py`](test_note_triggered_integration.py)**: Tests MIDI note-to-video mapping
-- **[`test_video_composition.py`](test_video_composition.py)**: Tests video compositor output quality
-- **[`test_gpu_fix.py`](test_gpu_fix.py)**: Validates GPU acceleration
-- **[`test_complete_pipeline_final.py`](test_complete_pipeline_final.py)**: End-to-end integration test
+## Legal
 
-## Common Development Tasks
+- [Terms of Service](docs/legal/terms-of-service.md)
+- [DMCA / Copyright Policy](docs/legal/dmca-policy.md)
 
-### Adding a New MIDI Processing Feature
-
-1. **Backend**: Add route handler in [`backend/routes/midiRoutes.js`](backend/routes/midiRoutes.js)
-2. **Frontend**: Create React component in [`src/components/`](src/components/)
-3. **Integration**: Update API calls in frontend using Axios
-4. **Test**: Add test case in `test_*.py` or `test_*.js` files
-
-### Modifying Video Composition Logic
-
-1. **Core Logic**: Edit [`backend/python/video_composer.py`](backend/python/video_composer.py)
-   - Frame processing: Line ~500-1500 (GPU tensor operations)
-   - Video encoding: Line ~2000-2500 (FFmpeg integration)
-2. **API Interface**: Update [`backend/routes/composition.js`](backend/routes/composition.js) if API contract changes
-3. **Test**: Run [`test_video_composition.py`](test_video_composition.py) to verify output
-
-### Optimizing GPU Performance
-
-1. **Check GPU Utilization**: Run [`backend/verify_cuda.py`](backend/verify_cuda.py)
-2. **Profile Code**: See [`backend/python/video_composer.py`](backend/python/video_composer.py) - cProfile integration enabled
-3. **Batch Size Tuning**: Adjust `BATCH_SIZE` constant in video_composer.py
-4. **Memory Management**: See [`GPU_FIX_SUMMARY.md`](GPU_FIX_SUMMARY.md) for common issues
-
-### Adding a New Video Effect
-
-1. Create effect function in [`backend/python/video_composer.py`](backend/python/video_composer.py):
-
-```python
-def apply_custom_effect(frame_tensor):
-    # frame_tensor: torch.cuda.FloatTensor [H, W, 3]
-    # Apply GPU-accelerated transformation
-    return transformed_tensor
-```
-
-2. Register effect in composition pipeline (line ~3000)
-3. Add frontend UI control in [`src/components/`](src/components/)
+User-uploaded content (MIDI and video) is stored privately per-account — there is no social feed or public-sharing feature (see the note on removed features above and [`docs/CHANGELOG.md`](docs/CHANGELOG.md)). See the linked policies for what this does and doesn't mean for copyright responsibility — this project does not currently have a `LICENSE` file for its own source code, which should be added before any public release (see [Contributing](#contributing)).
 
 ## Troubleshooting
 
 ### GPU Not Detected
 
-**Symptoms**: Slow video processing (>1 minute for 30-second video)
-
-**Solutions**:
-
 ```bash
-# Verify CUDA installation
 nvidia-smi
-
-# Check PyTorch GPU availability
 python -c "import torch; print(torch.cuda.is_available())"
-
-# Run full diagnostic
-cd backend
-python verify_cuda.py
 ```
 
-**Expected Output**:
-
-```
-CUDA Available: True
-GPU Device: NVIDIA GeForce RTX 3080
-GPU Memory: 10GB
-```
+If `torch.cuda.is_available()` is `False` on a machine with an NVIDIA GPU, check that the installed torch build's CUDA version is compatible with your driver (see the CUDA 11.8 note in Installation above), and that the GPU driver itself is installed.
 
 ### FFmpeg Encoding Errors
 
-**Symptoms**: Video composition fails with "FFmpeg error" or "Codec not found"
-
-**Solutions**:
-
 ```bash
-# Verify FFmpeg installation
 ffmpeg -version
-
-# Test video encoding
 ffmpeg -i input.mp4 -c:v libx264 -preset fast output.mp4
-
-# Windows: Ensure FFmpeg in PATH
-# Add C:\ffmpeg\bin to System Environment Variables
 ```
 
-### Memory Errors (OOM - Out of Memory)
+Windows: ensure FFmpeg's `bin` folder is on your System PATH.
 
-**Symptoms**: "RuntimeError: CUDA out of memory" or Node.js heap limit errors
+### Memory Errors (OOM)
 
-**Solutions**:
-
-**For GPU Memory**:
+**GPU memory:** lower the memory-limit setting passed into `EnhancedVideoProcessor` (see `backend/utils/video_processor.py` for where this is configured), and clear the CUDA cache between runs:
 
 ```bash
-# Reduce batch size in video_composer.py
-# Edit line ~50: BATCH_SIZE = 50  # Reduce from 100
-
-# Clear GPU cache
 python -c "import torch; torch.cuda.empty_cache()"
 ```
 
-**For Node.js Heap**:
+**Node.js heap:** increase the memory limit before starting the server:
 
 ```bash
-# Increase Node.js memory (before starting server)
 node --max-old-space-size=8192 backend/server.js
 ```
 
+### Redis Connection Errors
+
+**Symptoms:** job queue never processes, or errors referencing `ioredis`/Bull on startup.
+
+**Solutions:** confirm Redis is running and reachable at the host/port/password/db configured in `.env` (see `.env.example`); `backend/services/cacheService.js` and `backend/services/queueService.js` both read `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`.
+
 ### CORS Errors in Browser Console
 
-**Symptoms**: "Access-Control-Allow-Origin" errors when making API calls
-
-**Solutions**:
-
-1. Check [`backend/server.js`](backend/server.js) CORS configuration (line ~15-25)
-2. Verify frontend URL matches CORS origin: `http://localhost:5173`
-3. If using different port, update `origin` in CORS config
+Check the CORS/allowed-origins configuration in `backend/server.js` and confirm `ALLOWED_ORIGINS`/`FRONTEND_URL` in `.env` matches the URL you're actually loading the frontend from.
 
 ### MIDI File Not Parsing
 
-**Symptoms**: "Invalid MIDI file" or empty note array
+1. Confirm the file is a Standard MIDI File, not a proprietary/DAW-specific format.
+2. Test with a simple, known-good MIDI file first.
+3. Check logs from `backend/routes/midiRoutes.js` for the specific parse error.
 
-**Solutions**:
+## Project History
 
-1. Verify MIDI file format (should be Standard MIDI File, not proprietary format)
-2. Test with simple MIDI file first
-3. Check [`backend/routes/midiRoutes.js`](backend/routes/midiRoutes.js) error logs
-4. Use MIDI validator: `python -c "import midi; midi.read_midifile('test.mid')"`
-
-## Migration & Fix History
-
-This project has undergone several major refactoring and optimization phases:
-
-- **[`MIGRATION_COMPLETE_FINAL.md`](MIGRATION_COMPLETE_FINAL.md)**: Chunk-based video processing migration
-- **[`GPU_FIX_SUMMARY.md`](GPU_FIX_SUMMARY.md)**: GPU acceleration optimizations and bug fixes
-- **[`VIDEO_COMPOSITION_FIX_COMPLETE.md`](VIDEO_COMPOSITION_FIX_COMPLETE.md)**: Video compositor stability improvements
-- **[`FIXES_COMPLETE_SUMMARY.md`](FIXES_COMPLETE_SUMMARY.md)**: Comprehensive bug fix changelog
-- **[`NOTE_TRIGGERED_INTEGRATION_COMPLETE.md`](NOTE_TRIGGERED_INTEGRATION_COMPLETE.md)**: MIDI note-to-video mapping implementation
-
-These documents provide context for architectural decisions and can help AI tools understand the evolution of the codebase.
-
-## Performance Benchmarks
-
-**Hardware**: NVIDIA RTX 3080 (10GB), Intel i7-11700K, 32GB RAM
-
-| Task                  | Input                           | GPU Time | CPU Time | Speedup        |
-| --------------------- | ------------------------------- | -------- | -------- | -------------- |
-| 30s video composition | 3 MIDI notes, 1080p backgrounds | 2.5s     | 45s      | 18x            |
-| 60s video composition | 10 MIDI notes, 4K backgrounds   | 8.2s     | 180s     | 22x            |
-| MIDI parsing          | 500-note file                   | 0.1s     | 0.1s     | 1x (I/O bound) |
-| Autotune processing   | 30s audio                       | 1.2s     | 3.5s     | 2.9x           |
-
-**Note**: Performance scales linearly with GPU VRAM. Larger videos may require batch size adjustment.
+This project has gone through several rounds of architectural refactoring (chunk-based video processing migration, GPU acceleration fixes, note-triggered composition rework, and the removal of the social/sharing feature). See [`docs/CHANGELOG.md`](docs/CHANGELOG.md) for a consolidated, deduplicated history — it replaces what used to be nine overlapping status-report files under `docs/archive/`. If you're looking for *why* something is built the way it is, check there; if you're looking for *how it currently works*, this file and the code are the source of truth.
 
 ## Contributing
 
@@ -590,9 +333,7 @@ Contributions are welcome! Please see [`CONTRIBUTING.md`](CONTRIBUTING.md) for g
 - Performance optimizations
 - Cross-platform compatibility
 
-## License
-
-This project is licensed under the MIT License - see LICENSE file for details.
+**Note:** this repository does not currently include a `LICENSE` file. Until one is added, the default legal position is that all rights are reserved — worth resolving before accepting external contributions or a public launch.
 
 ## Acknowledgements
 
@@ -618,44 +359,36 @@ This project is licensed under the MIT License - see LICENSE file for details.
 ### Key Concepts
 
 - **MIDI Notes → Video Mapping**: Each MIDI note event triggers a video clip at a specific timestamp
-- **GPU Acceleration**: Critical for real-time performance; all frame operations use PyTorch CUDA tensors
-- **Hybrid Architecture**: Node.js handles HTTP/routing, Python handles heavy GPU computation
-- **Large File Handling**: Videos can be 100MB+, requiring special memory management
+- **Async job queue**: Composition jobs run through Bull/Redis, not a synchronous request — always check `queueService.js` before assuming a request/response is instantaneous
+- **GPU Acceleration**: PyTorch CUDA tensors + NVENC where available; both have CPU/libx264 fallbacks — don't assume GPU is present
+- **Hybrid Architecture**: Node.js handles HTTP/routing/auth/billing/queueing; Python (invoked as a subprocess) handles GPU/video computation
+- **Large File Handling**: Videos can be 100MB+, requiring streaming/large-payload handling in upload routes
 
 ### Common Modification Patterns
 
 **When asked to modify video processing:**
 
-- **File**: [`backend/python/video_composer.py`](backend/python/video_composer.py)
-- **Pattern**: Always use PyTorch GPU tensors (`torch.cuda.FloatTensor`)
-- **Memory**: Call `torch.cuda.empty_cache()` after large operations
-- **Testing**: Run [`test_video_composition.py`](test_video_composition.py)
+- **Files**: [`backend/python/video_composer.py`](backend/python/video_composer.py) (core compositor), [`backend/utils/video_processor.py`](backend/utils/video_processor.py) (subprocess entrypoint/CLI args)
+- **Pattern**: GPU tensor ops use `torch.cuda`; encoding goes through `backend/python/ffmpeg_profiles.py` for consistent quality settings across call sites
+- **Testing**: `npm run test:regressions` and `npm run test:components`
 
 **When asked to modify MIDI handling:**
 
 - **File**: [`backend/routes/midiRoutes.js`](backend/routes/midiRoutes.js)
-- **Pattern**: Use `midi-parser-js` library for parsing
-- **Data Format**: Return `{notes: [{pitch, velocity, startTime, duration}]}`
-- **Testing**: Test with sample MIDI files in `temp_test_data/`
+- **Pattern**: Uses `midi-parser-js` for parsing
 
-**When asked to modify API:**
+**When asked to modify the composition API:**
 
-- **File**: [`backend/server.js`](backend/server.js) + route files
-- **Pattern**: Always set high payload limits (`limit: '1000mb'`)
-- **CORS**: Update allowed origins if frontend URL changes
-- **Testing**: Use [`test_api_endpoint.js`](test_api_endpoint.js)
+- **File**: [`backend/routes/processVideos.js`](backend/routes/processVideos.js) — this is the live endpoint, **not** `backend/routes/composition.js` (deprecated stub)
+- **Pattern**: Job submission + polling (`/progress/:jobId`, `/status/:jobId`, `/result/:jobId`), not a single synchronous call
+
+**When asked to modify auth/billing/projects:**
+
+- **Files**: `backend/routes/authRoutes.js`, `backend/routes/billingRoutes.js`, `backend/routes/projectRoutes.js` + matching `controllers/`
+- **Pattern**: JWT auth via `authenticateToken` middleware; Stripe client is created lazily and returns `null` if `STRIPE_SECRET_KEY` isn't set (billing routes no-op in that case)
 
 **When asked to modify UI:**
 
 - **Files**: [`src/`](src/) React components
-- **Pattern**: Use Axios for API calls, handle large file uploads
-- **State**: Use React hooks for component state
+- **Pattern**: Axios for API calls, React hooks for state
 - **Testing**: Manual testing via `npm run dev`
-
-### Codebase Navigation Shortcuts
-
-- **Video encoding logic**: [`backend/python/video_composer.py`](backend/python/video_composer.py) lines 2000-2500
-- **GPU frame processing**: [`backend/python/video_composer.py`](backend/python/video_composer.py) lines 500-1500
-- **MIDI note extraction**: [`backend/routes/midiRoutes.js`](backend/routes/midiRoutes.js) lines 10-100
-- **API routing**: [`backend/server.js`](backend/server.js) lines 30-45
-- **Frontend entry**: [`src/App.jsx`](src/App.jsx) (main React component)

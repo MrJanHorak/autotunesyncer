@@ -948,7 +948,7 @@ function MainApp({ onChangeProject, onOpenSettings, onLogout }) {
     fetch(url, { method: 'POST', headers, body: formData })
       .then((r) => {
         if (!r.ok) throw new Error(`precache HTTP ${r.status}`);
-        console.log(`[precache] Queued ${instrumentKey} (${notes.size} notes)`);
+        // console.log(`[precache] Queued ${instrumentKey} (${notes.size} notes)`);
       })
       .catch((err) => console.warn(`[precache] ${instrumentKey} failed:`, err));
   }, []);
@@ -1038,13 +1038,6 @@ function MainApp({ onChangeProject, onOpenSettings, onLogout }) {
       }
       // toInstrumentKey already reads instrument.group for drums — no mutation needed
       const key = toInstrumentKey(instrument);
-
-      console.log(
-        'Recording complete for instrument:',
-        key,
-        'blob size:',
-        blob.size,
-      );
 
       setVideoFiles((prev) => ({ ...prev, [key]: blob }));
       clipBlobCache.current[key] = blob;

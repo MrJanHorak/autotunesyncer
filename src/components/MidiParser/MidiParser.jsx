@@ -27,7 +27,6 @@ const MidiParser = ({ file, onParsed, onError }) => {
   }), []);
 
   const calculateDuration = useCallback((midi) => {
-    console.log('calculating duration...');
     let maxEndTime = 0;
   
     midi.tracks.forEach((track) => {
@@ -45,7 +44,6 @@ const MidiParser = ({ file, onParsed, onError }) => {
     const secondsPerBeat = 60 / tempo;
     const duration = (maxEndTime / ppq) * secondsPerBeat;
     
-    console.log(`Max ticks: ${maxEndTime}, PPQ: ${ppq}, Tempo: ${tempo}`);
     return duration;
   }, []);
 

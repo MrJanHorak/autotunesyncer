@@ -92,7 +92,6 @@ const initMidiWorkerPool = () => {
         midiWorkerPool.push(worker);
       }
       
-      console.log(`Initialized MIDI worker pool with ${WORKER_POOL_SIZE} workers`);
     } catch (error) {
       console.warn('Web Worker pool initialization failed:', error);
     }
@@ -214,7 +213,6 @@ const processMidiInternal = async (file) => {
     ]);
     
     const processingTime = performance.now() - startTime;
-    console.log(`MIDI processed in ${processingTime.toFixed(2)}ms`);
     
     // Update performance metrics
     performanceMetrics.totalProcessed++;
@@ -247,7 +245,6 @@ export const processMidiFile = async (file) => {
       const now = Date.now();
       
       if (now - metadata.timestamp < CACHE_TTL) {
-        console.log('MIDI cache hit');
         metadata.lastAccessed = now;
         metadata.accessCount++;
         performanceMetrics.cacheHits++;
@@ -259,7 +256,6 @@ export const processMidiFile = async (file) => {
       }
     }
     
-    console.log('MIDI cache miss, processing...');
     performanceMetrics.cacheMisses++;
     
     // Try Web Worker first for large files
@@ -291,7 +287,6 @@ export const processMidiFile = async (file) => {
     cleanupCache();
     
     const totalTime = performance.now() - startTime;
-    console.log(`Total MIDI processing time: ${totalTime.toFixed(2)}ms`);
     
     return result;
     
@@ -318,7 +313,6 @@ export const processMidiFilesBatch = async (files) => {
     }
     
     const totalTime = performance.now() - startTime;
-    console.log(`Batch processed ${files.length} MIDI files in ${totalTime.toFixed(2)}ms`);
     
     return results.map(result => 
       result.status === 'fulfilled' ? result.value : { error: result.reason }
@@ -341,7 +335,7 @@ export const preloadMidiFiles = async (files) => {
   
   // Process in background without blocking
   Promise.all(lowPriorityPromises).then(results => {
-    console.log('MIDI preloading completed:', results);
+    // console.log('MIDI preloading completed:', results);
   });
 };
 
@@ -349,7 +343,7 @@ export const preloadMidiFiles = async (files) => {
 export const clearMidiCache = () => {
   midiCache.clear();
   cacheMetadata.clear();
-  console.log('MIDI cache cleared');
+  // console.log('MIDI cache cleared');
 };
 
 export const getCacheStats = () => {
@@ -404,7 +398,7 @@ export const preloadMidiData = async (files) => {
     );
     
     await Promise.all(promises);
-    console.log(\`Preloaded \${files.length} MIDI files\`);
+    // console.log(\`Preloaded \${files.length} MIDI files\`);
   } catch (error) {
     console.error('MIDI preload error:', error);
   }

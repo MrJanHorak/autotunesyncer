@@ -46,15 +46,10 @@ const SampleSoundButton = ({
     });
 
     if (matchingTrack && matchingTrack.instrument) {
-      console.log(
-        `[Instrument ${typeof instrument === 'object' ? instrument.name : instrument}] Matched via name, program: ${matchingTrack.instrument.number}`,
-      );
+
       return matchingTrack.instrument.number;
     }
 
-    console.warn(
-      `[Instrument ${typeof instrument === 'object' ? instrument.name : instrument}] No MIDI program match found`,
-    );
     return null;
   }, [midiData, instrument]);
 
@@ -62,9 +57,6 @@ const SampleSoundButton = ({
   const getDrumMidiNote = useCallback(() => {
     const isPercussion = typeof instrument === 'object' && instrument.isDrum;
     if (!midiData || !midiData.tracks || !isPercussion) {
-      console.log(
-        '[getDrumMidiNote] Not a percussion instrument or no MIDI data',
-      );
       return null;
     }
 
@@ -73,21 +65,12 @@ const SampleSoundButton = ({
     const drumGroup =
       instObj.isDrum && instObj.group ? instObj.group.toLowerCase() : 'kick';
 
-    console.log(
-      `[getDrumMidiNote] Drum group: "${drumGroup}", instrument:`,
-      instrument,
-    );
-
     // Find the drum track
     const drumTrack = midiData.tracks.find((track) => track.channel === 9);
     if (!drumTrack || !drumTrack.notes || drumTrack.notes.length === 0) {
       console.warn('[getDrumMidiNote] No drum track found on channel 9');
       return null;
     }
-
-    console.log(
-      `[getDrumMidiNote] Found drum track with ${drumTrack.notes.length} notes`,
-    );
 
     // Map drum groups to MIDI note ranges - handle name variations
     const drumNoteRanges = {
@@ -172,17 +155,12 @@ const SampleSoundButton = ({
       return 38; // Default to snare
     }
 
-    console.log(`[getDrumMidiNote] Looking for notes in range:`, noteRange);
-
     // Find a note in the track that matches this drum group's MIDI note range
     const matchingNote = drumTrack.notes.find((note) =>
       noteRange.includes(note.midi),
     );
 
     const resultNote = matchingNote ? matchingNote.midi : noteRange[0];
-    console.log(
-      `[getDrumMidiNote] Returning MIDI note ${resultNote} for drum group "${drumGroup}"`,
-    );
 
     return resultNote;
   }, [midiData, instrument]);
@@ -273,8 +251,6 @@ const SampleSoundButton = ({
       return;
     }
 
-    console.log(`[playDrumSound] Playing GM drum note ${midiNote}`);
-
     try {
       if (CONFIG.drums?.useSf2) {
         // Prefer SF2 (Arachno) playback for realistic kit pieces
@@ -292,14 +268,8 @@ const SampleSoundButton = ({
             soundfont: 'FluidR3_GM',
           },
         );
-        console.log(
-          '[playDrumSound] Loaded drum kit synth_drum from FluidR3_GM',
-        );
       }
 
-      console.log(
-        `[playDrumSound] Playing MIDI note ${midiNote} on loaded drum kit`,
-      );
       drumSoundfontRef.current.play(midiNote, Tone.context.currentTime, {
         duration: 1.5,
         gain: 1.0,
@@ -320,7 +290,6 @@ const SampleSoundButton = ({
               soundfont: 'FluidR3_GM',
             },
           );
-          console.log('[playDrumSound] Fallback loaded synth_drum');
         }
         drumSoundfontRef.current.play(midiNote, Tone.context.currentTime, {
           duration: 1.5,
@@ -461,17 +430,11 @@ const SampleSoundButton = ({
           ? instrumentInput.name
           : instrumentInput;
 
-      console.log(
-        `[createSynth] Loading soundfont for "${instName}", program: ${midiProgram}, channel: ${typeof instrumentInput === 'object' ? instrumentInput.number : 'unknown'}`,
-      );
 
       // Use soundfont if we have a valid MIDI program number
       if (midiProgram !== null && midiProgram !== undefined) {
         try {
           const soundfontName = getSoundfontInstrument(midiProgram);
-          console.log(
-            `[createSynth] Loading soundfont instrument: ${soundfontName}`,
-          );
 
           const audioContext = Tone.context.rawContext;
           // Use FluidR3_GM for better compatibility (includes percussion instrument)
@@ -483,7 +446,6 @@ const SampleSoundButton = ({
             },
           );
 
-          console.log(`[createSynth] Soundfont loaded for ${soundfontName}`);
           return instrument;
         } catch (error) {
           console.warn(
@@ -494,7 +456,6 @@ const SampleSoundButton = ({
       }
 
       // Fallback to Tone.js synthesis if soundfont fails
-      console.log(`[createSynth] Using fallback synthesis`);
       let envelope = { attack: 0.1, decay: 0.2, sustain: 0.3, release: 0.5 };
       let oscillatorType = 'sine';
       let filter = null;
@@ -621,9 +582,6 @@ const SampleSoundButton = ({
     const isDrumChannel =
       typeof instrument === 'object' && instrument.number === 9;
 
-    console.log(
-      `[playSampleSound] Playing for ${instName}, isDrum: ${isPercussion}, isDrumChannel: ${isDrumChannel}`,
-    );
 
     if (isPlayingSample) return;
 
@@ -638,7 +596,7 @@ const SampleSoundButton = ({
       // If on drum channel OR marked as drum, play drum sound only
       if (isPercussion || isDrumChannel) {
         // Play drum sound (synchronous now)
-        console.log(`[playSampleSound] Playing drum sound`);
+
         playDrumSound();
         setTimeout(() => setIsPlayingSample(false), 1500);
       } else {
@@ -655,14 +613,11 @@ const SampleSoundButton = ({
           synthRef.current = null;
         }
 
-        console.log(`[playSampleSound] Creating melodic synth`);
         synthRef.current = await createSynth(instrument);
 
         // Detect key from MIDI or use default
         const keyNote = detectKeyFromMidi();
         const note = getNoteFromKey(keyNote);
-
-        console.log(`[playSampleSound] Playing note: ${note}`);
 
         // Check if it's a soundfont instrument (has .play method) or Tone.js synth
         if (
@@ -688,9 +643,6 @@ const SampleSoundButton = ({
           const octave = parseInt(note.slice(-1));
           const midiNote = noteToMidi[noteName] + (octave + 1) * 12;
 
-          console.log(
-            `[playSampleSound] Playing soundfont note ${note} (MIDI ${midiNote})`,
-          );
           synthRef.current.play(midiNote, Tone.context.currentTime, {
             duration: 1.5,
             gain: 1.0,

@@ -46,7 +46,7 @@ async function main() {
     const srcExists = await exists(src);
     if (!srcExists) continue;
     await copyFile(src, dst);
-    console.log(`[prepare:sf2] Copied ${f} -> ${dst}`);
+    // console.log(`[prepare:sf2] Copied ${f} -> ${dst}`);
   }
   // Copy dist main in case needed by loader
   for (const f of ['js-synthesizer.js']) {
@@ -55,10 +55,10 @@ async function main() {
     const srcExists = await exists(src);
     if (!srcExists) continue;
     await copyFile(src, dst);
-    console.log(`[prepare:sf2] Copied ${f} -> ${dst}`);
+    // console.log(`[prepare:sf2] Copied ${f} -> ${dst}`);
   }
 
-  console.log('[prepare:sf2] Done.');
+  // console.log('[prepare:sf2] Done.');
 }
 
 main().catch((e) => {
