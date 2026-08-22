@@ -73,3 +73,13 @@ __pycache__/
 *_backup.py
 *_corrupted_backup.py
 *_problematic_backup.py
+# Environment variables — never commit real secrets
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# SQLite database — contains real user data (password hashes, Stripe customer IDs)
+backend/db/*.db
+backend/db/*.db-wal
+backend/db/*.db-shm
